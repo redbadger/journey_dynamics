@@ -38,14 +38,18 @@ impl Aggregate for Journey {
                 }
             }
             JourneyCommand::Modify => {
-                if JourneyState::Complete == self.state {
+                if self.id == Uuid::default() {
+                    Err(JourneyError::NotFound)
+                } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
                     Ok(vec![JourneyEvent::Modified])
                 }
             }
             JourneyCommand::Complete => {
-                if JourneyState::Complete == self.state {
+                if self.id == Uuid::default() {
+                    Err(JourneyError::NotFound)
+                } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
                     Ok(vec![JourneyEvent::Completed])
@@ -55,7 +59,6 @@ impl Aggregate for Journey {
     }
 
     fn apply(&mut self, event: Self::Event) {
-        #[allow(clippy::single_match)]
         match event {
             JourneyEvent::Started { id } => {
                 self.id = id;
@@ -126,11 +129,11 @@ impl JourneyServices {
 
 #[cfg(test)]
 mod tests {
-    use crate::SimpleLoggingQuery;
-
-    use super::*;
     use cqrs_es::{AggregateError, CqrsFramework, EventStore, mem_store::MemStore};
     use uuid::Uuid;
+
+    use super::*;
+    use crate::SimpleLoggingQuery;
 
     #[tokio::test]
     async fn happy_path() {
@@ -155,6 +158,7 @@ mod tests {
             .await
             .unwrap();
 
+        // this here to show how to list events in the store
         let events = event_store.load_events(&id.to_string()).await.unwrap();
         println!("{events:#?}");
     }
@@ -163,7 +167,7 @@ mod tests {
     async fn open_already_opened() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
 
         let id = Uuid::new_v4();
 
@@ -184,10 +188,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn complete_not_started() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+
+        let id = Uuid::new_v4();
+
+        // try to complete the Journey
+        let result = cqrs
+            .execute(&id.to_string(), JourneyCommand::Complete)
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AggregateError::UserError(JourneyError::NotFound))
+        ));
+    }
+
+    #[tokio::test]
     async fn complete_already_completed() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
 
         let id = Uuid::new_v4();
 
@@ -213,10 +236,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn modify_not_started() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+
+        let id = Uuid::new_v4();
+
+        // try to modify the Journey before starting
+        let result = cqrs.execute(&id.to_string(), JourneyCommand::Modify).await;
+
+        assert!(matches!(
+            result,
+            Err(AggregateError::UserError(JourneyError::NotFound))
+        ));
+    }
+
+    #[tokio::test]
     async fn modify_already_completed() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
 
         let id = Uuid::new_v4();
 
