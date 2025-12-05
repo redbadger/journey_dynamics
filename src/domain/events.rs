@@ -5,17 +5,9 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum JourneyEvent {
-    Started {
-        id: Uuid,
-    },
-    Modified {
-        form_data: Option<Value>,
-    },
-    WorkflowEvaluated {
-        available_actions: Vec<String>,
-        recommended_action: Option<String>,
-        constraints: Vec<String>,
-    },
+    Started { id: Uuid },
+    Modified { form_data: Option<Value> },
+    WorkflowEvaluated { available_actions: Vec<String> },
     Completed,
 }
 

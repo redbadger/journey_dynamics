@@ -5,8 +5,6 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
     Start { id: Uuid },
-    Modify,
-    FormSubmitted { data: Value },
-    UpdateWorkflowRequirements,
+    Capture { data: Value },
     Complete,
 }

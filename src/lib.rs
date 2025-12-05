@@ -1,5 +1,4 @@
 pub mod domain;
-pub mod queries;
 pub mod services;
 
 use async_trait::async_trait;

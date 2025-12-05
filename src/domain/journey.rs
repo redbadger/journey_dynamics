@@ -18,8 +18,6 @@ pub struct Journey {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDecisionState {
     pub available_actions: Vec<String>,
-    pub recommended_action: Option<String>,
-    pub constraints: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -56,42 +54,25 @@ impl Aggregate for Journey {
                     Ok(vec![JourneyEvent::Started { id }])
                 }
             }
-            JourneyCommand::Modify => {
+            JourneyCommand::Capture { data } => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    Ok(vec![JourneyEvent::Modified { form_data: None }])
-                }
-            }
-            JourneyCommand::FormSubmitted { data } => {
-                if self.id == Uuid::default() {
-                    Err(JourneyError::NotFound)
-                } else if JourneyState::Complete == self.state {
-                    Err(JourneyError::AlreadyCompleted)
-                } else {
-                    Ok(vec![JourneyEvent::Modified {
-                        form_data: Some(data),
-                    }])
-                }
-            }
-            JourneyCommand::UpdateWorkflowRequirements => {
-                if self.id == Uuid::default() {
-                    Err(JourneyError::NotFound)
-                } else {
-                    // Call decision engine with current aggregate state
                     let decision = _services
                         .decision_engine()
                         .evaluate_next_steps(self)
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
-
-                    Ok(vec![JourneyEvent::WorkflowEvaluated {
-                        available_actions: decision.available_actions,
-                        recommended_action: decision.recommended_action,
-                        constraints: decision.constraints,
-                    }])
+                    Ok(vec![
+                        JourneyEvent::Modified {
+                            form_data: Some(data),
+                        },
+                        JourneyEvent::WorkflowEvaluated {
+                            available_actions: decision.available_actions,
+                        },
+                    ])
                 }
             }
             JourneyCommand::Complete => {
@@ -117,16 +98,8 @@ impl Aggregate for Journey {
                     self.data_capture.push((Uuid::new_v4().to_string(), data));
                 }
             }
-            JourneyEvent::WorkflowEvaluated {
-                available_actions,
-                recommended_action,
-                constraints,
-            } => {
-                self.latest_workflow_decision = Some(WorkflowDecisionState {
-                    available_actions,
-                    recommended_action,
-                    constraints,
-                });
+            JourneyEvent::WorkflowEvaluated { available_actions } => {
+                self.latest_workflow_decision = Some(WorkflowDecisionState { available_actions });
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
@@ -158,6 +131,7 @@ impl JourneyServices {
         Self { decision_engine }
     }
 
+    #[must_use]
     pub fn decision_engine(
         &self,
     ) -> &std::sync::Arc<dyn crate::services::decision_engine::DecisionEngine> {
@@ -166,18 +140,22 @@ impl JourneyServices {
 }
 
 impl Journey {
+    #[must_use]
     pub fn id(&self) -> Uuid {
         self.id
     }
 
+    #[must_use]
     pub fn state(&self) -> &JourneyState {
         &self.state
     }
 
+    #[must_use]
     pub fn data_capture(&self) -> &[(String, Value)] {
         &self.data_capture
     }
 
+    #[must_use]
     pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
     }
@@ -192,7 +170,6 @@ mod tests {
 
     use super::*;
     use crate::SimpleLoggingQuery;
-    use crate::queries::workflow_saga::WorkflowEvaluationSaga;
     use crate::services::decision_engine::SimpleDecisionEngine;
 
     #[tokio::test]
@@ -211,7 +188,7 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Modify)
+        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
             .await
             .unwrap();
 
@@ -241,7 +218,7 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Modify)
+        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
             .await
             .unwrap();
 
@@ -252,7 +229,7 @@ mod tests {
 
         cqrs.execute(
             &id.to_string(),
-            JourneyCommand::FormSubmitted { data: form_value },
+            JourneyCommand::Capture { data: form_value },
         )
         .await
         .unwrap();
@@ -356,7 +333,9 @@ mod tests {
         let id = Uuid::new_v4();
 
         // try to modify the Journey before starting
-        let result = cqrs.execute(&id.to_string(), JourneyCommand::Modify).await;
+        let result = cqrs
+            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .await;
 
         assert!(matches!(
             result,
@@ -385,7 +364,9 @@ mod tests {
             .unwrap();
 
         // try to modify the Journey after completion
-        let result = cqrs.execute(&id.to_string(), JourneyCommand::Modify).await;
+        let result = cqrs
+            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .await;
 
         assert!(matches!(
             result,
@@ -406,24 +387,10 @@ mod tests {
             vec![Box::new(query)],
             services,
         ));
-
-        // Add WorkflowEvaluationSaga that automatically triggers workflow evaluation
-        let workflow_saga = WorkflowEvaluationSaga::new(cqrs.clone());
-
-        // Create new framework with both queries
-        let decision_engine2 = Arc::new(SimpleDecisionEngine);
-        let services2 = JourneyServices::new(decision_engine2);
-        let cqrs_with_saga = CqrsFramework::new(
-            event_store.clone(),
-            vec![Box::new(SimpleLoggingQuery {}), Box::new(workflow_saga)],
-            services2,
-        );
-
         let id = Uuid::new_v4();
 
         // Start a Journey - should trigger workflow evaluation
-        cqrs_with_saga
-            .execute(&id.to_string(), JourneyCommand::Start { id })
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
             .await
             .unwrap();
 
@@ -434,17 +401,15 @@ mod tests {
             "name": "Alice"
         });
 
-        cqrs_with_saga
-            .execute(
-                &id.to_string(),
-                JourneyCommand::FormSubmitted { data: form_value },
-            )
-            .await
-            .unwrap();
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture { data: form_value },
+        )
+        .await
+        .unwrap();
 
         // Complete the Journey - should trigger workflow evaluation
-        cqrs_with_saga
-            .execute(&id.to_string(), JourneyCommand::Complete)
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
             .await
             .unwrap();
 
@@ -457,29 +422,19 @@ mod tests {
 
         // Expected event pattern:
         // 1. Started
-        // 2. WorkflowEvaluated (triggered by Started)
-        // 3. Modified (form submission)
-        // 4. WorkflowEvaluated (triggered by Modified)
-        // 5. Completed
-        // 6. WorkflowEvaluated (triggered by Completed)
+        // 2. Modified (form submission)
+        // 3. WorkflowEvaluated (triggered by Modified)
+        // 4. Completed
 
-        assert!(events.len() >= 6, "Should have at least 6 events");
+        assert!(events.len() == 4, "Should have 4 events");
 
         // Verify WorkflowEvaluated events are interleaved
         assert!(matches!(events[0].payload, JourneyEvent::Started { .. }));
+        assert!(matches!(events[1].payload, JourneyEvent::Modified { .. }));
         assert!(matches!(
-            events[1].payload,
+            events[2].payload,
             JourneyEvent::WorkflowEvaluated { .. }
         ));
-        assert!(matches!(events[2].payload, JourneyEvent::Modified { .. }));
-        assert!(matches!(
-            events[3].payload,
-            JourneyEvent::WorkflowEvaluated { .. }
-        ));
-        assert!(matches!(events[4].payload, JourneyEvent::Completed));
-        assert!(matches!(
-            events[5].payload,
-            JourneyEvent::WorkflowEvaluated { .. }
-        ));
+        assert!(matches!(events[3].payload, JourneyEvent::Completed));
     }
 }
