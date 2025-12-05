@@ -1,7 +1,7 @@
 use crate::domain::commands::JourneyCommand;
 use crate::domain::events::JourneyEvent;
 use async_trait::async_trait;
-use cqrs_es::{Aggregate, DomainEvent};
+use cqrs_es::Aggregate;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -87,10 +87,10 @@ impl Aggregate for Journey {
                 self.state = JourneyState::InProgress;
             }
             JourneyEvent::Modified { form_data } => {
-                if form_data.is_some() {
+                if let Some(data) = form_data {
                     self.data_capture
-                        .push((Uuid::new_v4().to_string(), form_data.unwrap()))
-                };
+                        .push((Uuid::new_v4().to_string(), data))
+                }
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
@@ -120,7 +120,7 @@ impl JourneyServices {
 
 #[cfg(test)]
 mod tests {
-    use cqrs_es::{AggregateError, CqrsFramework, EventStore, mem_store::MemStore};
+    use cqrs_es::{mem_store::MemStore, AggregateError, CqrsFramework, EventStore};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -182,8 +182,8 @@ mod tests {
             &id.to_string(),
             JourneyCommand::FormSubmitted { data: form_value },
         )
-        .await
-        .unwrap();
+            .await
+            .unwrap();
 
         // complete the Journey
         cqrs.execute(&id.to_string(), JourneyCommand::Complete)
