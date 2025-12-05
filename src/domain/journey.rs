@@ -1,6 +1,9 @@
+use crate::domain::commands::JourneyCommand;
+use crate::domain::events::JourneyEvent;
 use async_trait::async_trait;
 use cqrs_es::{Aggregate, DomainEvent};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -8,6 +11,14 @@ use uuid::Uuid;
 pub struct Journey {
     id: Uuid,
     state: JourneyState,
+    data_capture: Vec<(String, Value)>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+pub enum JourneyState {
+    #[default]
+    InProgress,
+    Complete,
 }
 
 #[async_trait]
@@ -43,7 +54,18 @@ impl Aggregate for Journey {
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    Ok(vec![JourneyEvent::Modified])
+                    Ok(vec![JourneyEvent::Modified { form_data: None }])
+                }
+            }
+            JourneyCommand::FormSubmitted { data } => {
+                if self.id == Uuid::default() {
+                    Err(JourneyError::NotFound)
+                } else if JourneyState::Complete == self.state {
+                    Err(JourneyError::AlreadyCompleted)
+                } else {
+                    Ok(vec![JourneyEvent::Modified {
+                        form_data: Some(data),
+                    }])
                 }
             }
             JourneyCommand::Complete => {
@@ -64,47 +86,16 @@ impl Aggregate for Journey {
                 self.id = id;
                 self.state = JourneyState::InProgress;
             }
-            JourneyEvent::Modified => {}
+            JourneyEvent::Modified { form_data } => {
+                if form_data.is_some() {
+                    self.data_capture
+                        .push((Uuid::new_v4().to_string(), form_data.unwrap()))
+                };
+            }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
             }
         }
-    }
-}
-
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
-pub enum JourneyState {
-    #[default]
-    InProgress,
-    Complete,
-}
-
-#[derive(Debug, Deserialize)]
-pub enum JourneyCommand {
-    Start { id: Uuid },
-    Modify,
-    Complete,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub enum JourneyEvent {
-    Started { id: Uuid },
-    Modified,
-    Completed,
-}
-
-impl DomainEvent for JourneyEvent {
-    fn event_type(&self) -> String {
-        let event_type: &str = match self {
-            JourneyEvent::Started { .. } => "JourneyOpened",
-            JourneyEvent::Modified => "JourneyModified",
-            JourneyEvent::Completed => "JourneyClosed",
-        };
-        event_type.to_string()
-    }
-
-    fn event_version(&self) -> String {
-        "1.0".to_string()
     }
 }
 
@@ -130,6 +121,7 @@ impl JourneyServices {
 #[cfg(test)]
 mod tests {
     use cqrs_es::{AggregateError, CqrsFramework, EventStore, mem_store::MemStore};
+    use serde_json::json;
     use uuid::Uuid;
 
     use super::*;
@@ -152,6 +144,46 @@ mod tests {
         cqrs.execute(&id.to_string(), JourneyCommand::Modify)
             .await
             .unwrap();
+
+        // complete the Journey
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // this here to show how to list events in the store
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("{events:#?}");
+    }
+
+    #[tokio::test]
+    async fn happy_path_form() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+
+        let id = Uuid::new_v4();
+
+        // start a Journey
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        // modify the Journey
+        cqrs.execute(&id.to_string(), JourneyCommand::Modify)
+            .await
+            .unwrap();
+
+        let form_value: serde_json::Value = json!({
+                "alpha": 42,
+                    "beta": "hello"
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::FormSubmitted { data: form_value },
+        )
+        .await
+        .unwrap();
 
         // complete the Journey
         cqrs.execute(&id.to_string(), JourneyCommand::Complete)
