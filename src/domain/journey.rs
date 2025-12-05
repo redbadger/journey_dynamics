@@ -88,8 +88,7 @@ impl Aggregate for Journey {
             }
             JourneyEvent::Modified { form_data } => {
                 if let Some(data) = form_data {
-                    self.data_capture
-                        .push((Uuid::new_v4().to_string(), data))
+                    self.data_capture.push((Uuid::new_v4().to_string(), data))
                 }
             }
             JourneyEvent::Completed => {
@@ -120,7 +119,7 @@ impl JourneyServices {
 
 #[cfg(test)]
 mod tests {
-    use cqrs_es::{mem_store::MemStore, AggregateError, CqrsFramework, EventStore};
+    use cqrs_es::{AggregateError, CqrsFramework, EventStore, mem_store::MemStore};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -182,8 +181,8 @@ mod tests {
             &id.to_string(),
             JourneyCommand::FormSubmitted { data: form_value },
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
 
         // complete the Journey
         cqrs.execute(&id.to_string(), JourneyCommand::Complete)
