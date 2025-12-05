@@ -1,3 +1,3 @@
-mod commands;
-mod events;
+pub mod commands;
+pub mod events;
 pub mod journey;

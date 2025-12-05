@@ -7,5 +7,6 @@ pub enum JourneyCommand {
     Start { id: Uuid },
     Modify,
     FormSubmitted { data: Value },
+    UpdateWorkflowRequirements,
     Complete,
 }
