@@ -88,7 +88,7 @@ impl Aggregate for Journey {
             }
             JourneyEvent::Modified { form_data } => {
                 if let Some(data) = form_data {
-                    self.data_capture.push((Uuid::new_v4().to_string(), data))
+                    self.data_capture.push((Uuid::new_v4().to_string(), data));
                 }
             }
             JourneyEvent::Completed => {
