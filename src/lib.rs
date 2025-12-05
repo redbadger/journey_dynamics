@@ -1,4 +1,5 @@
 pub mod domain;
+pub mod services;
 
 use async_trait::async_trait;
 use cqrs_es::{Aggregate, EventEnvelope, Query};

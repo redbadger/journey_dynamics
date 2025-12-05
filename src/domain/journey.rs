@@ -12,6 +12,12 @@ pub struct Journey {
     id: Uuid,
     state: JourneyState,
     data_capture: Vec<(String, Value)>,
+    latest_workflow_decision: Option<WorkflowDecisionState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkflowDecisionState {
+    pub available_actions: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -48,24 +54,25 @@ impl Aggregate for Journey {
                     Ok(vec![JourneyEvent::Started { id }])
                 }
             }
-            JourneyCommand::Modify => {
+            JourneyCommand::Capture { data } => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    Ok(vec![JourneyEvent::Modified { form_data: None }])
-                }
-            }
-            JourneyCommand::FormSubmitted { data } => {
-                if self.id == Uuid::default() {
-                    Err(JourneyError::NotFound)
-                } else if JourneyState::Complete == self.state {
-                    Err(JourneyError::AlreadyCompleted)
-                } else {
-                    Ok(vec![JourneyEvent::Modified {
-                        form_data: Some(data),
-                    }])
+                    let decision = _services
+                        .decision_engine()
+                        .evaluate_next_steps(self)
+                        .await
+                        .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
+                    Ok(vec![
+                        JourneyEvent::Modified {
+                            form_data: Some(data),
+                        },
+                        JourneyEvent::WorkflowEvaluated {
+                            available_actions: decision.available_actions,
+                        },
+                    ])
                 }
             }
             JourneyCommand::Complete => {
@@ -91,6 +98,9 @@ impl Aggregate for Journey {
                     self.data_capture.push((Uuid::new_v4().to_string(), data));
                 }
             }
+            JourneyEvent::WorkflowEvaluated { available_actions } => {
+                self.latest_workflow_decision = Some(WorkflowDecisionState { available_actions });
+            }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
             }
@@ -98,7 +108,7 @@ impl Aggregate for Journey {
     }
 }
 
-#[derive(Error, Debug, PartialEq, Eq)]
+#[derive(Error, Debug, PartialEq)]
 pub enum JourneyError {
     #[error("Journey not found")]
     NotFound,
@@ -106,14 +116,48 @@ pub enum JourneyError {
     AlreadyStarted,
     #[error("Journey already closed")]
     AlreadyCompleted,
+    #[error("Decision engine error: {0}")]
+    DecisionEngineError(String),
 }
 
-pub struct JourneyServices;
+pub struct JourneyServices {
+    decision_engine: std::sync::Arc<dyn crate::services::decision_engine::DecisionEngine>,
+}
 
 impl JourneyServices {
-    #[allow(dead_code, clippy::unused_async)]
-    async fn do_something(&self) -> Result<(), JourneyError> {
-        Ok(())
+    pub fn new(
+        decision_engine: std::sync::Arc<dyn crate::services::decision_engine::DecisionEngine>,
+    ) -> Self {
+        Self { decision_engine }
+    }
+
+    #[must_use]
+    pub fn decision_engine(
+        &self,
+    ) -> &std::sync::Arc<dyn crate::services::decision_engine::DecisionEngine> {
+        &self.decision_engine
+    }
+}
+
+impl Journey {
+    #[must_use]
+    pub fn id(&self) -> Uuid {
+        self.id
+    }
+
+    #[must_use]
+    pub fn state(&self) -> &JourneyState {
+        &self.state
+    }
+
+    #[must_use]
+    pub fn data_capture(&self) -> &[(String, Value)] {
+        &self.data_capture
+    }
+
+    #[must_use]
+    pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
+        self.latest_workflow_decision.as_ref()
     }
 }
 
@@ -121,16 +165,20 @@ impl JourneyServices {
 mod tests {
     use cqrs_es::{AggregateError, CqrsFramework, EventStore, mem_store::MemStore};
     use serde_json::json;
+    use std::sync::Arc;
     use uuid::Uuid;
 
     use super::*;
     use crate::SimpleLoggingQuery;
+    use crate::services::decision_engine::SimpleDecisionEngine;
 
     #[tokio::test]
     async fn happy_path() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -140,7 +188,7 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Modify)
+        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
             .await
             .unwrap();
 
@@ -158,7 +206,9 @@ mod tests {
     async fn happy_path_form() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -168,7 +218,7 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Modify)
+        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
             .await
             .unwrap();
 
@@ -179,7 +229,7 @@ mod tests {
 
         cqrs.execute(
             &id.to_string(),
-            JourneyCommand::FormSubmitted { data: form_value },
+            JourneyCommand::Capture { data: form_value },
         )
         .await
         .unwrap();
@@ -198,7 +248,9 @@ mod tests {
     async fn open_already_opened() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -222,7 +274,9 @@ mod tests {
     async fn complete_not_started() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -241,7 +295,9 @@ mod tests {
     async fn complete_already_completed() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -270,12 +326,16 @@ mod tests {
     async fn modify_not_started() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
         // try to modify the Journey before starting
-        let result = cqrs.execute(&id.to_string(), JourneyCommand::Modify).await;
+        let result = cqrs
+            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .await;
 
         assert!(matches!(
             result,
@@ -287,7 +347,9 @@ mod tests {
     async fn modify_already_completed() {
         let event_store = MemStore::<Journey>::default();
         let query = SimpleLoggingQuery {};
-        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], JourneyServices);
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let cqrs = CqrsFramework::new(event_store, vec![Box::new(query)], services);
 
         let id = Uuid::new_v4();
 
@@ -302,11 +364,77 @@ mod tests {
             .unwrap();
 
         // try to modify the Journey after completion
-        let result = cqrs.execute(&id.to_string(), JourneyCommand::Modify).await;
+        let result = cqrs
+            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .await;
 
         assert!(matches!(
             result,
             Err(AggregateError::UserError(JourneyError::AlreadyCompleted))
         ));
+    }
+
+    #[tokio::test]
+    async fn automatic_workflow_evaluation_after_every_event() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework first
+        let cqrs = Arc::new(CqrsFramework::new(
+            event_store.clone(),
+            vec![Box::new(query)],
+            services,
+        ));
+        let id = Uuid::new_v4();
+
+        // Start a Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        // Submit a form - should trigger workflow evaluation
+        let form_value = json!({
+            "step": "personal_info",
+            "email": "user@example.com",
+            "name": "Alice"
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture { data: form_value },
+        )
+        .await
+        .unwrap();
+
+        // Complete the Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // Verify events in the store
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+        for event in &events {
+            println!("{}-{}: {:?}", id, event.sequence, event.payload);
+        }
+
+        // Expected event pattern:
+        // 1. Started
+        // 2. Modified (form submission)
+        // 3. WorkflowEvaluated (triggered by Modified)
+        // 4. Completed
+
+        assert!(events.len() == 4, "Should have 4 events");
+
+        // Verify WorkflowEvaluated events are interleaved
+        assert!(matches!(events[0].payload, JourneyEvent::Started { .. }));
+        assert!(matches!(events[1].payload, JourneyEvent::Modified { .. }));
+        assert!(matches!(
+            events[2].payload,
+            JourneyEvent::WorkflowEvaluated { .. }
+        ));
+        assert!(matches!(events[3].payload, JourneyEvent::Completed));
     }
 }

@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub enum JourneyEvent {
     Started { id: Uuid },
     Modified { form_data: Option<Value> },
+    WorkflowEvaluated { available_actions: Vec<String> },
     Completed,
 }
 
@@ -15,6 +16,7 @@ impl DomainEvent for JourneyEvent {
         let event_type: &str = match self {
             JourneyEvent::Started { .. } => "JourneyOpened",
             JourneyEvent::Modified { .. } => "JourneyModified",
+            JourneyEvent::WorkflowEvaluated { .. } => "WorkflowEvaluated",
             JourneyEvent::Completed => "JourneyClosed",
         };
         event_type.to_string()
