@@ -1,6 +1,9 @@
 use crate::domain::journey::{Journey, JourneyState};
 use async_trait::async_trait;
 use serde_json::Value;
+use tokio::runtime::Handle;
+use zen_engine::DecisionEngine as ZenEngine;
+use zen_engine::model::DecisionContent;
 
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
@@ -55,5 +58,81 @@ impl DecisionEngine for SimpleDecisionEngine {
         };
 
         Ok(WorkflowDecision { available_actions })
+    }
+}
+
+/// Simple rule-based decision engine implementation
+pub struct GoRulesDecisionEngine {
+    pub decision_content: DecisionContent,
+}
+
+impl GoRulesDecisionEngine {
+    pub fn new() -> Self {
+        let decision_content: DecisionContent =
+            serde_json::from_str(include_str!("jdm_graph.json")).unwrap();
+        GoRulesDecisionEngine { decision_content }
+    }
+}
+
+#[async_trait]
+impl DecisionEngine for GoRulesDecisionEngine {
+    async fn evaluate_next_steps(
+        &self,
+        journey: &Journey,
+        new_data: &(String, Value),
+    ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
+        let mut combined_data = journey.data_capture().to_vec();
+        let _state = journey.state();
+
+        combined_data.push(new_data.to_owned());
+
+        let something = serde_json::to_value(&combined_data).unwrap();
+
+        // Create a new Decision for each evaluation
+        // Use spawn_blocking to move CPU-intensive decision evaluation off the async runtime
+        let decision_content = self.decision_content.clone();
+        let _result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+            let engine = ZenEngine::default();
+            let decision = engine.create_decision(decision_content.into());
+            let response = Handle::current()
+                .block_on(decision.evaluate(something.into()))
+                .map_err(|e| e.to_string())?;
+
+            // Convert response to JSON to make it Send-safe
+            serde_json::to_value(response).map_err(|e| e.to_string())
+        })
+        .await
+        .unwrap()
+        .map_err(|e| {
+            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+                as Box<dyn std::error::Error + Send + Sync>
+        })?;
+
+        // let available_actions = match state {
+        //     JourneyState::InProgress => {
+        //         // Check if any form has "first_name" key
+        //         let has_first_name = combined_data.iter().any(|(_, data)| {
+        //             data.as_object()
+        //                 .and_then(|obj| obj.get("first_name"))
+        //                 .is_some()
+        //         });
+
+        //         if has_first_name {
+        //             vec!["form_3".to_string()]
+        //         } else if combined_data
+        //             .iter()
+        //             .any(|(section, _)| section.contains("section_2"))
+        //         {
+        //             vec!["form_4".to_string()]
+        //         } else {
+        //             vec![]
+        //         }
+        //     }
+        //     JourneyState::Complete => vec![],
+        // };
+
+        Ok(WorkflowDecision {
+            available_actions: vec![],
+        })
     }
 }
