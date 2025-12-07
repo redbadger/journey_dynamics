@@ -62,9 +62,10 @@ impl Aggregate for Journey {
                 } else {
                     let decision = _services
                         .decision_engine()
-                        .evaluate_next_steps(self)
+                        .evaluate_next_steps(self, &data)
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
+
                     Ok(vec![
                         JourneyEvent::Modified {
                             form_data: Some(data),
@@ -95,7 +96,7 @@ impl Aggregate for Journey {
             }
             JourneyEvent::Modified { form_data } => {
                 if let Some(data) = form_data {
-                    self.data_capture.push((Uuid::new_v4().to_string(), data));
+                    self.data_capture.push(data);
                 }
             }
             JourneyEvent::WorkflowEvaluated { available_actions } => {
@@ -188,9 +189,14 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
-            .await
-            .unwrap();
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("form_data".to_string(), json!({})),
+            },
+        )
+        .await
+        .unwrap();
 
         // complete the Journey
         cqrs.execute(&id.to_string(), JourneyCommand::Complete)
@@ -218,9 +224,14 @@ mod tests {
             .unwrap();
 
         // modify the Journey
-        cqrs.execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
-            .await
-            .unwrap();
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("form_data".to_string(), json!({})),
+            },
+        )
+        .await
+        .unwrap();
 
         let form_value: serde_json::Value = json!({
                 "alpha": 42,
@@ -229,7 +240,9 @@ mod tests {
 
         cqrs.execute(
             &id.to_string(),
-            JourneyCommand::Capture { data: form_value },
+            JourneyCommand::Capture {
+                data: ("alpha".to_string(), form_value),
+            },
         )
         .await
         .unwrap();
@@ -334,7 +347,12 @@ mod tests {
 
         // try to modify the Journey before starting
         let result = cqrs
-            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .execute(
+                &id.to_string(),
+                JourneyCommand::Capture {
+                    data: ("form_data".to_string(), json!({})),
+                },
+            )
             .await;
 
         assert!(matches!(
@@ -365,7 +383,12 @@ mod tests {
 
         // try to modify the Journey after completion
         let result = cqrs
-            .execute(&id.to_string(), JourneyCommand::Capture { data: json!({}) })
+            .execute(
+                &id.to_string(),
+                JourneyCommand::Capture {
+                    data: ("form_data".to_string(), json!({})),
+                },
+            )
             .await;
 
         assert!(matches!(
@@ -403,7 +426,9 @@ mod tests {
 
         cqrs.execute(
             &id.to_string(),
-            JourneyCommand::Capture { data: form_value },
+            JourneyCommand::Capture {
+                data: ("step".to_string(), form_value),
+            },
         )
         .await
         .unwrap();
@@ -435,6 +460,66 @@ mod tests {
             events[2].payload,
             JourneyEvent::WorkflowEvaluated { .. }
         ));
+        assert_eq!(
+            events[2].payload,
+            JourneyEvent::WorkflowEvaluated {
+                available_actions: vec![]
+            }
+        );
         assert!(matches!(events[3].payload, JourneyEvent::Completed));
+    }
+
+    #[tokio::test]
+    async fn automatic_workflow_evaluation_for_specific_data() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework first
+        let cqrs = Arc::new(CqrsFramework::new(
+            event_store.clone(),
+            vec![Box::new(query)],
+            services,
+        ));
+        let id = Uuid::new_v4();
+
+        // Start a Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        // Submit a form - should trigger workflow evaluation
+        let form_value = json!({
+            "step": "personal_info",
+            "email": "user@example.com",
+            "first_name": "Alice"
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("step_1".to_string(), form_value),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Complete the Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // Verify events in the store
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+
+        assert!(events.len() == 4, "Should have 4 events");
+        assert_eq!(
+            events[2].payload,
+            JourneyEvent::WorkflowEvaluated {
+                available_actions: vec!["form_3".to_string()]
+            }
+        );
     }
 }

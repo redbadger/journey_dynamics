@@ -5,6 +5,6 @@ use uuid::Uuid;
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
     Start { id: Uuid },
-    Capture { data: Value },
+    Capture { data: (String, Value) },
     Complete,
 }
