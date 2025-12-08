@@ -1,9 +1,9 @@
 use crate::domain::journey::{Journey, JourneyState};
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use tokio::runtime::Handle;
-use zen_engine::DecisionEngine as ZenEngine;
 use zen_engine::model::DecisionContent;
+use zen_engine::{DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions};
 
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
@@ -86,19 +86,28 @@ impl DecisionEngine for GoRulesDecisionEngine {
 
         combined_data.push(new_data.to_owned());
 
-        let something = serde_json::to_value(&combined_data).unwrap();
+        let map: Map<String, Value> = combined_data.into_iter().collect();
+        let something = serde_json::to_value(&map).unwrap();
+
+        println!("Something {:?}", something);
 
         // Create a new Decision for each evaluation
         // Use spawn_blocking to move CPU-intensive decision evaluation off the async runtime
         let decision_content = self.decision_content.clone();
-        let _result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
+        let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
             let engine = ZenEngine::default();
             let decision = engine.create_decision(decision_content.into());
             let response = Handle::current()
-                .block_on(decision.evaluate(something.into()))
+                .block_on(decision.evaluate_with_opts(
+                    something.into(),
+                    EvaluationOptions {
+                        trace: true,
+                        ..Default::default()
+                    },
+                ))
                 .map_err(|e| e.to_string())?;
 
-            // Convert response to JSON to make it Send-safe
+            println!("response {:#?}", response);
             serde_json::to_value(response).map_err(|e| e.to_string())
         })
         .await
@@ -108,31 +117,19 @@ impl DecisionEngine for GoRulesDecisionEngine {
                 as Box<dyn std::error::Error + Send + Sync>
         })?;
 
-        // let available_actions = match state {
-        //     JourneyState::InProgress => {
-        //         // Check if any form has "first_name" key
-        //         let has_first_name = combined_data.iter().any(|(_, data)| {
-        //             data.as_object()
-        //                 .and_then(|obj| obj.get("first_name"))
-        //                 .is_some()
-        //         });
+        let DecisionGraphResponse { result, .. } = serde_json::from_value(result)?;
+        let unwrapped_map = result.as_object().unwrap();
+        let take = unwrapped_map.take();
+        let test = take.get("output").ok_or("No available actions")?;
 
-        //         if has_first_name {
-        //             vec!["form_3".to_string()]
-        //         } else if combined_data
-        //             .iter()
-        //             .any(|(section, _)| section.contains("section_2"))
-        //         {
-        //             vec!["form_4".to_string()]
-        //         } else {
-        //             vec![]
-        //         }
-        //     }
-        //     JourneyState::Complete => vec![],
-        // };
+        let available_actions: Vec<String> = test
+            .as_array()
+            .ok_or("No available actions")?
+            .take()
+            .into_iter()
+            .map(|item| item.as_str().unwrap().to_string())
+            .collect();
 
-        Ok(WorkflowDecision {
-            available_actions: vec![],
-        })
+        Ok(WorkflowDecision { available_actions })
     }
 }

@@ -171,7 +171,7 @@ mod tests {
 
     use super::*;
     use crate::SimpleLoggingQuery;
-    use crate::services::decision_engine::SimpleDecisionEngine;
+    use crate::services::decision_engine::{GoRulesDecisionEngine, SimpleDecisionEngine};
 
     #[tokio::test]
     async fn happy_path() {
@@ -500,6 +500,113 @@ mod tests {
             &id.to_string(),
             JourneyCommand::Capture {
                 data: ("step_1".to_string(), form_value),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Complete the Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // Verify events in the store
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+
+        assert!(events.len() == 4, "Should have 4 events");
+        assert_eq!(
+            events[2].payload,
+            JourneyEvent::WorkflowEvaluated {
+                available_actions: vec!["form_3".to_string()]
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn use_go_rules_workflow_evaluation_gia() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(GoRulesDecisionEngine::new());
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework first
+        let cqrs = Arc::new(CqrsFramework::new(
+            event_store.clone(),
+            vec![Box::new(query)],
+            services,
+        ));
+        let id = Uuid::new_v4();
+
+        // Start a Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        // Submit a form - should trigger workflow evaluation
+        let form_value = json!({
+            "step": "personal_info",
+            "country": "UK",
+            "name": "Alice",
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("personal_info".to_string(), form_value),
+            },
+        )
+        .await
+        .unwrap();
+
+        // Complete the Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // Verify events in the store
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+
+        assert!(events.len() == 4, "Should have 4 events");
+        assert_eq!(
+            events[2].payload,
+            JourneyEvent::WorkflowEvaluated {
+                available_actions: vec!["form_3".to_string()]
+            }
+        );
+    }
+    #[tokio::test]
+    async fn use_go_rules_workflow_evaluation_isa() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(GoRulesDecisionEngine::new());
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework first
+        let cqrs = Arc::new(CqrsFramework::new(
+            event_store.clone(),
+            vec![Box::new(query)],
+            services,
+        ));
+        let id = Uuid::new_v4();
+
+        // Start a Journey - should trigger workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        // Submit a form - should trigger workflow evaluation
+        let form_value = json!({
+            "step": "personal_info",
+            "country": "UK",
+            "name": "Alice",
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("personal_info".to_string(), form_value),
             },
         )
         .await
