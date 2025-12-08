@@ -67,9 +67,10 @@ pub struct GoRulesDecisionEngine {
 }
 
 impl GoRulesDecisionEngine {
-    pub fn new() -> Self {
-        let decision_content: DecisionContent =
-            serde_json::from_str(include_str!("jdm_graph.json")).unwrap();
+    /// # Panics
+    #[must_use]
+    pub fn new(json: &str) -> Self {
+        let decision_content: DecisionContent = serde_json::from_str(json).unwrap();
         GoRulesDecisionEngine { decision_content }
     }
 }
@@ -89,7 +90,7 @@ impl DecisionEngine for GoRulesDecisionEngine {
         let map: Map<String, Value> = combined_data.into_iter().collect();
         let something = serde_json::to_value(&map).unwrap();
 
-        println!("Something {:?}", something);
+        // println!("Something {:?}", something);
 
         // Create a new Decision for each evaluation
         // Use spawn_blocking to move CPU-intensive decision evaluation off the async runtime
@@ -107,20 +108,24 @@ impl DecisionEngine for GoRulesDecisionEngine {
                 ))
                 .map_err(|e| e.to_string())?;
 
-            println!("response {:#?}", response);
+            // println!("response {:#?}", response);
             serde_json::to_value(response).map_err(|e| e.to_string())
         })
         .await
         .unwrap()
         .map_err(|e| {
-            Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
-                as Box<dyn std::error::Error + Send + Sync>
+            Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>
         })?;
 
         let DecisionGraphResponse { result, .. } = serde_json::from_value(result)?;
         let unwrapped_map = result.as_object().unwrap();
         let take = unwrapped_map.take();
-        let test = take.get("output").ok_or("No available actions")?;
+
+        // Try to get available actions from either "output" or "availableNextSteps" field
+        let test = take
+            .get("output")
+            .or_else(|| take.get("availableNextSteps"))
+            .ok_or("No available actions")?;
 
         let available_actions: Vec<String> = test
             .as_array()

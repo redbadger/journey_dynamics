@@ -1,0 +1,650 @@
+{
+  "contentType": "application/vnd.gorules.decision",
+  "nodes": [
+    {
+      "id": "pricing-input",
+      "type": "inputNode",
+      "position": { "x": 100, "y": 400 },
+      "name": "Pricing Request"
+    },
+    {
+      "id": "base-price-calculator",
+      "type": "decisionTableNode",
+      "position": { "x": 350, "y": 200 },
+      "name": "Base Price Calculator",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "cabin-class",
+            "field": "cabinClass",
+            "name": "Cabin Class",
+            "type": "expression"
+          },
+          {
+            "id": "route-type",
+            "field": "",
+            "name": "Route Type",
+            "type": "expression"
+          },
+          {
+            "id": "advance-booking",
+            "field": "",
+            "name": "Days in Advance",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "base-multiplier",
+            "field": "baseMultiplier",
+            "name": "Base Price Multiplier",
+            "type": "expression"
+          },
+          {
+            "id": "advance-discount",
+            "field": "advanceBookingDiscount",
+            "name": "Advance Booking Discount",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "first-class-domestic",
+            "cabin-class": "'first'",
+            "route-type": "distance <= 2000",
+            "advance-booking": "",
+            "base-multiplier": "3.5",
+            "advance-discount": "0"
+          },
+          {
+            "_id": "first-class-international",
+            "cabin-class": "'first'",
+            "route-type": "distance > 2000",
+            "advance-booking": "",
+            "base-multiplier": "4.2",
+            "advance-discount": "0"
+          },
+          {
+            "_id": "business-class-domestic",
+            "cabin-class": "'business'",
+            "route-type": "distance <= 2000",
+            "advance-booking": "",
+            "base-multiplier": "2.1",
+            "advance-discount": "0"
+          },
+          {
+            "_id": "business-class-international",
+            "cabin-class": "'business'",
+            "route-type": "distance > 2000",
+            "advance-booking": "",
+            "base-multiplier": "2.8",
+            "advance-discount": "0"
+          },
+          {
+            "_id": "premium-economy-early",
+            "cabin-class": "'premium-economy'",
+            "route-type": "",
+            "advance-booking": "date(departureDate) - date(now()) > 21",
+            "base-multiplier": "1.4",
+            "advance-discount": "0.05"
+          },
+          {
+            "_id": "premium-economy-standard",
+            "cabin-class": "'premium-economy'",
+            "route-type": "",
+            "advance-booking": "",
+            "base-multiplier": "1.4",
+            "advance-discount": "0"
+          },
+          {
+            "_id": "economy-early-booking",
+            "cabin-class": "'economy'",
+            "route-type": "",
+            "advance-booking": "date(departureDate) - date(now()) > 14",
+            "base-multiplier": "1.0",
+            "advance-discount": "0.1"
+          },
+          {
+            "_id": "economy-standard",
+            "cabin-class": "'economy'",
+            "route-type": "",
+            "advance-booking": "",
+            "base-multiplier": "1.0",
+            "advance-discount": "0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "seasonal-adjustment",
+      "type": "decisionTableNode",
+      "position": { "x": 350, "y": 400 },
+      "name": "Seasonal Adjustment",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "travel-month",
+            "field": "",
+            "name": "Travel Month",
+            "type": "expression"
+          },
+          {
+            "id": "is-weekend",
+            "field": "",
+            "name": "Is Weekend Travel",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "seasonal-multiplier",
+            "field": "seasonalMultiplier",
+            "name": "Seasonal Multiplier",
+            "type": "expression"
+          },
+          {
+            "id": "weekend-surcharge",
+            "field": "weekendSurcharge",
+            "name": "Weekend Surcharge",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "peak-season",
+            "travel-month": "month(date(departureDate)) in [6, 7, 8, 12]",
+            "is-weekend": "",
+            "seasonal-multiplier": "1.25",
+            "weekend-surcharge": "0"
+          },
+          {
+            "_id": "shoulder-season",
+            "travel-month": "month(date(departureDate)) in [4, 5, 9, 10]",
+            "is-weekend": "",
+            "seasonal-multiplier": "1.1",
+            "weekend-surcharge": "0"
+          },
+          {
+            "_id": "low-season-weekend",
+            "travel-month": "month(date(departureDate)) in [1, 2, 3, 11]",
+            "is-weekend": "weekday(date(departureDate)) in [0, 6]",
+            "seasonal-multiplier": "0.9",
+            "weekend-surcharge": "25"
+          },
+          {
+            "_id": "low-season",
+            "travel-month": "",
+            "is-weekend": "",
+            "seasonal-multiplier": "0.9",
+            "weekend-surcharge": "0"
+          }
+        ]
+      }
+    },
+    {
+      "id": "baggage-fees",
+      "type": "decisionTableNode",
+      "position": { "x": 350, "y": 600 },
+      "name": "Baggage Fees",
+      "content": {
+        "hitPolicy": "collect",
+        "inputs": [
+          {
+            "id": "cabin-class",
+            "field": "cabinClass",
+            "name": "Cabin Class",
+            "type": "expression"
+          },
+          {
+            "id": "bag-count",
+            "field": "selectedBaggage.bags",
+            "name": "Number of Bags",
+            "type": "expression"
+          },
+          {
+            "id": "bag-weight",
+            "field": "selectedBaggage.weight",
+            "name": "Bag Weight",
+            "type": "expression"
+          },
+          {
+            "id": "route-type",
+            "field": "",
+            "name": "Route Type",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "fee-type",
+            "field": "feeType",
+            "name": "Fee Type",
+            "type": "expression"
+          },
+          {
+            "id": "fee-amount",
+            "field": "feeAmount",
+            "name": "Fee Amount",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "first-business-free",
+            "cabin-class": "in ['first', 'business']",
+            "bag-count": "<= 2",
+            "bag-weight": "<= 32",
+            "route-type": "",
+            "fee-type": "'baggage'",
+            "fee-amount": "0"
+          },
+          {
+            "_id": "economy-first-bag-domestic",
+            "cabin-class": "'economy'",
+            "bag-count": "== 1",
+            "bag-weight": "<= 23",
+            "route-type": "distance <= 2000",
+            "fee-type": "'baggage'",
+            "fee-amount": "25"
+          },
+          {
+            "_id": "economy-first-bag-international",
+            "cabin-class": "'economy'",
+            "bag-count": "== 1",
+            "bag-weight": "<= 23",
+            "route-type": "distance > 2000",
+            "fee-type": "'baggage'",
+            "fee-amount": "0"
+          },
+          {
+            "_id": "economy-second-bag",
+            "cabin-class": "'economy'",
+            "bag-count": "== 2",
+            "bag-weight": "<= 23",
+            "route-type": "",
+            "fee-type": "'baggage'",
+            "fee-amount": "35"
+          },
+          {
+            "_id": "overweight-fee",
+            "cabin-class": "",
+            "bag-count": "",
+            "bag-weight": "> 23 && <= 32",
+            "route-type": "",
+            "fee-type": "'overweight'",
+            "fee-amount": "100"
+          },
+          {
+            "_id": "heavy-bag-fee",
+            "cabin-class": "",
+            "bag-count": "",
+            "bag-weight": "> 32",
+            "route-type": "",
+            "fee-type": "'heavy_bag'",
+            "fee-amount": "200"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ancillary-fees",
+      "type": "decisionTableNode",
+      "position": { "x": 350, "y": 800 },
+      "name": "Ancillary Service Fees",
+      "content": {
+        "hitPolicy": "collect",
+        "inputs": [
+          {
+            "id": "service-type",
+            "field": "",
+            "name": "Service Type",
+            "type": "expression"
+          },
+          {
+            "id": "cabin-class",
+            "field": "cabinClass",
+            "name": "Cabin Class",
+            "type": "expression"
+          },
+          {
+            "id": "route-distance",
+            "field": "",
+            "name": "Route Distance",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "service-fee",
+            "field": "serviceFee",
+            "name": "Service Fee",
+            "type": "expression"
+          },
+          {
+            "id": "service-name",
+            "field": "serviceName",
+            "name": "Service Name",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "seat-selection-economy",
+            "service-type": "selectedSeats != null and len(selectedSeats) > 0",
+            "cabin-class": "'economy'",
+            "route-distance": "",
+            "service-fee": "15",
+            "service-name": "'Seat Selection'"
+          },
+          {
+            "_id": "seat-selection-premium",
+            "service-type": "selectedSeats != null and some(selectedSeats, $.type == 'premium')",
+            "cabin-class": "'economy'",
+            "route-distance": "",
+            "service-fee": "35",
+            "service-name": "'Premium Seat Selection'"
+          },
+          {
+            "_id": "priority-boarding",
+            "service-type": "priorityBoarding != null and priorityBoarding == true",
+            "cabin-class": "in ['economy', 'premium-economy']",
+            "route-distance": "",
+            "service-fee": "20",
+            "service-name": "'Priority Boarding'"
+          },
+          {
+            "_id": "meal-selection",
+            "service-type": "selectedMeals != null and len(selectedMeals) > 0",
+            "cabin-class": "'economy'",
+            "route-distance": "distance > 1000",
+            "service-fee": "12",
+            "service-name": "'Meal Selection'"
+          },
+          {
+            "_id": "wifi-access",
+            "service-type": "wifiAccess != null and wifiAccess == true",
+            "cabin-class": "",
+            "route-distance": "distance > 500",
+            "service-fee": "8",
+            "service-name": "'WiFi Access'"
+          },
+          {
+            "_id": "lounge-access",
+            "service-type": "loungeAccess != null and loungeAccess == true",
+            "cabin-class": "in ['economy', 'premium-economy']",
+            "route-distance": "",
+            "service-fee": "45",
+            "service-name": "'Lounge Access'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "taxes-and-fees",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 200 },
+      "name": "Taxes and Government Fees",
+      "content": {
+        "hitPolicy": "collect",
+        "inputs": [
+          {
+            "id": "departure-country",
+            "field": "departureCountry",
+            "name": "Departure Country",
+            "type": "expression"
+          },
+          {
+            "id": "arrival-country",
+            "field": "arrivalCountry",
+            "name": "Arrival Country",
+            "type": "expression"
+          },
+          {
+            "id": "is-international",
+            "field": "",
+            "name": "International Flight",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "tax-type",
+            "field": "taxType",
+            "name": "Tax Type",
+            "type": "expression"
+          },
+          {
+            "id": "tax-amount",
+            "field": "taxAmount",
+            "name": "Tax Amount",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "us-departure-tax",
+            "departure-country": "'US'",
+            "arrival-country": "",
+            "is-international": "",
+            "tax-type": "'Departure Tax'",
+            "tax-amount": "5.60"
+          },
+          {
+            "_id": "us-security-fee",
+            "departure-country": "'US'",
+            "arrival-country": "",
+            "is-international": "",
+            "tax-type": "'Security Fee'",
+            "tax-amount": "5.60"
+          },
+          {
+            "_id": "us-immigration-fee",
+            "departure-country": "'US'",
+            "arrival-country": "!= 'US'",
+            "is-international": "departureCountry != arrivalCountry",
+            "tax-type": "'Immigration Fee'",
+            "tax-amount": "7.00"
+          },
+          {
+            "_id": "international-arrival-tax",
+            "departure-country": "!= 'US'",
+            "arrival-country": "'US'",
+            "is-international": "true",
+            "tax-type": "'Arrival Tax'",
+            "tax-amount": "18.30"
+          },
+          {
+            "_id": "fuel-surcharge-domestic",
+            "departure-country": "",
+            "arrival-country": "",
+            "is-international": "departureCountry == arrivalCountry",
+            "tax-type": "'Fuel Surcharge'",
+            "tax-amount": "15.00"
+          },
+          {
+            "_id": "fuel-surcharge-international",
+            "departure-country": "",
+            "arrival-country": "",
+            "is-international": "departureCountry != arrivalCountry",
+            "tax-type": "'Fuel Surcharge'",
+            "tax-amount": "45.00"
+          }
+        ]
+      }
+    },
+    {
+      "id": "insurance-pricing",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 400 },
+      "name": "Travel Insurance Pricing",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "insurance-selected",
+            "field": "travelInsurance",
+            "name": "Insurance Selected",
+            "type": "expression"
+          },
+          {
+            "id": "trip-cost",
+            "field": "",
+            "name": "Trip Cost",
+            "type": "expression"
+          },
+          {
+            "id": "passenger-count",
+            "field": "passengerCount",
+            "name": "Passenger Count",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "insurance-fee",
+            "field": "insuranceFee",
+            "name": "Insurance Fee",
+            "type": "expression"
+          },
+          {
+            "id": "insurance-coverage",
+            "field": "insuranceCoverage",
+            "name": "Coverage Amount",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "no-insurance",
+            "insurance-declined": "== false or $ == null",
+            "trip-cost": "",
+            "passenger-count": "",
+            "insurance-fee": "0",
+            "insurance-coverage": "0"
+          },
+          {
+            "_id": "basic-insurance",
+            "insurance-selected": "== 'basic'",
+            "trip-cost": "< 1000",
+            "passenger-count": "",
+            "insurance-fee": "25 * passengerCount",
+            "insurance-coverage": "5000"
+          },
+          {
+            "_id": "standard-insurance",
+            "insurance-selected": "== 'standard'",
+            "trip-cost": "[1000..5000]",
+            "passenger-count": "",
+            "insurance-fee": "45 * passengerCount",
+            "insurance-coverage": "10000"
+          },
+          {
+            "_id": "premium-insurance",
+            "insurance-selected": "== 'premium'",
+            "trip-cost": "> 5000",
+            "passenger-count": "",
+            "insurance-fee": "75 * passengerCount",
+            "insurance-coverage": "25000"
+          }
+        ]
+      }
+    },
+    {
+      "id": "pricing-calculator",
+      "type": "functionNode",
+      "position": { "x": 950, "y": 400 },
+      "name": "Total Price Calculator",
+      "content": {
+        "source": "export const handler = async (input) => {\n  const {\n    baseFare = 0,\n    baseMultiplier = 1,\n    advanceBookingDiscount = 0,\n    seasonalMultiplier = 1,\n    weekendSurcharge = 0,\n    baggageFees = [],\n    ancillaryFees = [],\n    taxes = [],\n    insuranceFee = 0,\n    passengerCount = 1\n  } = input;\n\n  // Calculate base price with adjustments\n  const adjustedBaseFare = baseFare * baseMultiplier * seasonalMultiplier;\n  const discountAmount = adjustedBaseFare * advanceBookingDiscount;\n  const basePrice = (adjustedBaseFare - discountAmount + weekendSurcharge) * passengerCount;\n\n  // Sum all additional fees\n  const totalBaggageFees = baggageFees.reduce((sum, fee) => sum + (fee.feeAmount || 0), 0);\n  const totalAncillaryFees = ancillaryFees.reduce((sum, fee) => sum + (fee.serviceFee || 0), 0);\n  const totalTaxes = taxes.reduce((sum, tax) => sum + (tax.taxAmount || 0), 0);\n\n  // Calculate totals\n  const subtotal = basePrice + totalBaggageFees + totalAncillaryFees;\n  const totalTaxesAndFees = totalTaxes + insuranceFee;\n  const grandTotal = subtotal + totalTaxesAndFees;\n\n  return {\n    pricing: {\n      baseFare: basePrice,\n      baggageFees: totalBaggageFees,\n      ancillaryFees: totalAncillaryFees,\n      subtotal: subtotal,\n      taxesAndFees: totalTaxesAndFees,\n      insuranceFee: insuranceFee,\n      grandTotal: Math.round(grandTotal * 100) / 100\n    },\n    breakdown: {\n      basePrice: {\n        originalFare: baseFare,\n        multiplier: baseMultiplier,\n        seasonalAdjustment: seasonalMultiplier,\n        advanceDiscount: discountAmount,\n        weekendSurcharge: weekendSurcharge,\n        passengerCount: passengerCount,\n        total: basePrice\n      },\n      additionalFees: {\n        baggage: baggageFees,\n        ancillary: ancillaryFees,\n        taxes: taxes\n      }\n    }\n  };\n};"
+      }
+    },
+    {
+      "id": "pricing-output",
+      "type": "outputNode",
+      "position": { "x": 1250, "y": 400 },
+      "name": "Pricing Response"
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-to-base-price",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "base-price-calculator"
+    },
+    {
+      "id": "input-to-seasonal",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "seasonal-adjustment"
+    },
+    {
+      "id": "input-to-baggage",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "baggage-fees"
+    },
+    {
+      "id": "input-to-ancillary",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "ancillary-fees"
+    },
+    {
+      "id": "input-to-taxes",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "taxes-and-fees"
+    },
+    {
+      "id": "input-to-insurance",
+      "sourceId": "pricing-input",
+      "type": "edge",
+      "targetId": "insurance-pricing"
+    },
+    {
+      "id": "base-price-to-calculator",
+      "sourceId": "base-price-calculator",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "seasonal-to-calculator",
+      "sourceId": "seasonal-adjustment",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "baggage-to-calculator",
+      "sourceId": "baggage-fees",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "ancillary-to-calculator",
+      "sourceId": "ancillary-fees",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "taxes-to-calculator",
+      "sourceId": "taxes-and-fees",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "insurance-to-calculator",
+      "sourceId": "insurance-pricing",
+      "type": "edge",
+      "targetId": "pricing-calculator"
+    },
+    {
+      "id": "calculator-to-output",
+      "sourceId": "pricing-calculator",
+      "type": "edge",
+      "targetId": "pricing-output"
+    }
+  ]
+}

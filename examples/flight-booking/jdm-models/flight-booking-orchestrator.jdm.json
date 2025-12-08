@@ -1,0 +1,836 @@
+{
+  "contentType": "application/vnd.gorules.decision",
+  "nodes": [
+    {
+      "id": "journey-start-input",
+      "type": "inputNode",
+      "position": { "x": 100, "y": 300 },
+      "name": "Journey Request"
+    },
+    {
+      "id": "journey-router",
+      "type": "switchNode",
+      "position": { "x": 300, "y": 300 },
+      "name": "Journey Router",
+      "content": {
+        "statements": [
+          {
+            "id": "has-current-step",
+            "condition": "currentStep != null and currentStep != ''"
+          },
+          {
+            "id": "new-journey",
+            "condition": "currentStep == null or currentStep == ''"
+          }
+        ]
+      }
+    },
+    {
+      "id": "step-router",
+      "type": "switchNode",
+      "position": { "x": 500, "y": 200 },
+      "name": "Step Router",
+      "content": {
+        "statements": [
+          {
+            "id": "journey-start",
+            "condition": "currentStep == 'journey_start'"
+          },
+          {
+            "id": "search-criteria",
+            "condition": "currentStep == 'search_criteria'"
+          },
+          {
+            "id": "search-results",
+            "condition": "currentStep == 'flight_search_results'"
+          },
+          {
+            "id": "outbound-selection",
+            "condition": "currentStep == 'outbound_flight_selection'"
+          },
+          {
+            "id": "return-selection",
+            "condition": "currentStep == 'return_flight_selection'"
+          },
+          {
+            "id": "passenger-details",
+            "condition": "currentStep == 'passenger_details'"
+          },
+          {
+            "id": "seat-selection",
+            "condition": "currentStep == 'seat_selection'"
+          },
+          {
+            "id": "ancillary-services",
+            "condition": "currentStep == 'ancillary_services'"
+          },
+          {
+            "id": "booking-summary",
+            "condition": "currentStep == 'booking_summary'"
+          },
+          {
+            "id": "payment",
+            "condition": "currentStep == 'payment'"
+          },
+          {
+            "id": "confirmation",
+            "condition": "currentStep == 'booking_confirmation'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "init-journey",
+      "type": "expressionNode",
+      "position": { "x": 500, "y": 400 },
+      "name": "Initialize Journey",
+      "content": {
+        "expressions": [
+          {
+            "id": "set-start-step",
+            "key": "currentStep",
+            "value": "'journey_start'"
+          },
+          {
+            "id": "set-session-id",
+            "key": "sessionId",
+            "value": "'session_' + string(date('now'))"
+          },
+          {
+            "id": "set-timestamp",
+            "key": "timestamp",
+            "value": "date('now')"
+          },
+          {
+            "id": "init-captured-data",
+            "key": "capturedData",
+            "value": "{}"
+          },
+          {
+            "id": "init-step-history",
+            "key": "stepHistory",
+            "value": "['journey_start']"
+          }
+        ]
+      }
+    },
+    {
+      "id": "journey-start-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 100 },
+      "name": "Journey Start Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "user-status",
+            "field": "userId",
+            "name": "User Status",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "logged-in-user",
+            "user-status": "!= null",
+            "next-steps": "['search_criteria', 'saved_searches']",
+            "primary-next-step": "'search_criteria'"
+          },
+          {
+            "_id": "guest-user",
+            "user-status": "== null",
+            "next-steps": "['search_criteria', 'account_creation']",
+            "primary-next-step": "'search_criteria'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "search-criteria-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 200 },
+      "name": "Search Criteria Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "trip-type",
+            "field": "capturedData.tripType",
+            "name": "Trip Type",
+            "type": "expression"
+          },
+          {
+            "id": "passenger-count",
+            "field": "capturedData.passengers.total",
+            "name": "Passenger Count",
+            "type": "expression"
+          },
+          {
+            "id": "required-fields",
+            "field": "",
+            "name": "Required Fields Complete",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "multi-city-trip",
+            "trip-type": "'multi-city'",
+            "passenger-count": "",
+            "required-fields": "",
+            "next-steps": "['multi_city_details']",
+            "primary-next-step": "'multi_city_details'"
+          },
+          {
+            "_id": "group-booking",
+            "trip-type": "",
+            "passenger-count": "> 9",
+            "required-fields": "",
+            "next-steps": "['group_booking']",
+            "primary-next-step": "'group_booking'"
+          },
+          {
+            "_id": "search-ready",
+            "trip-type": "!= 'multi-city'",
+            "passenger-count": "<= 9",
+            "required-fields": "capturedData.origin != null and capturedData.destination != null and capturedData.departureDate != null and capturedData.passengers != null",
+            "next-steps": "['flight_search_results']",
+            "primary-next-step": "'flight_search_results'"
+          },
+          {
+            "_id": "incomplete-search",
+            "trip-type": "",
+            "passenger-count": "",
+            "required-fields": "",
+            "next-steps": "['search_criteria']",
+            "primary-next-step": "'search_criteria'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "flight-results-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 300 },
+      "name": "Flight Results Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "results-count",
+            "field": "capturedData.searchResults",
+            "name": "Results Available",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "flights-found",
+            "results-count": "$ != null and len($) > 0",
+            "next-steps": "['outbound_flight_selection', 'search_criteria']",
+            "primary-next-step": "'outbound_flight_selection'"
+          },
+          {
+            "_id": "no-flights",
+            "results-count": "$ == null or len($) == 0",
+            "next-steps": "['alternative_search_suggestions', 'search_criteria']",
+            "primary-next-step": "'alternative_search_suggestions'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "outbound-flight-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 400 },
+      "name": "Outbound Flight Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "trip-type",
+            "field": "capturedData.tripType",
+            "name": "Trip Type",
+            "type": "expression"
+          },
+          {
+            "id": "flight-selected",
+            "field": "capturedData.selectedOutboundFlight",
+            "name": "Flight Selected",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "round-trip-selected",
+            "trip-type": "'round-trip'",
+            "flight-selected": "$ != null",
+            "next-steps": "['return_flight_selection', 'flight_search_results']",
+            "primary-next-step": "'return_flight_selection'"
+          },
+          {
+            "_id": "one-way-selected",
+            "trip-type": "'one-way'",
+            "flight-selected": "$ != null",
+            "next-steps": "['passenger_details', 'flight_search_results']",
+            "primary-next-step": "'passenger_details'"
+          },
+          {
+            "_id": "no-selection",
+            "trip-type": "",
+            "flight-selected": "$ == null",
+            "next-steps": "['outbound_flight_selection', 'flight_search_results']",
+            "primary-next-step": "'outbound_flight_selection'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "return-flight-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 500 },
+      "name": "Return Flight Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "return-selected",
+            "field": "capturedData.selectedReturnFlight",
+            "name": "Return Flight Selected",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "return-selected",
+            "return-selected": "$ != null",
+            "next-steps": "['passenger_details', 'outbound_flight_selection']",
+            "primary-next-step": "'passenger_details'"
+          },
+          {
+            "_id": "no-return-selection",
+            "return-selected": "$ == null",
+            "next-steps": "['return_flight_selection', 'outbound_flight_selection']",
+            "primary-next-step": "'return_flight_selection'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "passenger-details-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 600 },
+      "name": "Passenger Details Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "passengers-complete",
+            "field": "",
+            "name": "Passengers Complete",
+            "type": "expression"
+          },
+          {
+            "id": "has-minors",
+            "field": "",
+            "name": "Has Unaccompanied Minors",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "has-unaccompanied-minors",
+            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
+            "has-minors": "some(capturedData.passengers, (date('now') - date($.dateOfBirth)) / 31536000 < 18 and $.travelingAlone == true)",
+            "next-steps": "['unaccompanied_minor_services']",
+            "primary-next-step": "'unaccompanied_minor_services'"
+          },
+          {
+            "_id": "passengers-complete",
+            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
+            "has-minors": "",
+            "next-steps": "['seat_selection', 'passenger_details']",
+            "primary-next-step": "'seat_selection'"
+          },
+          {
+            "_id": "passengers-incomplete",
+            "passengers-complete": "",
+            "has-minors": "",
+            "next-steps": "['passenger_details']",
+            "primary-next-step": "'passenger_details'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "seat-selection-logic",
+      "type": "expressionNode",
+      "position": { "x": 800, "y": 700 },
+      "name": "Seat Selection Logic",
+      "content": {
+        "expressions": [
+          {
+            "id": "seat-next-steps",
+            "key": "availableNextSteps",
+            "value": "['ancillary_services', 'passenger_details']"
+          },
+          {
+            "id": "seat-primary-step",
+            "key": "primaryNextStep",
+            "value": "'ancillary_services'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ancillary-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 800 },
+      "name": "Ancillary Services Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "insurance-declined",
+            "field": "capturedData.insurance",
+            "name": "Insurance Declined",
+            "type": "expression"
+          },
+          {
+            "id": "is-international",
+            "field": "",
+            "name": "Is International Flight",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "insurance-confirmation-needed",
+            "insurance-declined": "== false or $ == null",
+            "is-international": "capturedData.origin != capturedData.destination",
+            "next-steps": "['insurance_confirmation']",
+            "primary-next-step": "'insurance_confirmation'"
+          },
+          {
+            "_id": "proceed-to-summary",
+            "insurance-declined": "",
+            "is-international": "",
+            "next-steps": "['booking_summary', 'seat_selection']",
+            "primary-next-step": "'booking_summary'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "booking-summary-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 900 },
+      "name": "Booking Summary Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "terms-accepted",
+            "field": "capturedData.termsAccepted",
+            "name": "Terms Accepted",
+            "type": "expression"
+          },
+          {
+            "id": "user-logged-in",
+            "field": "userId",
+            "name": "User Logged In",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "guest-user-ready",
+            "terms-accepted": "== true",
+            "user-logged-in": "== null",
+            "next-steps": "['account_creation', 'payment']",
+            "primary-next-step": "'payment'"
+          },
+          {
+            "_id": "logged-in-ready",
+            "terms-accepted": "== true",
+            "user-logged-in": "!= null",
+            "next-steps": "['payment']",
+            "primary-next-step": "'payment'"
+          },
+          {
+            "_id": "terms-not-accepted",
+            "terms-accepted": "!= true",
+            "user-logged-in": "",
+            "next-steps": "['booking_summary']",
+            "primary-next-step": "'booking_summary'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "payment-logic",
+      "type": "decisionTableNode",
+      "position": { "x": 800, "y": 1000 },
+      "name": "Payment Logic",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "payment-status",
+            "field": "capturedData.paymentStatus",
+            "name": "Payment Status",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "next-steps",
+            "field": "availableNextSteps",
+            "name": "Next Steps",
+            "type": "expression"
+          },
+          {
+            "id": "primary-next-step",
+            "field": "primaryNextStep",
+            "name": "Primary Next Step",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "payment-success",
+            "payment-status": "'success'",
+            "next-steps": "['booking_confirmation']",
+            "primary-next-step": "'booking_confirmation'"
+          },
+          {
+            "_id": "payment-failed",
+            "payment-status": "'failed'",
+            "next-steps": "['payment_retry', 'alternative_payment_methods']",
+            "primary-next-step": "'payment_retry'"
+          },
+          {
+            "_id": "payment-pending",
+            "payment-status": "",
+            "next-steps": "['payment', 'booking_summary']",
+            "primary-next-step": "'payment'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "confirmation-logic",
+      "type": "expressionNode",
+      "position": { "x": 800, "y": 1100 },
+      "name": "Confirmation Logic",
+      "content": {
+        "expressions": [
+          {
+            "id": "confirmation-next-steps",
+            "key": "availableNextSteps",
+            "value": "['post_booking_services', 'journey_end']"
+          },
+          {
+            "id": "confirmation-primary-step",
+            "key": "primaryNextStep",
+            "value": "'journey_end'"
+          },
+          {
+            "id": "booking-reference",
+            "key": "bookingReference",
+            "value": "'BK' + string(floor(1000000 * 0.5))"
+          }
+        ]
+      }
+    },
+    {
+      "id": "journey-end",
+      "type": "outputNode",
+      "position": { "x": 1200, "y": 300 },
+      "name": "Journey Response"
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-to-router",
+      "sourceId": "journey-start-input",
+      "type": "edge",
+      "targetId": "journey-router"
+    },
+    {
+      "id": "existing-journey",
+      "sourceId": "journey-router",
+      "type": "edge",
+      "targetId": "step-router",
+      "sourceHandle": "has-current-step"
+    },
+    {
+      "id": "new-journey-init",
+      "sourceId": "journey-router",
+      "type": "edge",
+      "targetId": "init-journey",
+      "sourceHandle": "new-journey"
+    },
+    {
+      "id": "init-to-step-router",
+      "sourceId": "init-journey",
+      "type": "edge",
+      "targetId": "step-router"
+    },
+    {
+      "id": "route-journey-start",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "journey-start-logic",
+      "sourceHandle": "journey-start"
+    },
+    {
+      "id": "route-search-criteria",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "search-criteria-logic",
+      "sourceHandle": "search-criteria"
+    },
+    {
+      "id": "route-search-results",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "flight-results-logic",
+      "sourceHandle": "search-results"
+    },
+    {
+      "id": "route-outbound",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "outbound-flight-logic",
+      "sourceHandle": "outbound-selection"
+    },
+    {
+      "id": "route-return",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "return-flight-logic",
+      "sourceHandle": "return-selection"
+    },
+    {
+      "id": "route-passengers",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "passenger-details-logic",
+      "sourceHandle": "passenger-details"
+    },
+    {
+      "id": "route-seats",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "seat-selection-logic",
+      "sourceHandle": "seat-selection"
+    },
+    {
+      "id": "route-ancillary",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "ancillary-logic",
+      "sourceHandle": "ancillary-services"
+    },
+    {
+      "id": "route-summary",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "booking-summary-logic",
+      "sourceHandle": "booking-summary"
+    },
+    {
+      "id": "route-payment",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "payment-logic",
+      "sourceHandle": "payment"
+    },
+    {
+      "id": "route-confirmation",
+      "sourceId": "step-router",
+      "type": "edge",
+      "targetId": "confirmation-logic",
+      "sourceHandle": "confirmation"
+    },
+    {
+      "id": "journey-start-to-output",
+      "sourceId": "journey-start-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "search-criteria-to-output",
+      "sourceId": "search-criteria-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "flight-results-to-output",
+      "sourceId": "flight-results-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "outbound-to-output",
+      "sourceId": "outbound-flight-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "return-to-output",
+      "sourceId": "return-flight-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "passengers-to-output",
+      "sourceId": "passenger-details-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "seats-to-output",
+      "sourceId": "seat-selection-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "ancillary-to-output",
+      "sourceId": "ancillary-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "summary-to-output",
+      "sourceId": "booking-summary-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "payment-to-output",
+      "sourceId": "payment-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    },
+    {
+      "id": "confirmation-to-output",
+      "sourceId": "confirmation-logic",
+      "type": "edge",
+      "targetId": "journey-end"
+    }
+  ]
+}

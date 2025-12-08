@@ -1,0 +1,660 @@
+{
+  "contentType": "application/vnd.gorules.decision",
+  "nodes": [
+    {
+      "id": "error-input",
+      "type": "inputNode",
+      "position": { "x": 100, "y": 400 },
+      "name": "Error Handling Request"
+    },
+    {
+      "id": "error-type-classifier",
+      "type": "switchNode",
+      "position": { "x": 350, "y": 400 },
+      "name": "Error Type Classifier",
+      "content": {
+        "statements": [
+          {
+            "id": "validation-error",
+            "condition": "errorType == 'validation'"
+          },
+          {
+            "id": "payment-error",
+            "condition": "errorType == 'payment'"
+          },
+          {
+            "id": "availability-error",
+            "condition": "errorType == 'availability'"
+          },
+          {
+            "id": "system-error",
+            "condition": "errorType == 'system'"
+          },
+          {
+            "id": "timeout-error",
+            "condition": "errorType == 'timeout'"
+          },
+          {
+            "id": "business-rule-error",
+            "condition": "errorType == 'business_rule'"
+          },
+          {
+            "id": "unknown-error",
+            "condition": "!exists(errorType) || errorType == 'unknown'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "validation-error-handler",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 100 },
+      "name": "Validation Error Handler",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "validation-field",
+            "field": "errorDetails.field",
+            "name": "Validation Field",
+            "type": "expression"
+          },
+          {
+            "id": "current-step",
+            "field": "currentStep",
+            "name": "Current Step",
+            "type": "expression"
+          },
+          {
+            "id": "retry-count",
+            "field": "retryCount",
+            "name": "Retry Count",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "recovery-action",
+            "field": "recoveryAction",
+            "name": "Recovery Action",
+            "type": "expression"
+          },
+          {
+            "id": "user-message",
+            "field": "userMessage",
+            "name": "User Message",
+            "type": "expression"
+          },
+          {
+            "id": "suggested-next-step",
+            "field": "suggestedNextStep",
+            "name": "Suggested Next Step",
+            "type": "expression"
+          },
+          {
+            "id": "requires-assistance",
+            "field": "requiresAssistance",
+            "name": "Requires Human Assistance",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "invalid-airport-code",
+            "validation-field": "in ['origin', 'destination']",
+            "current-step": "'search_criteria'",
+            "retry-count": "< 3",
+            "recovery-action": "'suggest_airports'",
+            "user-message": "'Invalid airport code. Here are some suggestions based on your input.'",
+            "suggested-next-step": "'search_criteria'",
+            "requires-assistance": false
+          },
+          {
+            "_id": "invalid-date-format",
+            "validation-field": "in ['departureDate', 'returnDate']",
+            "current-step": "'search_criteria'",
+            "retry-count": "< 5",
+            "recovery-action": "'show_date_picker'",
+            "user-message": "'Please select a valid travel date using the calendar.'",
+            "suggested-next-step": "'search_criteria'",
+            "requires-assistance": false
+          },
+          {
+            "_id": "passenger-count-exceeded",
+            "validation-field": "'passengers'",
+            "current-step": "'search_criteria'",
+            "retry-count": "",
+            "recovery-action": "'redirect_group_booking'",
+            "user-message": "'For groups of 10 or more passengers, please use our group booking service.'",
+            "suggested-next-step": "'group_booking'",
+            "requires-assistance": false
+          },
+          {
+            "_id": "invalid-passenger-details",
+            "validation-field": "'passengers'",
+            "current-step": "'passenger_details'",
+            "retry-count": "< 3",
+            "recovery-action": "'highlight_required_fields'",
+            "user-message": "'Please complete all required passenger information fields.'",
+            "suggested-next-step": "'passenger_details'",
+            "requires-assistance": false
+          },
+          {
+            "_id": "repeated-validation-failures",
+            "validation-field": "",
+            "current-step": "",
+            "retry-count": ">= 3",
+            "recovery-action": "'offer_assistance'",
+            "user-message": "'We notice you're having trouble with this step. Would you like to chat with one of our travel experts?'",
+            "suggested-next-step": "currentStep",
+            "requires-assistance": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "payment-error-handler",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 250 },
+      "name": "Payment Error Handler",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "payment-error-code",
+            "field": "errorDetails.paymentErrorCode",
+            "name": "Payment Error Code",
+            "type": "expression"
+          },
+          {
+            "id": "payment-method-type",
+            "field": "errorDetails.paymentMethodType",
+            "name": "Payment Method Type",
+            "type": "expression"
+          },
+          {
+            "id": "retry-attempts",
+            "field": "retryCount",
+            "name": "Retry Attempts",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "recovery-action",
+            "field": "recoveryAction",
+            "name": "Recovery Action",
+            "type": "expression"
+          },
+          {
+            "id": "user-message",
+            "field": "userMessage",
+            "name": "User Message",
+            "type": "expression"
+          },
+          {
+            "id": "suggested-next-step",
+            "field": "suggestedNextStep",
+            "name": "Suggested Next Step",
+            "type": "expression"
+          },
+          {
+            "id": "hold-booking-time",
+            "field": "holdBookingMinutes",
+            "name": "Hold Booking Minutes",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "insufficient-funds",
+            "payment-error-code": "'INSUFFICIENT_FUNDS'",
+            "payment-method-type": "'credit_card'",
+            "retry-attempts": "< 2",
+            "recovery-action": "'suggest_alternative_payment'",
+            "user-message": "'Your card was declined due to insufficient funds. Please try a different payment method.'",
+            "suggested-next-step": "'alternative_payment_methods'",
+            "hold-booking-time": "15"
+          },
+          {
+            "_id": "expired-card",
+            "payment-error-code": "'EXPIRED_CARD'",
+            "payment-method-type": "'credit_card'",
+            "retry-attempts": "",
+            "recovery-action": "'request_updated_card'",
+            "user-message": "'Your card has expired. Please update your payment information.'",
+            "suggested-next-step": "'payment'",
+            "hold-booking-time": "10"
+          },
+          {
+            "_id": "fraud-suspected",
+            "payment-error-code": "'FRAUD_SUSPECTED'",
+            "payment-method-type": "",
+            "retry-attempts": "",
+            "recovery-action": "'require_verification'",
+            "user-message": "'For your security, please verify this transaction with your bank and try again.'",
+            "suggested-next-step": "'payment'",
+            "hold-booking-time": "30"
+          },
+          {
+            "_id": "payment-processor-down",
+            "payment-error-code": "'PROCESSOR_UNAVAILABLE'",
+            "payment-method-type": "",
+            "retry-attempts": "< 3",
+            "recovery-action": "'retry_after_delay'",
+            "user-message": "'Payment processing is temporarily unavailable. Please try again in a few minutes.'",
+            "suggested-next-step": "'payment'",
+            "hold-booking-time": "20"
+          },
+          {
+            "_id": "multiple-payment-failures",
+            "payment-error-code": "",
+            "payment-method-type": "",
+            "retry-attempts": ">= 3",
+            "recovery-action": "'escalate_to_support'",
+            "user-message": "'We're having trouble processing your payment. Our support team will contact you within 24 hours to complete your booking.'",
+            "suggested-next-step": "'booking_summary'",
+            "hold-booking-time": "1440"
+          }
+        ]
+      }
+    },
+    {
+      "id": "availability-error-handler",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 400 },
+      "name": "Availability Error Handler",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "availability-issue",
+            "field": "errorDetails.availabilityIssue",
+            "name": "Availability Issue",
+            "type": "expression"
+          },
+          {
+            "id": "booking-stage",
+            "field": "currentStep",
+            "name": "Booking Stage",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "recovery-action",
+            "field": "recoveryAction",
+            "name": "Recovery Action",
+            "type": "expression"
+          },
+          {
+            "id": "user-message",
+            "field": "userMessage",
+            "name": "User Message",
+            "type": "expression"
+          },
+          {
+            "id": "suggested-next-step",
+            "field": "suggestedNextStep",
+            "name": "Suggested Next Step",
+            "type": "expression"
+          },
+          {
+            "id": "offer-alternatives",
+            "field": "offerAlternatives",
+            "name": "Offer Alternatives",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "flight-sold-out-search",
+            "availability-issue": "'FLIGHT_SOLD_OUT'",
+            "booking-stage": "in ['flight_search_results', 'outbound_flight_selection', 'return_flight_selection']",
+            "recovery-action": "'show_alternative_flights'",
+            "user-message": "'This flight is no longer available. Here are similar alternatives.'",
+            "suggested-next-step": "'flight_search_results'",
+            "offer-alternatives": true
+          },
+          {
+            "_id": "seat-unavailable",
+            "availability-issue": "'SEAT_UNAVAILABLE'",
+            "booking-stage": "'seat_selection'",
+            "recovery-action": "'refresh_seat_map'",
+            "user-message": "'The selected seat is no longer available. Please choose from the updated seat map.'",
+            "suggested-next-step": "'seat_selection'",
+            "offer-alternatives": true
+          },
+          {
+            "_id": "fare-changed-during-booking",
+            "availability-issue": "'FARE_CHANGED'",
+            "booking-stage": "in ['booking_summary', 'payment']",
+            "recovery-action": "'display_fare_change'",
+            "user-message": "'The fare has changed since you started booking. Please review the updated price.'",
+            "suggested-next-step": "'booking_summary'",
+            "offer-alternatives": false
+          },
+          {
+            "_id": "schedule-change",
+            "availability-issue": "'SCHEDULE_CHANGE'",
+            "booking-stage": "",
+            "recovery-action": "'show_schedule_options'",
+            "user-message": "'The flight schedule has changed. Please review the new departure times.'",
+            "suggested-next-step": "'flight_search_results'",
+            "offer-alternatives": true
+          },
+          {
+            "_id": "inventory-hold-expired",
+            "availability-issue": "'HOLD_EXPIRED'",
+            "booking-stage": "",
+            "recovery-action": "'restart_booking_flow'",
+            "user-message": "'Your booking session has expired. Please start a new search to see current availability.'",
+            "suggested-next-step": "'search_criteria'",
+            "offer-alternatives": false
+          }
+        ]
+      }
+    },
+    {
+      "id": "system-error-handler",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 550 },
+      "name": "System Error Handler",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "system-error-type",
+            "field": "errorDetails.systemErrorType",
+            "name": "System Error Type",
+            "type": "expression"
+          },
+          {
+            "id": "error-severity",
+            "field": "errorDetails.severity",
+            "name": "Error Severity",
+            "type": "expression"
+          },
+          {
+            "id": "service-availability",
+            "field": "errorDetails.serviceStatus",
+            "name": "Service Status",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "recovery-action",
+            "field": "recoveryAction",
+            "name": "Recovery Action",
+            "type": "expression"
+          },
+          {
+            "id": "user-message",
+            "field": "userMessage",
+            "name": "User Message",
+            "type": "expression"
+          },
+          {
+            "id": "suggested-next-step",
+            "field": "suggestedNextStep",
+            "name": "Suggested Next Step",
+            "type": "expression"
+          },
+          {
+            "id": "escalate-priority",
+            "field": "escalatePriority",
+            "name": "Escalation Priority",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "database-connection-error",
+            "system-error-type": "'DATABASE_CONNECTION'",
+            "error-severity": "in ['high', 'critical']",
+            "service-availability": "",
+            "recovery-action": "'queue_request_for_retry'",
+            "user-message": "'We're experiencing technical difficulties. Your booking will be processed shortly.'",
+            "suggested-next-step": "currentStep",
+            "escalate-priority": "'high'"
+          },
+          {
+            "_id": "airline-api-timeout",
+            "system-error-type": "'EXTERNAL_API_TIMEOUT'",
+            "error-severity": "'medium'",
+            "service-availability": "'degraded'",
+            "recovery-action": "'retry_with_fallback'",
+            "user-message": "'Flight information is loading slower than usual. Please wait while we retrieve the latest data.'",
+            "suggested-next-step": "currentStep",
+            "escalate-priority": "'medium'"
+          },
+          {
+            "_id": "cache-service-down",
+            "system-error-type": "'CACHE_UNAVAILABLE'",
+            "error-severity": "'low'",
+            "service-availability": "'operational'",
+            "recovery-action": "'bypass_cache'",
+            "user-message": "'Loading flight data...'",
+            "suggested-next-step": "currentStep",
+            "escalate-priority": "'low'"
+          },
+          {
+            "_id": "critical-system-failure",
+            "system-error-type": "",
+            "error-severity": "'critical'",
+            "service-availability": "'down'",
+            "recovery-action": "'activate_maintenance_mode'",
+            "user-message": "'Our booking system is temporarily unavailable. We apologize for the inconvenience and are working to restore service.'",
+            "suggested-next-step": "'system_maintenance'",
+            "escalate-priority": "'critical'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "business-rule-error-handler",
+      "type": "decisionTableNode",
+      "position": { "x": 650, "y": 700 },
+      "name": "Business Rule Error Handler",
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "rule-violation",
+            "field": "errorDetails.ruleViolation",
+            "name": "Rule Violation",
+            "type": "expression"
+          },
+          {
+            "id": "passenger-type",
+            "field": "errorDetails.passengerType",
+            "name": "Passenger Type",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "recovery-action",
+            "field": "recoveryAction",
+            "name": "Recovery Action",
+            "type": "expression"
+          },
+          {
+            "id": "user-message",
+            "field": "userMessage",
+            "name": "User Message",
+            "type": "expression"
+          },
+          {
+            "id": "suggested-next-step",
+            "field": "suggestedNextStep",
+            "name": "Suggested Next Step",
+            "type": "expression"
+          },
+          {
+            "id": "requires-documentation",
+            "field": "requiresDocumentation",
+            "name": "Requires Additional Documentation",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "unaccompanied-minor-restrictions",
+            "rule-violation": "'UNACCOMPANIED_MINOR_POLICY'",
+            "passenger-type": "'minor'",
+            "recovery-action": "'show_minor_services'",
+            "user-message": "'Children traveling alone require special assistance. Additional fees and documentation may apply.'",
+            "suggested-next-step": "'unaccompanied_minor_services'",
+            "requires-documentation": true
+          },
+          {
+            "_id": "infant-lap-restrictions",
+            "rule-violation": "'INFANT_LAP_LIMIT'",
+            "passenger-type": "'infant'",
+            "recovery-action": "'suggest_infant_seat'",
+            "user-message": "'Only one infant per adult lap is allowed. Please purchase a seat for additional infants.'",
+            "suggested-next-step": "'passenger_details'",
+            "requires-documentation": false
+          },
+          {
+            "_id": "visa-required",
+            "rule-violation": "'VISA_REQUIREMENT'",
+            "passenger-type": "",
+            "recovery-action": "'show_visa_requirements'",
+            "user-message": "'A visa may be required for your destination. Please verify travel document requirements.'",
+            "suggested-next-step": "'passenger_details'",
+            "requires-documentation": true
+          },
+          {
+            "_id": "advance-booking-restriction",
+            "rule-violation": "'ADVANCE_BOOKING_LIMIT'",
+            "passenger-type": "",
+            "recovery-action": "'suggest_alternative_dates'",
+            "user-message": "'Flights can only be booked up to 11 months in advance. Please select a nearer travel date.'",
+            "suggested-next-step": "'search_criteria'",
+            "requires-documentation": false
+          },
+          {
+            "_id": "covid-travel-restrictions",
+            "rule-violation": "'COVID_RESTRICTIONS'",
+            "passenger-type": "",
+            "recovery-action": "'show_health_requirements'",
+            "user-message": "'Additional health documentation may be required for your destination. Please review current travel requirements.'",
+            "suggested-next-step": "'passenger_details'",
+            "requires-documentation": true
+          }
+        ]
+      }
+    },
+    {
+      "id": "error-response-aggregator",
+      "type": "functionNode",
+      "position": { "x": 950, "y": 400 },
+      "name": "Error Response Aggregator",
+      "content": {
+        "source": "export const handler = async (input) => {\n  const {\n    recoveryAction = 'unknown',\n    userMessage = 'An unexpected error occurred. Please try again.',\n    suggestedNextStep = 'search_criteria',\n    requiresAssistance = false,\n    holdBookingMinutes = 0,\n    offerAlternatives = false,\n    escalatePriority = 'low',\n    requiresDocumentation = false,\n    errorType = 'unknown',\n    currentStep = 'unknown',\n    retryCount = 0,\n    errorDetails = {}\n  } = input;\n\n  // Generate error tracking ID\n  const errorId = 'ERR_' + Date.now() + '_' + Math.floor(Math.random() * 1000);\n  \n  // Determine if booking should be held\n  const shouldHoldBooking = holdBookingMinutes > 0;\n  const bookingExpiresAt = shouldHoldBooking ? \n    new Date(Date.now() + holdBookingMinutes * 60000).toISOString() : null;\n\n  // Determine retry strategy\n  const maxRetries = getMaxRetries(errorType, recoveryAction);\n  const canRetry = retryCount < maxRetries;\n  const retryDelay = getRetryDelay(errorType, retryCount);\n\n  // Generate user-friendly error response\n  const errorResponse = {\n    success: false,\n    errorId: errorId,\n    errorType: errorType,\n    userMessage: userMessage,\n    recoveryAction: recoveryAction,\n    suggestedNextStep: suggestedNextStep,\n    canRetry: canRetry,\n    retryCount: retryCount,\n    maxRetries: maxRetries,\n    retryAfterSeconds: canRetry ? retryDelay : 0,\n    booking: {\n      held: shouldHoldBooking,\n      expiresAt: bookingExpiresAt\n    },\n    assistance: {\n      required: requiresAssistance,\n      priority: escalatePriority,\n      documentationRequired: requiresDocumentation\n    },\n    alternatives: {\n      available: offerAlternatives\n    },\n    technical: {\n      timestamp: new Date().toISOString(),\n      step: currentStep,\n      details: errorDetails\n    }\n  };\n\n  return errorResponse;\n\n  function getMaxRetries(errorType, action) {\n    const retryLimits = {\n      validation: 5,\n      payment: 3,\n      availability: 2,\n      system: 3,\n      timeout: 3,\n      business_rule: 1,\n      unknown: 2\n    };\n    return retryLimits[errorType] || 2;\n  }\n\n  function getRetryDelay(errorType, retryCount) {\n    const baseDelays = {\n      validation: 0,\n      payment: 30,\n      availability: 10,\n      system: 60,\n      timeout: 30,\n      business_rule: 0,\n      unknown: 15\n    };\n    const baseDelay = baseDelays[errorType] || 15;\n    // Exponential backoff with jitter\n    return Math.floor(baseDelay * Math.pow(1.5, retryCount) + Math.random() * 10);\n  }\n};"
+      }
+    },
+    {
+      "id": "error-output",
+      "type": "outputNode",
+      "position": { "x": 1250, "y": 400 },
+      "name": "Error Response"
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-to-classifier",
+      "sourceId": "error-input",
+      "type": "edge",
+      "targetId": "error-type-classifier"
+    },
+    {
+      "id": "validation-error-route",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "validation-error-handler",
+      "sourceHandle": "validation-error"
+    },
+    {
+      "id": "payment-error-route",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "payment-error-handler",
+      "sourceHandle": "payment-error"
+    },
+    {
+      "id": "availability-error-route",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "availability-error-handler",
+      "sourceHandle": "availability-error"
+    },
+    {
+      "id": "system-error-route",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "system-error-handler",
+      "sourceHandle": "system-error"
+    },
+    {
+      "id": "business-rule-error-route",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "business-rule-error-handler",
+      "sourceHandle": "business-rule-error"
+    },
+    {
+      "id": "timeout-to-system",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "system-error-handler",
+      "sourceHandle": "timeout-error"
+    },
+    {
+      "id": "unknown-to-system",
+      "sourceId": "error-type-classifier",
+      "type": "edge",
+      "targetId": "system-error-handler",
+      "sourceHandle": "unknown-error"
+    },
+    {
+      "id": "validation-to-aggregator",
+      "sourceId": "validation-error-handler",
+      "type": "edge",
+      "targetId": "error-response-aggregator"
+    },
+    {
+      "id": "payment-to-aggregator",
+      "sourceId": "payment-error-handler",
+      "type": "edge",
+      "targetId": "error-response-aggregator"
+    },
+    {
+      "id": "availability-to-aggregator",
+      "sourceId": "availability-error-handler",
+      "type": "edge",
+      "targetId": "error-response-aggregator"
+    },
+    {
+      "id": "system-to-aggregator",
+      "sourceId": "system-error-handler",
+      "type": "edge",
+      "targetId": "error-response-aggregator"
+    },
+    {
+      "id": "business-rule-to-aggregator",
+      "sourceId": "business-rule-error-handler",
+      "type": "edge",
+      "targetId": "error-response-aggregator"
+    },
+    {
+      "id": "aggregator-to-output",
+      "sourceId": "error-response-aggregator",
+      "type": "edge",
+      "targetId": "error-output"
+    }
+  ]
+}
