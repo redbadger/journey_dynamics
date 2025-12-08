@@ -12,15 +12,17 @@ pub struct Journey {
     id: Uuid,
     state: JourneyState,
     data_capture: Vec<(String, Value)>,
+    current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDecisionState {
     pub available_actions: Vec<String>,
+    pub primary_next_step: Option<String>,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub enum JourneyState {
     #[default]
     InProgress,
@@ -66,14 +68,25 @@ impl Aggregate for Journey {
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
-                    Ok(vec![
+                    let mut events = vec![
                         JourneyEvent::Modified {
                             form_data: Some(data),
                         },
                         JourneyEvent::WorkflowEvaluated {
-                            available_actions: decision.available_actions,
+                            available_actions: decision.available_actions.clone(),
+                            primary_next_step: decision.primary_next_step.clone(),
                         },
-                    ])
+                    ];
+
+                    // If there's a primary next step, automatically progress to it
+                    if let Some(next_step) = decision.primary_next_step {
+                        events.push(JourneyEvent::StepProgressed {
+                            from_step: self.current_step.clone(),
+                            to_step: next_step,
+                        });
+                    }
+
+                    Ok(events)
                 }
             }
             JourneyCommand::Complete => {
@@ -99,8 +112,20 @@ impl Aggregate for Journey {
                     self.data_capture.push(data);
                 }
             }
-            JourneyEvent::WorkflowEvaluated { available_actions } => {
-                self.latest_workflow_decision = Some(WorkflowDecisionState { available_actions });
+            JourneyEvent::WorkflowEvaluated {
+                available_actions,
+                primary_next_step,
+            } => {
+                self.latest_workflow_decision = Some(WorkflowDecisionState {
+                    available_actions,
+                    primary_next_step,
+                });
+            }
+            JourneyEvent::StepProgressed {
+                from_step: _,
+                to_step,
+            } => {
+                self.current_step = Some(to_step);
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
@@ -147,13 +172,18 @@ impl Journey {
     }
 
     #[must_use]
-    pub fn state(&self) -> &JourneyState {
-        &self.state
+    pub fn state(&self) -> JourneyState {
+        self.state
     }
 
     #[must_use]
     pub fn data_capture(&self) -> &[(String, Value)] {
         &self.data_capture
+    }
+
+    #[must_use]
+    pub fn current_step(&self) -> Option<&String> {
+        self.current_step.as_ref()
     }
 
     #[must_use]
@@ -460,7 +490,8 @@ mod tests {
         assert_eq!(
             events[2].payload,
             JourneyEvent::WorkflowEvaluated {
-                available_actions: vec![]
+                available_actions: vec![],
+                primary_next_step: None
             }
         );
         assert!(matches!(events[3].payload, JourneyEvent::Completed));
@@ -511,112 +542,8 @@ mod tests {
         assert_eq!(
             events[2].payload,
             JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["form_3".to_string()]
-            }
-        );
-    }
-
-    #[tokio::test]
-    #[ignore = "for now"]
-    async fn use_go_rules_workflow_evaluation_gia() {
-        let event_store = MemStore::<Journey>::default();
-        let query = SimpleLoggingQuery {};
-        let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-            "../services/jdm_graph.json"
-        )));
-        let services = JourneyServices::new(decision_engine);
-
-        // Create CQRS framework first
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
-        let id = Uuid::new_v4();
-
-        // Start a Journey - should trigger workflow evaluation
-        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
-            .await
-            .unwrap();
-
-        // Submit a form - should trigger workflow evaluation
-        let form_value = json!({
-            "step": "personal_info",
-            "country": "UK",
-            "name": "Alice",
-        });
-
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("personal_info".to_string(), form_value),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Complete the Journey - should trigger workflow evaluation
-        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
-            .await
-            .unwrap();
-
-        // Verify events in the store
-        let events = event_store.load_events(&id.to_string()).await.unwrap();
-        println!("\n=== All Events ===");
-
-        assert!(events.len() == 4, "Should have 4 events");
-        assert_eq!(
-            events[2].payload,
-            JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["form_3".to_string()]
-            }
-        );
-    }
-    #[tokio::test]
-    #[ignore = "for now"]
-    async fn use_go_rules_workflow_evaluation_isa() {
-        let event_store = MemStore::<Journey>::default();
-        let query = SimpleLoggingQuery {};
-        let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-            "../services/jdm_graph.json"
-        )));
-        let services = JourneyServices::new(decision_engine);
-
-        // Create CQRS framework first
-        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
-        let id = Uuid::new_v4();
-
-        // Start a Journey - should trigger workflow evaluation
-        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
-            .await
-            .unwrap();
-
-        // Submit a form - should trigger workflow evaluation
-        let form_value = json!({
-            "step": "personal_info",
-            "country": "UK",
-            "name": "Alice",
-        });
-
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("personal_info".to_string(), form_value),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Complete the Journey - should trigger workflow evaluation
-        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
-            .await
-            .unwrap();
-
-        // Verify events in the store
-        let events = event_store.load_events(&id.to_string()).await.unwrap();
-        println!("\n=== All Events ===");
-
-        assert!(events.len() == 4, "Should have 4 events");
-        assert_eq!(
-            events[2].payload,
-            JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["form_3".to_string()]
+                available_actions: vec!["form_3".to_string()],
+                primary_next_step: None
             }
         );
     }
@@ -638,9 +565,9 @@ mod tests {
         let get_latest_workflow_evaluation =
             |events: &[cqrs_es::EventEnvelope<Journey>]| -> Option<Vec<String>> {
                 events.iter().rev().find_map(|event| match &event.payload {
-                    JourneyEvent::WorkflowEvaluated { available_actions } => {
-                        Some(available_actions.clone())
-                    }
+                    JourneyEvent::WorkflowEvaluated {
+                        available_actions, ..
+                    } => Some(available_actions.clone()),
                     _ => None,
                 })
             };
@@ -916,10 +843,18 @@ mod tests {
                 JourneyEvent::Modified { form_data: None } => {
                     println!("Event {}: Data Modified (no step info)", i + 1);
                 }
-                JourneyEvent::WorkflowEvaluated { available_actions } => println!(
+                JourneyEvent::WorkflowEvaluated {
+                    available_actions, ..
+                } => println!(
                     "Event {}: Workflow Evaluated -> {:?}",
                     i + 1,
                     available_actions
+                ),
+                JourneyEvent::StepProgressed { from_step, to_step } => println!(
+                    "Event {}: Step Progressed from {:?} to '{}'",
+                    i + 1,
+                    from_step,
+                    to_step
                 ),
                 JourneyEvent::Completed => println!("Event {}: Journey Completed", i + 1),
             }
@@ -968,6 +903,276 @@ mod tests {
         );
         println!(
             "      but the validation logic demonstrates the intended step checking behavior."
+        );
+    }
+
+    #[tokio::test]
+    async fn decision_engine_driven_flight_booking() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
+            "../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        )));
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework
+        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
+        let id = Uuid::new_v4();
+
+        // Helper function to get the current step from journey
+        let get_current_step = |events: &[cqrs_es::EventEnvelope<Journey>]| -> Option<String> {
+            events.iter().rev().find_map(|event| match &event.payload {
+                JourneyEvent::StepProgressed { to_step, .. } => Some(to_step.clone()),
+                _ => None,
+            })
+        };
+
+        // Helper function to get the primary next step from latest workflow evaluation
+        let get_primary_next_step = |events: &[cqrs_es::EventEnvelope<Journey>]| -> Option<String> {
+            events.iter().rev().find_map(|event| match &event.payload {
+                JourneyEvent::WorkflowEvaluated {
+                    primary_next_step, ..
+                } => primary_next_step.clone(),
+                _ => None,
+            })
+        };
+
+        println!("\n=== Decision Engine Driven Flight Booking Test ===");
+
+        // Start a Journey - this should trigger initial workflow evaluation
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        assert!(matches!(events[0].payload, JourneyEvent::Started { .. }));
+        println!("✓ Journey started");
+
+        // The journey starts without any currentStep - let's capture some initial data
+        // and see what the decision engine tells us to do
+        println!("\n--- Phase 1: Initial Data Capture ---");
+
+        // Capture some initial search criteria data
+        let trip_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("capturedData".to_string(), trip_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        let current_step = get_current_step(&events);
+        let next_step_suggestion = get_primary_next_step(&events);
+
+        println!("After capturing search criteria:");
+        println!("  Current step: {:?}", current_step);
+        println!("  Decision engine suggests: {:?}", next_step_suggestion);
+
+        // The decision engine should have automatically progressed us to the appropriate step
+        assert!(
+            current_step.is_some(),
+            "Should have progressed to a step automatically"
+        );
+
+        println!("\n--- Phase 2: Flight Selection ---");
+
+        // Add outbound flight selection
+        let updated_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("capturedData".to_string(), updated_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        let current_step = get_current_step(&events);
+        let next_step_suggestion = get_primary_next_step(&events);
+
+        println!("After selecting outbound flight:");
+        println!("  Current step: {:?}", current_step);
+        println!("  Decision engine suggests: {:?}", next_step_suggestion);
+
+        println!("\n--- Phase 3: Return Flight Selection ---");
+
+        // Add return flight selection
+        let final_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            },
+            "selectedReturnFlight": {
+                "flightId": "BA456",
+                "airline": "British Airways",
+                "price": 480.00,
+                "departure": "14:20",
+                "arrival": "17:35"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("capturedData".to_string(), final_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        let current_step = get_current_step(&events);
+        let next_step_suggestion = get_primary_next_step(&events);
+
+        println!("After selecting return flight:");
+        println!("  Current step: {:?}", current_step);
+        println!("  Decision engine suggests: {:?}", next_step_suggestion);
+
+        println!("\n--- Phase 4: Passenger Details ---");
+
+        // Mark passengers as complete
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("passengersComplete".to_string(), json!(true)),
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        let current_step = get_current_step(&events);
+        let next_step_suggestion = get_primary_next_step(&events);
+
+        println!("After completing passenger details:");
+        println!("  Current step: {:?}", current_step);
+        println!("  Decision engine suggests: {:?}", next_step_suggestion);
+
+        println!("\n--- Phase 5: Payment ---");
+
+        // Complete payment
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("paymentStatus".to_string(), json!("completed")),
+            },
+        )
+        .await
+        .unwrap();
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        let current_step = get_current_step(&events);
+        let next_step_suggestion = get_primary_next_step(&events);
+
+        println!("After completing payment:");
+        println!("  Current step: {:?}", current_step);
+        println!("  Decision engine suggests: {:?}", next_step_suggestion);
+
+        // Complete the Journey
+        cqrs.execute(&id.to_string(), JourneyCommand::Complete)
+            .await
+            .unwrap();
+
+        // Final verification
+        let final_events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== Event Summary ===");
+
+        let workflow_evaluations = final_events
+            .iter()
+            .filter(|event| matches!(event.payload, JourneyEvent::WorkflowEvaluated { .. }))
+            .count();
+
+        let step_progressions = final_events
+            .iter()
+            .filter(|event| matches!(event.payload, JourneyEvent::StepProgressed { .. }))
+            .count();
+
+        println!("Total workflow evaluations: {}", workflow_evaluations);
+        println!("Total step progressions: {}", step_progressions);
+
+        // Key assertions:
+        // 1. We never manually set currentStep - all progression was automatic
+        // 2. Each data capture triggered workflow evaluation
+        // 3. Workflow evaluations triggered automatic step progression
+        assert!(workflow_evaluations > 0, "Should have workflow evaluations");
+        assert!(
+            step_progressions > 0,
+            "Should have automatic step progressions"
+        );
+
+        // Verify we never manually set currentStep
+        let manual_step_sets = final_events
+            .iter()
+            .filter(|event| {
+                matches!(&event.payload,
+                    JourneyEvent::Modified {
+                        form_data: Some((key, _))
+                    } if key == "currentStep"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            manual_step_sets, 0,
+            "Should not have any manual currentStep settings"
+        );
+
+        println!(
+            "\n✅ Test passed! The decision engine successfully drove the workflow progression."
+        );
+        println!(
+            "✅ No manual step setting required - all progression was automatic based on data."
         );
     }
 }

@@ -8,6 +8,7 @@ use zen_engine::{DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationO
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
     pub available_actions: Vec<String>,
+    pub primary_next_step: Option<String>,
 }
 
 #[async_trait]
@@ -57,7 +58,10 @@ impl DecisionEngine for SimpleDecisionEngine {
             JourneyState::Complete => vec![],
         };
 
-        Ok(WorkflowDecision { available_actions })
+        Ok(WorkflowDecision {
+            available_actions,
+            primary_next_step: None,
+        })
     }
 }
 
@@ -135,6 +139,15 @@ impl DecisionEngine for GoRulesDecisionEngine {
             .map(|item| item.as_str().unwrap().to_string())
             .collect();
 
-        Ok(WorkflowDecision { available_actions })
+        // Try to get primary next step
+        let primary_next_step = take
+            .get("primaryNextStep")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        Ok(WorkflowDecision {
+            available_actions,
+            primary_next_step,
+        })
     }
 }
