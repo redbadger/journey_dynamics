@@ -62,15 +62,27 @@ impl Aggregate for Journey {
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
+                    // Determine if the data key represents a step transition
+                    let (key, _) = &data;
+                    let is_step_transition = key != "capturedData"
+                        && key != "currentStep"
+                        && Some(key) != self.current_step.as_ref();
+
+                    // If this is a step transition, temporarily update currentStep for evaluation
+                    let mut journey_for_eval = self.clone();
+                    if is_step_transition {
+                        journey_for_eval.current_step = Some(key.clone());
+                    }
+
                     let decision = _services
                         .decision_engine()
-                        .evaluate_next_steps(self, &data)
+                        .evaluate_next_steps(&journey_for_eval, &data)
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
                     let mut events = vec![
                         JourneyEvent::Modified {
-                            form_data: Some(data),
+                            form_data: Some(data.clone()),
                         },
                         JourneyEvent::WorkflowEvaluated {
                             available_actions: decision.available_actions.clone(),
@@ -78,11 +90,11 @@ impl Aggregate for Journey {
                         },
                     ];
 
-                    // If there's a primary next step, automatically progress to it
-                    if let Some(next_step) = decision.primary_next_step {
+                    // If the data key represents a step, emit StepProgressed event
+                    if is_step_transition {
                         events.push(JourneyEvent::StepProgressed {
                             from_step: self.current_step.clone(),
-                            to_step: next_step,
+                            to_step: key.clone(),
                         });
                     }
 
@@ -454,7 +466,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("step".to_string(), form_value),
+                data: ("capturedData".to_string(), form_value),
             },
         )
         .await
@@ -523,7 +535,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("step_1".to_string(), form_value),
+                data: ("capturedData".to_string(), form_value),
             },
         )
         .await
@@ -582,20 +594,7 @@ mod tests {
         assert!(matches!(events[0].payload, JourneyEvent::Started { .. }));
         println!("\n=== Step 1: Journey Started ===");
 
-        // Step 1: Initialize journey with search criteria and set currentStep
-        let _events_before = event_store.load_events(&id.to_string()).await.unwrap();
-
-        // First, set currentStep to search_criteria
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!("search_criteria")),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Then capture the search criteria data
+        // Step 1: User submits search criteria
         let trip_data = json!({
             "tripType": "round-trip",
             "origin": "LHR",
@@ -613,7 +612,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("capturedData".to_string(), trip_data),
+                data: ("search_criteria".to_string(), trip_data),
             },
         )
         .await
@@ -631,21 +630,14 @@ mod tests {
             "Expected '{expected_next_step}' to be in available actions: {available_actions:?}"
         );
 
-        // Step 2: Progress to flight search results step
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!(expected_next_step)),
-            },
-        )
-        .await
-        .unwrap();
+        // Step 2: User now working on the suggested next step (flight_search_results)
+        // No explicit step change needed - they'll submit data when ready
 
-        // Add some search results data
+        // Add some search results data (using capturedData key since this is supplementary data)
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("searchResults".to_string(), json!(25)), // 25 flights found
+                data: ("capturedData".to_string(), json!({"searchResults": 25})), // 25 flights found
             },
         )
         .await
@@ -656,77 +648,10 @@ mod tests {
             .expect("Should have workflow evaluation after search results");
         println!("After search results, available actions: {available_actions:?}");
 
-        // Step 3: Progress to outbound flight selection
-        let expected_next_step = "outbound_flight_selection";
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!(expected_next_step)),
-            },
-        )
-        .await
-        .unwrap();
+        // Step 3: User progresses to outbound flight selection by submitting data with that key
+        // (They would submit actual flight selection data here)
 
-        // Select outbound flight and add to capturedData
-        let outbound_flight = json!({
-            "flightId": "BA123",
-            "airline": "British Airways",
-            "price": 450.00,
-            "departure": "08:30",
-            "arrival": "11:45"
-        });
-
-        // Update capturedData with selected outbound flight
-        let updated_captured_data = json!({
-            "tripType": "round-trip",
-            "origin": "LHR",
-            "destination": "JFK",
-            "departureDate": "2024-06-15",
-            "returnDate": "2024-06-22",
-            "passengers": {
-                "total": 2,
-                "adults": 2,
-                "children": 0,
-                "infants": 0
-            },
-            "selectedOutboundFlight": outbound_flight
-        });
-
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("capturedData".to_string(), updated_captured_data),
-            },
-        )
-        .await
-        .unwrap();
-
-        events = event_store.load_events(&id.to_string()).await.unwrap();
-        let available_actions = get_latest_workflow_evaluation(&events)
-            .expect("Should have workflow evaluation after outbound flight");
-        println!("After outbound flight selection, available actions: {available_actions:?}");
-
-        // Step 4: Progress to return flight selection for round-trip
-        let expected_next_step = "return_flight_selection";
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!(expected_next_step)),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Select return flight
-        let return_flight = json!({
-            "flightId": "BA456",
-            "airline": "British Airways",
-            "price": 480.00,
-            "departure": "14:20",
-            "arrival": "17:35"
-        });
-
-        // Update capturedData with selected return flight
+        // User submits outbound flight selection
         let updated_captured_data = json!({
             "tripType": "round-trip",
             "origin": "LHR",
@@ -745,14 +670,61 @@ mod tests {
                 "price": 450.00,
                 "departure": "08:30",
                 "arrival": "11:45"
-            },
-            "selectedReturnFlight": return_flight
+            }
         });
 
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("capturedData".to_string(), updated_captured_data),
+                data: (
+                    "outbound_flight_selection".to_string(),
+                    updated_captured_data,
+                ),
+            },
+        )
+        .await
+        .unwrap();
+
+        events = event_store.load_events(&id.to_string()).await.unwrap();
+        let available_actions = get_latest_workflow_evaluation(&events)
+            .expect("Should have workflow evaluation after outbound flight");
+        println!("After outbound flight selection, available actions: {available_actions:?}");
+
+        // Step 4: User progresses to return flight selection for round-trip
+
+        // User submits return flight selection
+        let return_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            },
+            "selectedReturnFlight": {
+                "flightId": "BA456",
+                "airline": "British Airways",
+                "price": 480.00,
+                "departure": "14:20",
+                "arrival": "17:35"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("return_flight_selection".to_string(), return_data),
             },
         )
         .await
@@ -763,22 +735,15 @@ mod tests {
             .expect("Should have workflow evaluation after return flight");
         println!("After return flight selection, available actions: {available_actions:?}");
 
-        // Step 5: Progress to passenger details
-        let expected_next_step = "passenger_details";
+        // Step 5: User progresses to passenger details
+        // For this simplified test, just use capturedData
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!(expected_next_step)),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Add passenger information - mark as complete
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("passengersComplete".to_string(), json!(true)),
+                data: (
+                    "capturedData".to_string(),
+                    json!({"passengersComplete": true}),
+                ),
             },
         )
         .await
@@ -790,22 +755,11 @@ mod tests {
             .expect("Should have workflow evaluation after passenger details");
         println!("After passenger details, available actions: {available_actions:?}");
 
-        // Step 6: Progress to payment
-        let expected_next_step = "payment";
+        // Step 6: Capture payment data - this transitions to payment step
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("currentStep".to_string(), json!(expected_next_step)),
-            },
-        )
-        .await
-        .unwrap();
-
-        // Complete payment
-        cqrs.execute(
-            &id.to_string(),
-            JourneyCommand::Capture {
-                data: ("paymentStatus".to_string(), json!("completed")),
+                data: ("payment".to_string(), json!({"paymentStatus": "success"})),
             },
         )
         .await
@@ -952,7 +906,7 @@ mod tests {
         // and see what the decision engine tells us to do
         println!("\n--- Phase 1: Initial Data Capture ---");
 
-        // Capture some initial search criteria data
+        // User submits search criteria - the key "search_criteria" indicates the step
         let trip_data = json!({
             "tripType": "round-trip",
             "origin": "LHR",
@@ -970,7 +924,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("capturedData".to_string(), trip_data),
+                data: ("search_criteria".to_string(), trip_data),
             },
         )
         .await
@@ -984,15 +938,22 @@ mod tests {
         println!("  Current step: {:?}", current_step);
         println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
-        // The decision engine should have automatically progressed us to the appropriate step
+        // User has progressed to search_criteria step by submitting data with that key
+        assert_eq!(
+            current_step,
+            Some("search_criteria".to_string()),
+            "CurrentStep should be set based on the data key submitted"
+        );
+
+        // Decision engine provides advisory recommendation for next step
         assert!(
-            current_step.is_some(),
-            "Should have progressed to a step automatically"
+            next_step_suggestion.is_some(),
+            "Decision engine should suggest next step"
         );
 
         println!("\n--- Phase 2: Flight Selection ---");
 
-        // Add outbound flight selection
+        // User submits outbound flight selection - the key indicates the step
         let updated_data = json!({
             "tripType": "round-trip",
             "origin": "LHR",
@@ -1017,7 +978,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("capturedData".to_string(), updated_data),
+                data: ("outbound_flight_selection".to_string(), updated_data),
             },
         )
         .await
@@ -1031,9 +992,15 @@ mod tests {
         println!("  Current step: {:?}", current_step);
         println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
+        // Should suggest return flight selection for round-trip
+        assert_eq!(
+            next_step_suggestion,
+            Some("return_flight_selection".to_string())
+        );
+
         println!("\n--- Phase 3: Return Flight Selection ---");
 
-        // Add return flight selection
+        // User submits return flight selection
         let final_data = json!({
             "tripType": "round-trip",
             "origin": "LHR",
@@ -1065,7 +1032,7 @@ mod tests {
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("capturedData".to_string(), final_data),
+                data: ("return_flight_selection".to_string(), final_data),
             },
         )
         .await
@@ -1079,13 +1046,31 @@ mod tests {
         println!("  Current step: {:?}", current_step);
         println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
+        // Should suggest passenger details after both flights selected
+        assert_eq!(next_step_suggestion, Some("passenger_details".to_string()));
+
         println!("\n--- Phase 4: Passenger Details ---");
 
-        // Mark passengers as complete
+        // User submits passenger details
+        let passenger_data = json!({
+            "passengers": [
+                {
+                    "firstName": "John",
+                    "lastName": "Doe",
+                    "dateOfBirth": "1985-03-15"
+                },
+                {
+                    "firstName": "Jane",
+                    "lastName": "Doe",
+                    "dateOfBirth": "1987-07-22"
+                }
+            ]
+        });
+
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("passengersComplete".to_string(), json!(true)),
+                data: ("passenger_details".to_string(), passenger_data),
             },
         )
         .await
@@ -1101,11 +1086,16 @@ mod tests {
 
         println!("\n--- Phase 5: Payment ---");
 
-        // Complete payment
+        // User submits payment (skipping seat selection and ancillary services for this test)
+        let payment_data = json!({
+            "paymentStatus": "success",  // Changed from "completed" to "success" to match decision table
+            "paymentMethod": "credit_card"
+        });
+
         cqrs.execute(
             &id.to_string(),
             JourneyCommand::Capture {
-                data: ("paymentStatus".to_string(), json!("completed")),
+                data: ("payment".to_string(), payment_data),
             },
         )
         .await
@@ -1142,37 +1132,265 @@ mod tests {
         println!("Total step progressions: {}", step_progressions);
 
         // Key assertions:
-        // 1. We never manually set currentStep - all progression was automatic
-        // 2. Each data capture triggered workflow evaluation
-        // 3. Workflow evaluations triggered automatic step progression
+        // 1. Each data capture triggered workflow evaluation (advisory)
+        // 2. Decision engine provides recommendations but doesn't force progression
+        // 3. Step progression happens when user submits data with a new step key
         assert!(workflow_evaluations > 0, "Should have workflow evaluations");
         assert!(
             step_progressions > 0,
-            "Should have automatic step progressions"
+            "Should track step progressions based on data keys submitted by user"
         );
 
-        // Verify we never manually set currentStep
-        let manual_step_sets = final_events
+        // Verify the decision engine provided recommendations at each phase
+        let evaluations_with_recommendations = final_events
             .iter()
             .filter(|event| {
-                matches!(&event.payload,
-                    JourneyEvent::Modified {
-                        form_data: Some((key, _))
-                    } if key == "currentStep"
+                matches!(
+                    &event.payload,
+                    JourneyEvent::WorkflowEvaluated {
+                        primary_next_step: Some(_),
+                        ..
+                    }
                 )
             })
             .count();
 
-        assert_eq!(
-            manual_step_sets, 0,
-            "Should not have any manual currentStep settings"
+        assert!(
+            evaluations_with_recommendations > 0,
+            "Decision engine should provide step recommendations"
         );
 
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+        for event in &events {
+            println!("{}-{}: {:?}", id, event.sequence, event.payload);
+        }
+
+        println!("\n✅ Test passed! The decision engine provides advisory recommendations.");
         println!(
-            "\n✅ Test passed! The decision engine successfully drove the workflow progression."
+            "✅ No automatic progression - user stays in control and decides when to move forward."
         );
+    }
+
+    #[tokio::test]
+    async fn backward_navigation_to_change_previous_step() {
+        let event_store = MemStore::<Journey>::default();
+        let query = SimpleLoggingQuery {};
+        let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
+            "../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        )));
+        let services = JourneyServices::new(decision_engine);
+
+        // Create CQRS framework
+        let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
+        let id = Uuid::new_v4();
+
+        // Helper function to get the latest workflow evaluation
+        let get_latest_workflow_evaluation =
+            |events: &[cqrs_es::EventEnvelope<Journey>]| -> Option<Vec<String>> {
+                events.iter().rev().find_map(|event| match &event.payload {
+                    JourneyEvent::WorkflowEvaluated {
+                        available_actions, ..
+                    } => Some(available_actions.clone()),
+                    _ => None,
+                })
+            };
+
+        // Start journey
+        cqrs.execute(&id.to_string(), JourneyCommand::Start { id })
+            .await
+            .unwrap();
+
+        println!("\n=== Test: Backward Navigation ===");
+
+        // Step 1: Submit search criteria
+        let search_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("search_criteria".to_string(), search_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("Step 1: Search criteria captured");
+        let actions = get_latest_workflow_evaluation(&events).unwrap();
+        println!("Available actions: {:?}", actions);
+
+        // Step 2: Select outbound flight
+        let outbound_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("outbound_flight_selection".to_string(), outbound_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\nStep 2: Outbound flight selected (BA123)");
+        let actions = get_latest_workflow_evaluation(&events).unwrap();
+        println!("Available actions: {:?}", actions);
+
+        // Step 3: Select return flight
+        let return_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            },
+            "selectedReturnFlight": {
+                "flightId": "BA456",
+                "airline": "British Airways",
+                "price": 470.00,
+                "departure": "14:00",
+                "arrival": "17:15"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("return_flight_selection".to_string(), return_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\nStep 3: Return flight selected (BA456)");
+        let actions = get_latest_workflow_evaluation(&events).unwrap();
+        println!("Available actions: {:?}", actions);
+
+        // Step 4: USER CHANGES MIND - Go back to change outbound flight
+        let new_outbound_data = json!({
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": {
+                "total": 2,
+                "adults": 2,
+                "children": 0,
+                "infants": 0
+            },
+            "selectedOutboundFlight": {
+                "flightId": "VS007",
+                "airline": "Virgin Atlantic",
+                "price": 425.00,
+                "departure": "10:00",
+                "arrival": "13:15"
+            }
+        });
+
+        cqrs.execute(
+            &id.to_string(),
+            JourneyCommand::Capture {
+                data: ("outbound_flight_selection".to_string(), new_outbound_data),
+            },
+        )
+        .await
+        .unwrap();
+
+        events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n🔄 Step 4: BACKWARD NAVIGATION - User changed outbound flight to VS007");
+        let actions_after_backward = get_latest_workflow_evaluation(&events).unwrap();
         println!(
-            "✅ No manual step setting required - all progression was automatic based on data."
+            "Available actions after going back: {:?}",
+            actions_after_backward
         );
+
+        // Verify that we can still progress forward from here
+        assert!(
+            !actions_after_backward.is_empty(),
+            "Should have available actions after backward navigation"
+        );
+
+        // Check for StepProgressed events
+        let step_progressed_events: Vec<_> = events
+            .iter()
+            .filter_map(|e| match &e.payload {
+                JourneyEvent::StepProgressed { from_step, to_step } => {
+                    Some((from_step.clone(), to_step.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        println!("\nStep progression history:");
+        for (from, to) in &step_progressed_events {
+            println!("  {:?} → {}", from, to);
+        }
+
+        // Verify backward navigation occurred
+        assert_eq!(
+            step_progressed_events.len(),
+            4,
+            "Should have 4 step transitions"
+        );
+        assert_eq!(
+            step_progressed_events[3],
+            (
+                Some("return_flight_selection".to_string()),
+                "outbound_flight_selection".to_string()
+            ),
+            "Last transition should be backward: return_flight_selection → outbound_flight_selection"
+        );
+
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
+        println!("\n=== All Events ===");
+        for event in &events {
+            println!("{}-{}: {:?}", id, event.sequence, event.payload);
+        }
     }
 }

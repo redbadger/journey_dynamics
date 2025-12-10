@@ -92,7 +92,42 @@ impl DecisionEngine for GoRulesDecisionEngine {
         combined_data.push(new_data.to_owned());
 
         let map: Map<String, Value> = combined_data.into_iter().collect();
-        let something = serde_json::to_value(&map).unwrap();
+
+        // Build the context for decision engine evaluation
+        let mut context = Map::new();
+
+        // Include currentStep so the decision engine can route correctly
+        if let Some(current_step) = journey.current_step() {
+            context.insert(
+                "currentStep".to_string(),
+                Value::String(current_step.clone()),
+            );
+        }
+
+        // Merge all step data into capturedData object for decision engine rules
+        // Rules expect capturedData.tripType, capturedData.selectedOutboundFlight, etc.
+        let mut captured_data = Map::new();
+        for (key, value) in map.iter() {
+            // Skip meta keys, merge step data into capturedData
+            if key != "currentStep" && key != "capturedData" {
+                if let Value::Object(obj) = value {
+                    for (k, v) in obj.iter() {
+                        captured_data.insert(k.clone(), v.clone());
+                    }
+                }
+            } else if key == "capturedData" {
+                // If there's already a capturedData key, merge it too
+                if let Value::Object(obj) = value {
+                    for (k, v) in obj.iter() {
+                        captured_data.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+
+        context.insert("capturedData".to_string(), Value::Object(captured_data));
+
+        let something = serde_json::to_value(&context).unwrap();
 
         // println!("Something {:?}", something);
 
