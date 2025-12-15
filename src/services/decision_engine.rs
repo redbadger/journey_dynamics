@@ -107,18 +107,18 @@ impl DecisionEngine for GoRulesDecisionEngine {
         // Merge all step data into capturedData object for decision engine rules
         // Rules expect capturedData.tripType, capturedData.selectedOutboundFlight, etc.
         let mut captured_data = Map::new();
-        for (key, value) in map.iter() {
+        for (key, value) in &map {
             // Skip meta keys, merge step data into capturedData
             if key != "currentStep" && key != "capturedData" {
                 if let Value::Object(obj) = value {
-                    for (k, v) in obj.iter() {
+                    for (k, v) in obj {
                         captured_data.insert(k.clone(), v.clone());
                     }
                 }
             } else if key == "capturedData" {
                 // If there's already a capturedData key, merge it too
                 if let Value::Object(obj) = value {
-                    for (k, v) in obj.iter() {
+                    for (k, v) in obj {
                         captured_data.insert(k.clone(), v.clone());
                     }
                 }
@@ -178,7 +178,7 @@ impl DecisionEngine for GoRulesDecisionEngine {
         let primary_next_step = take
             .get("primaryNextStep")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         Ok(WorkflowDecision {
             available_actions,

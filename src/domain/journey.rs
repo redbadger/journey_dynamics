@@ -935,8 +935,6 @@ mod tests {
         let next_step_suggestion = get_primary_next_step(&events);
 
         println!("After capturing search criteria:");
-        println!("  Current step: {:?}", current_step);
-        println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
         // User has progressed to search_criteria step by submitting data with that key
         assert_eq!(
@@ -985,12 +983,9 @@ mod tests {
         .unwrap();
 
         let events = event_store.load_events(&id.to_string()).await.unwrap();
-        let current_step = get_current_step(&events);
         let next_step_suggestion = get_primary_next_step(&events);
 
         println!("After selecting outbound flight:");
-        println!("  Current step: {:?}", current_step);
-        println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
         // Should suggest return flight selection for round-trip
         assert_eq!(
@@ -1039,12 +1034,9 @@ mod tests {
         .unwrap();
 
         let events = event_store.load_events(&id.to_string()).await.unwrap();
-        let current_step = get_current_step(&events);
         let next_step_suggestion = get_primary_next_step(&events);
 
         println!("After selecting return flight:");
-        println!("  Current step: {:?}", current_step);
-        println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
         // Should suggest passenger details after both flights selected
         assert_eq!(next_step_suggestion, Some("passenger_details".to_string()));
@@ -1076,13 +1068,7 @@ mod tests {
         .await
         .unwrap();
 
-        let events = event_store.load_events(&id.to_string()).await.unwrap();
-        let current_step = get_current_step(&events);
-        let next_step_suggestion = get_primary_next_step(&events);
-
         println!("After completing passenger details:");
-        println!("  Current step: {:?}", current_step);
-        println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
         println!("\n--- Phase 5: Payment ---");
 
@@ -1101,13 +1087,7 @@ mod tests {
         .await
         .unwrap();
 
-        let events = event_store.load_events(&id.to_string()).await.unwrap();
-        let current_step = get_current_step(&events);
-        let next_step_suggestion = get_primary_next_step(&events);
-
         println!("After completing payment:");
-        println!("  Current step: {:?}", current_step);
-        println!("  Decision engine suggests: {:?}", next_step_suggestion);
 
         // Complete the Journey
         cqrs.execute(&id.to_string(), JourneyCommand::Complete)
@@ -1127,9 +1107,6 @@ mod tests {
             .iter()
             .filter(|event| matches!(event.payload, JourneyEvent::StepProgressed { .. }))
             .count();
-
-        println!("Total workflow evaluations: {}", workflow_evaluations);
-        println!("Total step progressions: {}", step_progressions);
 
         // Key assertions:
         // 1. Each data capture triggered workflow evaluation (advisory)
@@ -1227,11 +1204,6 @@ mod tests {
         .await
         .unwrap();
 
-        let mut events = event_store.load_events(&id.to_string()).await.unwrap();
-        println!("Step 1: Search criteria captured");
-        let actions = get_latest_workflow_evaluation(&events).unwrap();
-        println!("Available actions: {:?}", actions);
-
         // Step 2: Select outbound flight
         let outbound_data = json!({
             "tripType": "round-trip",
@@ -1263,11 +1235,7 @@ mod tests {
         .await
         .unwrap();
 
-        events = event_store.load_events(&id.to_string()).await.unwrap();
         println!("\nStep 2: Outbound flight selected (BA123)");
-        let actions = get_latest_workflow_evaluation(&events).unwrap();
-        println!("Available actions: {:?}", actions);
-
         // Step 3: Select return flight
         let return_data = json!({
             "tripType": "round-trip",
@@ -1306,10 +1274,7 @@ mod tests {
         .await
         .unwrap();
 
-        events = event_store.load_events(&id.to_string()).await.unwrap();
         println!("\nStep 3: Return flight selected (BA456)");
-        let actions = get_latest_workflow_evaluation(&events).unwrap();
-        println!("Available actions: {:?}", actions);
 
         // Step 4: USER CHANGES MIND - Go back to change outbound flight
         let new_outbound_data = json!({
@@ -1342,13 +1307,9 @@ mod tests {
         .await
         .unwrap();
 
-        events = event_store.load_events(&id.to_string()).await.unwrap();
+        let events = event_store.load_events(&id.to_string()).await.unwrap();
         println!("\n🔄 Step 4: BACKWARD NAVIGATION - User changed outbound flight to VS007");
         let actions_after_backward = get_latest_workflow_evaluation(&events).unwrap();
-        println!(
-            "Available actions after going back: {:?}",
-            actions_after_backward
-        );
 
         // Verify that we can still progress forward from here
         assert!(
@@ -1366,11 +1327,6 @@ mod tests {
                 _ => None,
             })
             .collect();
-
-        println!("\nStep progression history:");
-        for (from, to) in &step_progressed_events {
-            println!("  {:?} → {}", from, to);
-        }
 
         // Verify backward navigation occurred
         assert_eq!(

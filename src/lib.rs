@@ -5,6 +5,7 @@ pub mod queries;
 pub mod route_handler;
 pub mod services;
 pub mod state;
+pub mod view_repository;
 
 use async_trait::async_trait;
 use cqrs_es::{Aggregate, EventEnvelope, Query};

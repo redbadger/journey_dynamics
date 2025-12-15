@@ -4,15 +4,20 @@ use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use cqrs_es::persist::ViewRepository;
+use uuid::Uuid;
 
 // Serves as our query endpoint to respond with the materialized `JourneyView`
-// for the requested account.
+// for the requested journey.
 pub async fn query_handler(
     Path(journey_id): Path<String>,
     State(state): State<ApplicationState>,
 ) -> Response {
-    match state.journey_query.load(&journey_id).await {
+    // Parse the journey_id as UUID
+    let Ok(uuid) = Uuid::parse_str(&journey_id) else {
+        return (StatusCode::BAD_REQUEST, "Invalid journey ID format").into_response();
+    };
+
+    match state.journey_query.load(&uuid).await {
         Ok(Some(journey_view)) => (StatusCode::OK, Json(journey_view)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
@@ -22,7 +27,7 @@ pub async fn query_handler(
     }
 }
 
-// Serves as our command endpoint to make changes in a `BankAccount` aggregate.
+// Serves as our command endpoint to make changes in a `Journey` aggregate.
 pub async fn command_handler(
     Path(journey_id): Path<String>,
     State(state): State<ApplicationState>,
