@@ -21,15 +21,18 @@ impl StructuredJourneyViewRepository {
     }
 
     /// Load a journey view by ID from the structured database
-    #[allow(clippy::missing_errors_doc)]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn load(&self, journey_id: &Uuid) -> Result<Option<JourneyView>, sqlx::Error> {
         // Load the main journey record
         let journey_row = sqlx::query(
-            r#"
+            r"
             SELECT id, state, current_step, version, created_at, updated_at
             FROM journey_view
             WHERE id = $1
-            "#,
+            ",
         )
         .bind(journey_id)
         .fetch_optional(&self.pool)
@@ -42,7 +45,6 @@ impl StructuredJourneyViewRepository {
         let id: Uuid = row.get("id");
         let state_str: String = row.get("state");
         let state = match state_str.as_str() {
-            "InProgress" => JourneyState::InProgress,
             "Complete" => JourneyState::Complete,
             _ => JourneyState::InProgress,
         };
@@ -50,12 +52,12 @@ impl StructuredJourneyViewRepository {
 
         // Load data capture entries
         let data_capture_rows = sqlx::query(
-            r#"
+            r"
             SELECT key, value, sequence
             FROM journey_data_capture
             WHERE journey_id = $1
             ORDER BY sequence ASC
-            "#,
+            ",
         )
         .bind(journey_id)
         .fetch_all(&self.pool)
@@ -71,13 +73,13 @@ impl StructuredJourneyViewRepository {
 
         // Load latest workflow decision
         let workflow_decision_row = sqlx::query(
-            r#"
+            r"
             SELECT available_actions, primary_next_step
             FROM journey_workflow_decision
             WHERE journey_id = $1 AND is_latest = TRUE
             ORDER BY created_at DESC
             LIMIT 1
-            "#,
+            ",
         )
         .bind(journey_id)
         .fetch_optional(&self.pool)
@@ -102,13 +104,17 @@ impl StructuredJourneyViewRepository {
     }
 
     /// Load all journey views from the database
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn load_all(&self) -> Result<Vec<JourneyView>, sqlx::Error> {
         let journey_ids = sqlx::query(
-            r#"
+            r"
             SELECT id
             FROM journey_view
             ORDER BY created_at DESC
-            "#,
+            ",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -125,6 +131,7 @@ impl StructuredJourneyViewRepository {
     }
 
     /// Update the journey view based on an event
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
     async fn update_view(
         &self,
         view_id: &str,
@@ -133,7 +140,7 @@ impl StructuredJourneyViewRepository {
         let journey_id = Uuid::parse_str(view_id).map_err(|e| {
             sqlx::Error::Decode(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                format!("Invalid UUID: {}", e),
+                format!("Invalid UUID: {e}"),
             )))
         })?;
 
@@ -141,11 +148,11 @@ impl StructuredJourneyViewRepository {
             JourneyEvent::Started { id } => {
                 // Insert new journey record
                 sqlx::query(
-                    r#"
+                    r"
                     INSERT INTO journey_view (id, state, current_step, version)
                     VALUES ($1, $2, $3, $4)
                     ON CONFLICT (id) DO NOTHING
-                    "#,
+                    ",
                 )
                 .bind(id)
                 .bind("InProgress")
@@ -159,24 +166,24 @@ impl StructuredJourneyViewRepository {
                 if let Some((key, value)) = form_data {
                     // Get the next sequence number for this journey
                     let sequence: i32 = sqlx::query_scalar(
-                        r#"
+                        r"
                         SELECT COALESCE(MAX(sequence), 0) + 1
                         FROM journey_data_capture
                         WHERE journey_id = $1
-                        "#,
+                        ",
                     )
-                    .bind(&journey_id)
+                    .bind(journey_id)
                     .fetch_one(&self.pool)
                     .await?;
 
                     // Insert data capture entry
                     sqlx::query(
-                        r#"
+                        r"
                         INSERT INTO journey_data_capture (journey_id, key, value, sequence)
                         VALUES ($1, $2, $3, $4)
-                        "#,
+                        ",
                     )
-                    .bind(&journey_id)
+                    .bind(journey_id)
                     .bind(key)
                     .bind(value)
                     .bind(sequence)
@@ -186,14 +193,14 @@ impl StructuredJourneyViewRepository {
 
                 // Update version and timestamp
                 sqlx::query(
-                    r#"
+                    r"
                     UPDATE journey_view
                     SET version = $1, updated_at = CURRENT_TIMESTAMP
                     WHERE id = $2
-                    "#,
+                    ",
                 )
                 .bind(event.sequence as i64)
-                .bind(&journey_id)
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
             }
@@ -204,24 +211,24 @@ impl StructuredJourneyViewRepository {
             } => {
                 // Mark all previous decisions as not latest
                 sqlx::query(
-                    r#"
+                    r"
                     UPDATE journey_workflow_decision
                     SET is_latest = FALSE
                     WHERE journey_id = $1
-                    "#,
+                    ",
                 )
-                .bind(&journey_id)
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
 
                 // Insert new workflow decision
                 sqlx::query(
-                    r#"
+                    r"
                     INSERT INTO journey_workflow_decision (journey_id, available_actions, primary_next_step, is_latest)
                     VALUES ($1, $2, $3, TRUE)
-                    "#,
+                    ",
                 )
-                .bind(&journey_id)
+                .bind(journey_id)
                 .bind(available_actions)
                 .bind(primary_next_step)
                 .execute(&self.pool)
@@ -229,14 +236,14 @@ impl StructuredJourneyViewRepository {
 
                 // Update version and timestamp
                 sqlx::query(
-                    r#"
+                    r"
                     UPDATE journey_view
                     SET version = $1, updated_at = CURRENT_TIMESTAMP
                     WHERE id = $2
-                    "#,
+                    ",
                 )
                 .bind(event.sequence as i64)
-                .bind(&journey_id)
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
             }
@@ -247,15 +254,15 @@ impl StructuredJourneyViewRepository {
             } => {
                 // Update current step
                 sqlx::query(
-                    r#"
+                    r"
                     UPDATE journey_view
                     SET current_step = $1, version = $2, updated_at = CURRENT_TIMESTAMP
                     WHERE id = $3
-                    "#,
+                    ",
                 )
                 .bind(to_step)
                 .bind(event.sequence as i64)
-                .bind(&journey_id)
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
             }
@@ -263,15 +270,15 @@ impl StructuredJourneyViewRepository {
             JourneyEvent::Completed => {
                 // Update state to complete
                 sqlx::query(
-                    r#"
+                    r"
                     UPDATE journey_view
                     SET state = $1, version = $2, updated_at = CURRENT_TIMESTAMP
                     WHERE id = $3
-                    "#,
+                    ",
                 )
                 .bind("Complete")
                 .bind(event.sequence as i64)
-                .bind(&journey_id)
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
             }
@@ -286,7 +293,7 @@ impl Query<Journey> for StructuredJourneyViewRepository {
     async fn dispatch(&self, view_id: &str, events: &[EventEnvelope<Journey>]) {
         for event in events {
             if let Err(e) = self.update_view(view_id, event).await {
-                eprintln!("Error updating journey view {}: {:?}", view_id, e);
+                eprintln!("Error updating journey view {view_id}: {e:?}");
             }
         }
     }
@@ -318,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Only run with a real database
+    #[ignore = "Only run with a real database"]
     async fn test_journey_started_event() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -328,7 +335,7 @@ mod tests {
             aggregate_id: journey_id.to_string(),
             sequence: 1,
             payload: JourneyEvent::Started { id: journey_id },
-            metadata: Default::default(),
+            metadata: std::collections::HashMap::default(),
         };
 
         repo.dispatch(&journey_id.to_string(), &[event]).await;
@@ -344,7 +351,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Only run with a real database
+    #[ignore = "Only run with a real database"]
     async fn test_journey_full_lifecycle() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -355,7 +362,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 1,
                 payload: JourneyEvent::Started { id: journey_id },
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
@@ -363,7 +370,7 @@ mod tests {
                 payload: JourneyEvent::Modified {
                     form_data: Some(("email".to_string(), json!("test@example.com"))),
                 },
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
@@ -372,7 +379,7 @@ mod tests {
                     available_actions: vec!["continue".to_string()],
                     primary_next_step: Some("confirmation".to_string()),
                 },
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
@@ -381,13 +388,13 @@ mod tests {
                     from_step: None,
                     to_step: "confirmation".to_string(),
                 },
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 5,
                 payload: JourneyEvent::Completed,
-                metadata: Default::default(),
+                metadata: std::collections::HashMap::default(),
             },
         ];
 
