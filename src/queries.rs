@@ -80,6 +80,11 @@ impl View<Journey> for JourneyView {
                 }
             }
 
+            JourneyEvent::PersonCaptured { .. } => {
+                // Person data is projected to structured database tables
+                // No need to update the view here
+            }
+
             JourneyEvent::WorkflowEvaluated {
                 available_actions,
                 primary_next_step,

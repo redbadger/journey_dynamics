@@ -56,6 +56,15 @@ impl Aggregate for Journey {
                     Ok(vec![JourneyEvent::Started { id }])
                 }
             }
+            JourneyCommand::CapturePerson { name, email, phone } => {
+                if self.id == Uuid::default() {
+                    Err(JourneyError::NotFound)
+                } else if JourneyState::Complete == self.state {
+                    Err(JourneyError::AlreadyCompleted)
+                } else {
+                    Ok(vec![JourneyEvent::PersonCaptured { name, email, phone }])
+                }
+            }
             JourneyCommand::Capture { data } => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
@@ -133,11 +142,15 @@ impl Aggregate for Journey {
                     primary_next_step,
                 });
             }
+            JourneyEvent::PersonCaptured { .. } => {
+                // Person data is projected to read model tables
+                // No state change needed in the aggregate
+            }
             JourneyEvent::StepProgressed {
                 from_step: _,
                 to_step,
             } => {
-                self.current_step = Some(to_step);
+                self.current_step = Some(to_step.clone());
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
@@ -797,6 +810,9 @@ mod tests {
                 JourneyEvent::Modified { form_data: None } => {
                     println!("Event {}: Data Modified (no step info)", i + 1);
                 }
+                JourneyEvent::PersonCaptured { name, email, .. } => {
+                    println!("Event {}: Person Captured - {} ({})", i + 1, name, email);
+                }
                 JourneyEvent::WorkflowEvaluated {
                     available_actions, ..
                 } => println!(
@@ -1348,5 +1364,141 @@ mod tests {
         for event in &events {
             println!("{}-{}: {:?}", id, event.sequence, event.payload);
         }
+    }
+
+    #[tokio::test]
+    async fn test_capture_person() {
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let mut journey = Journey::default();
+
+        // Start the journey
+        let id = Uuid::new_v4();
+        let events = journey
+            .handle(JourneyCommand::Start { id }, &services)
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0], JourneyEvent::Started { id });
+
+        for event in events {
+            journey.apply(event);
+        }
+
+        // Capture person data
+        let events = journey
+            .handle(
+                JourneyCommand::CapturePerson {
+                    name: "John Doe".to_string(),
+                    email: "john@example.com".to_string(),
+                    phone: Some("+1234567890".to_string()),
+                },
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            JourneyEvent::PersonCaptured {
+                name: "John Doe".to_string(),
+                email: "john@example.com".to_string(),
+                phone: Some("+1234567890".to_string()),
+            }
+        );
+
+        for event in events {
+            journey.apply(event);
+        }
+
+        // Capture another person (update)
+        let events = journey
+            .handle(
+                JourneyCommand::CapturePerson {
+                    name: "Jane Smith".to_string(),
+                    email: "jane@example.com".to_string(),
+                    phone: None,
+                },
+                &services,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            JourneyEvent::PersonCaptured {
+                name: "Jane Smith".to_string(),
+                email: "jane@example.com".to_string(),
+                phone: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_capture_person_journey_not_started() {
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let journey = Journey::default();
+
+        // Try to capture person data without starting journey
+        let result = journey
+            .handle(
+                JourneyCommand::CapturePerson {
+                    name: "John Doe".to_string(),
+                    email: "john@example.com".to_string(),
+                    phone: None,
+                },
+                &services,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), JourneyError::NotFound));
+    }
+
+    #[tokio::test]
+    async fn test_capture_person_journey_completed() {
+        let decision_engine = Arc::new(SimpleDecisionEngine);
+        let services = JourneyServices::new(decision_engine);
+        let mut journey = Journey::default();
+
+        // Start and complete the journey
+        let id = Uuid::new_v4();
+        let events = journey
+            .handle(JourneyCommand::Start { id }, &services)
+            .await
+            .unwrap();
+        for event in events {
+            journey.apply(event);
+        }
+
+        let events = journey
+            .handle(JourneyCommand::Complete, &services)
+            .await
+            .unwrap();
+        for event in events {
+            journey.apply(event);
+        }
+
+        // Try to capture person data on completed journey
+        let result = journey
+            .handle(
+                JourneyCommand::CapturePerson {
+                    name: "John Doe".to_string(),
+                    email: "john@example.com".to_string(),
+                    phone: None,
+                },
+                &services,
+            )
+            .await;
+
+        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            JourneyError::AlreadyCompleted
+        ));
     }
 }

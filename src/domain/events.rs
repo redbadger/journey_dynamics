@@ -11,6 +11,11 @@ pub enum JourneyEvent {
     Modified {
         form_data: Option<(String, Value)>,
     },
+    PersonCaptured {
+        name: String,
+        email: String,
+        phone: Option<String>,
+    },
     WorkflowEvaluated {
         available_actions: Vec<String>,
         primary_next_step: Option<String>,
@@ -27,6 +32,7 @@ impl DomainEvent for JourneyEvent {
         let event_type: &str = match self {
             JourneyEvent::Started { .. } => "JourneyOpened",
             JourneyEvent::Modified { .. } => "JourneyModified",
+            JourneyEvent::PersonCaptured { .. } => "PersonCaptured",
             JourneyEvent::WorkflowEvaluated { .. } => "WorkflowEvaluated",
             JourneyEvent::StepProgressed { .. } => "StepProgressed",
             JourneyEvent::Completed => "JourneyClosed",
