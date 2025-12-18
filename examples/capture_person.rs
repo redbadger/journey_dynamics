@@ -2,10 +2,10 @@
 //!
 //! This example shows:
 //! - Starting a journey
-//! - Capturing person information (name, email, phone) using the CapturePerson command
+//! - Capturing person information (name, email, phone) using the `CapturePerson` command
 //! - How person data is projected to the structured database table
 //!
-//! Run with: cargo run --example capture_person
+//! Run with: `cargo run --example capture_person`
 
 use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
 use journey_dynamics::SimpleLoggingQuery;
@@ -28,7 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a new journey
     let journey_id = Uuid::new_v4();
-    println!("Starting journey: {}", journey_id);
+    println!("Starting journey: {journey_id}");
 
     // Start the journey
     cqrs.execute(
@@ -69,7 +69,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create another journey with different person
     let journey_id_2 = Uuid::new_v4();
-    println!("Starting second journey: {}", journey_id_2);
+    println!("Starting second journey: {journey_id_2}");
 
     cqrs.execute(
         &journey_id_2.to_string(),
@@ -97,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Load and display events for first journey
     let events = event_store.load_events(&journey_id.to_string()).await?;
-    println!("=== Journey {} Event History ===", journey_id);
+    println!("=== Journey {journey_id} Event History ===");
     for (i, event) in events.iter().enumerate() {
         println!("Event {}: {:?}", i + 1, event.payload);
     }

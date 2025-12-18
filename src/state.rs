@@ -15,9 +15,6 @@ pub async fn new_application_state() -> ApplicationState {
     // Configure the CQRS framework, backed by a Postgres database, along with two queries:
     // - a simple query that prints events to stdout as they are published
     // - `journey_query` stores the current state of journeys in structured SQL tables
-    //
-    // The needed database tables are automatically configured with `docker-compose up -d`,
-    // see init file at `/db/init.sql` for more.
     let pool = default_postgress_pool(std::env::var("DATABASE_URL").unwrap().as_str()).await;
     let (cqrs, journey_query) = cqrs_framework(pool);
     ApplicationState {

@@ -416,7 +416,7 @@ mod tests {
 
     async fn setup_test_db() -> Pool<Postgres> {
         let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-            "postgres://demo_user:demo_pass@localhost:5432/postgres".to_string()
+            "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
         });
 
         PgPoolOptions::new()

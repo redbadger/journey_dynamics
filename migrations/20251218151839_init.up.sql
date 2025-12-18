@@ -73,5 +73,4 @@ CREATE TABLE journey_query
     PRIMARY KEY (view_id)
 );
 
-CREATE USER demo_user WITH ENCRYPTED PASSWORD 'demo_pass';
-GRANT ALL PRIVILEGES ON DATABASE postgres TO demo_user;
+GRANT ALL PRIVILEGES ON DATABASE journey_dynamics TO postgres;
