@@ -30,12 +30,34 @@ pub async fn query_handler(
 }
 
 // Serves as our command endpoint to make changes in a `Journey` aggregate.
+// Handles both journey creation (no journey_id in path) and modification (with journey_id).
 pub async fn command_handler(
-    Path(journey_id): Path<Uuid>,
+    path: Option<Path<Uuid>>,
     State(state): State<Arc<ApplicationState>>,
     CommandExtractor(metadata, command): CommandExtractor,
 ) -> Response {
-    let is_creating = matches!(command, JourneyCommand::Start { .. });
+    // Determine the journey_id and creation status based on path and command
+    let (journey_id, is_creating) = match path {
+        Some(Path(id)) => {
+            // Path parameter provided - check if it's a Start command
+            let is_creating = matches!(command, JourneyCommand::Start { .. });
+            (id, is_creating)
+        }
+        None => {
+            // No path parameter - this must be journey creation
+            match &command {
+                JourneyCommand::Start { id } => (*id, true),
+                _ => {
+                    // No path parameter and not a Start command - invalid
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        "Journey creation requires a Start command",
+                    )
+                        .into_response();
+                }
+            }
+        }
+    };
 
     match state
         .cqrs

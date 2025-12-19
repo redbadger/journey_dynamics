@@ -18,6 +18,8 @@ where
     type Rejection = CommandExtractionError;
 
     async fn from_request(req: Request<Body>, state: &S) -> Result<Self, Self::Rejection> {
+        let uri_path = req.uri().path().to_string();
+
         // Here we are including the current date/time, the uri that was called and the user-agent
         // in a HashMap that we will submit as metadata with the command.
         let mut metadata = HashMap::default();
@@ -31,7 +33,20 @@ where
 
         // Parse and deserialize the request body as the command payload.
         let body = Bytes::from_request(req, state).await?;
-        let command: JourneyCommand = serde_json::from_slice(&body)?;
+        let command: JourneyCommand = if body.is_empty() {
+            // Only generate a Start command for journey creation (POST /journeys)
+            // If posting to a specific journey (POST /journeys/{id}), empty body is invalid
+
+            if uri_path == "/journeys" {
+                let id = uuid::Uuid::new_v4();
+                JourneyCommand::Start { id }
+            } else {
+                return Err(CommandExtractionError);
+            }
+        } else {
+            serde_json::from_slice(&body)?
+        };
+
         Ok(Self(metadata, command))
     }
 }

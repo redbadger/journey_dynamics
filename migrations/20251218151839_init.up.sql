@@ -7,6 +7,7 @@ CREATE TABLE events
     event_version  text                         NOT NULL,
     payload        json                         NOT NULL,
     metadata       json                         NOT NULL,
+    timestamp      timestamp with time zone DEFAULT (CURRENT_TIMESTAMP),
     PRIMARY KEY (aggregate_type, aggregate_id, sequence)
 );
 
