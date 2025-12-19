@@ -1,0 +1,211 @@
+{
+  "contentType": "application/vnd.gorules.decision",
+  "nodes": [
+    {
+      "id": "validation-input",
+      "type": "inputNode",
+      "position": { "x": 100, "y": 300 },
+      "name": "Validation Request"
+    },
+    {
+      "id": "step-data-validation",
+      "type": "decisionTableNode",
+      "position": { "x": 400, "y": 300 },
+      "name": "Step Data Validation",
+      "content": {
+        "hitPolicy": "collect",
+        "inputs": [
+          {
+            "id": "step-name",
+            "field": "stepName",
+            "name": "Step Name",
+            "type": "expression"
+          },
+          {
+            "id": "step-data",
+            "field": "stepData",
+            "name": "Step Data",
+            "type": "expression"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "field-name",
+            "field": "fieldName",
+            "name": "Field Name",
+            "type": "expression"
+          },
+          {
+            "id": "is-valid",
+            "field": "isValid",
+            "name": "Is Valid",
+            "type": "expression"
+          },
+          {
+            "id": "error-message",
+            "field": "errorMessage",
+            "name": "Error Message",
+            "type": "expression"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "search-origin-required",
+            "step-name": "'search_criteria'",
+            "step-data": "",
+            "field-name": "'origin'",
+            "is-valid": "stepData.origin != null and len(stepData.origin) == 3",
+            "error-message": "'Valid origin airport code required'"
+          },
+          {
+            "_id": "search-destination-required",
+            "step-name": "'search_criteria'",
+            "step-data": "",
+            "field-name": "'destination'",
+            "is-valid": "stepData.destination != null and len(stepData.destination) == 3",
+            "error-message": "'Valid destination airport code required'"
+          },
+          {
+            "_id": "search-departure-date",
+            "step-name": "'search_criteria'",
+            "step-data": "",
+            "field-name": "'departureDate'",
+            "is-valid": "stepData.departureDate != null and date(stepData.departureDate) > date(now())",
+            "error-message": "'Departure date must be in the future'"
+          },
+          {
+            "_id": "search-passengers",
+            "step-name": "'search_criteria'",
+            "step-data": "",
+            "field-name": "'passengers'",
+            "is-valid": "stepData.passengers != null and stepData.passengers.total > 0 and stepData.passengers.total <= 9",
+            "error-message": "'Number of passengers must be between 1 and 9'"
+          },
+          {
+            "_id": "search-return-date",
+            "step-name": "'search_criteria'",
+            "step-data": "",
+            "field-name": "'returnDate'",
+            "is-valid": "stepData.tripType != 'round-trip' or (stepData.returnDate != null and date(stepData.returnDate) > date(stepData.departureDate))",
+            "error-message": "'Return date must be after departure date'"
+          },
+          {
+            "_id": "outbound-flight-required",
+            "step-name": "'outbound_flight_selection'",
+            "step-data": "",
+            "field-name": "'selectedOutboundFlight'",
+            "is-valid": "stepData.selectedOutboundFlight != null and stepData.selectedOutboundFlight.flightNumber != null",
+            "error-message": "'Please select an outbound flight'"
+          },
+          {
+            "_id": "return-flight-required",
+            "step-name": "'return_flight_selection'",
+            "step-data": "",
+            "field-name": "'selectedReturnFlight'",
+            "is-valid": "stepData.selectedReturnFlight != null and stepData.selectedReturnFlight.flightNumber != null",
+            "error-message": "'Please select a return flight'"
+          },
+          {
+            "_id": "passenger-details-complete",
+            "step-name": "'passenger_details'",
+            "step-data": "",
+            "field-name": "'passengers'",
+            "is-valid": "stepData.passengers != null and all(stepData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null and $.documentNumber != null)",
+            "error-message": "'Complete passenger details required for all travelers'"
+          },
+          {
+            "_id": "passenger-names-valid",
+            "step-name": "'passenger_details'",
+            "step-data": "",
+            "field-name": "'passengerNames'",
+            "is-valid": "stepData.passengers == null or all(stepData.passengers, len($.firstName) > 1 and len($.lastName) > 1)",
+            "error-message": "'Passenger names must be at least 2 characters'"
+          },
+          {
+            "_id": "passenger-birth-dates",
+            "step-name": "'passenger_details'",
+            "step-data": "",
+            "field-name": "'passengerAges'",
+            "is-valid": "stepData.passengers == null or all(stepData.passengers, (date(now()).year - date($.dateOfBirth).year) >= 0 and (date(now()).year - date($.dateOfBirth).year) <= 120)",
+            "error-message": "'Invalid passenger birth dates'"
+          },
+          {
+            "_id": "payment-method-required",
+            "step-name": "'payment'",
+            "step-data": "",
+            "field-name": "'paymentMethod'",
+            "is-valid": "stepData.paymentMethod != null and stepData.paymentMethod.type != null and stepData.paymentMethod.details != null",
+            "error-message": "'Valid payment method required'"
+          },
+          {
+            "_id": "payment-card-number",
+            "step-name": "'payment'",
+            "step-data": "",
+            "field-name": "'cardNumber'",
+            "is-valid": "stepData.paymentMethod.type != 'credit_card' or (stepData.paymentMethod.details.cardNumber != null and len(stepData.paymentMethod.details.cardNumber) >= 13)",
+            "error-message": "'Valid card number required'"
+          },
+          {
+            "_id": "payment-expiry-date",
+            "step-name": "'payment'",
+            "step-data": "",
+            "field-name": "'expiryDate'",
+            "is-valid": "stepData.paymentMethod.type != 'credit_card' or (stepData.paymentMethod.details.expiryDate != null and date(stepData.paymentMethod.details.expiryDate + '-01') > date(now()))",
+            "error-message": "'Card expiry date must be in the future'"
+          },
+          {
+            "_id": "billing-address-required",
+            "step-name": "'payment'",
+            "step-data": "",
+            "field-name": "'billingAddress'",
+            "is-valid": "stepData.billingAddress != null and stepData.billingAddress.street != null and stepData.billingAddress.city != null and stepData.billingAddress.country != null",
+            "error-message": "'Complete billing address required'"
+          },
+          {
+            "_id": "terms-acceptance-required",
+            "step-name": "'booking_summary'",
+            "step-data": "",
+            "field-name": "'termsAccepted'",
+            "is-valid": "stepData.termsAccepted == true",
+            "error-message": "'You must accept terms and conditions'"
+          }
+        ]
+      }
+    },
+    {
+      "id": "validation-aggregator",
+      "type": "functionNode",
+      "position": { "x": 700, "y": 300 },
+      "name": "Validation Aggregator",
+      "content": {
+        "source": "export const handler = async (input) => {\n  const validationResults = input || [];\n  \n  const errors = validationResults\n    .filter(result => !result.isValid)\n    .map(result => result.errorMessage);\n  \n  const isValid = errors.length === 0;\n  \n  return {\n    isValid,\n    errors,\n    validatedFields: validationResults.map(r => r.fieldName),\n    errorCount: errors.length\n  };\n};"
+      }
+    },
+    {
+      "id": "validation-output",
+      "type": "outputNode",
+      "position": { "x": 1000, "y": 300 },
+      "name": "Validation Response"
+    }
+  ],
+  "edges": [
+    {
+      "id": "input-to-validation",
+      "sourceId": "validation-input",
+      "type": "edge",
+      "targetId": "step-data-validation"
+    },
+    {
+      "id": "validation-to-aggregator",
+      "sourceId": "step-data-validation",
+      "type": "edge",
+      "targetId": "validation-aggregator"
+    },
+    {
+      "id": "aggregator-to-output",
+      "sourceId": "validation-aggregator",
+      "type": "edge",
+      "targetId": "validation-output"
+    }
+  ]
+}
