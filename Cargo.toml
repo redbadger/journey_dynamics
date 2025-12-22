@@ -5,14 +5,19 @@ edition = "2024"
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.8.7"
+axum = "0.8.8"
 chrono = "0.4.42"
 cqrs-es = "0.4.12"
 dotenv = "0.15.0"
+
 postgres-es = "0.4.12"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0.145"
-sqlx = { version = "0.8.6", features = ["postgres", "runtime-tokio-native-tls", "uuid"] }
+sqlx = { version = "0.8.6", features = [
+    "postgres",
+    "runtime-tokio-native-tls",
+    "uuid",
+] }
 thiserror = "2.0.17"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.19.0", features = ["serde", "v4"] }

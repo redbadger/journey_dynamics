@@ -424,14 +424,14 @@
         "rules": [
           {
             "_id": "has-unaccompanied-minors",
-            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
-            "has-minors": "some(capturedData.passengers, (date('now') - date($.dateOfBirth)) / 31536000 < 18 and $.travelingAlone == true)",
+            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
+            "has-minors": "some(capturedData.passengers, (date('now') - date(#.dateOfBirth)) / 31536000 < 18 and #.travelingAlone == true)",
             "next-steps": "['unaccompanied_minor_services']",
             "primary-next-step": "'unaccompanied_minor_services'"
           },
           {
             "_id": "passengers-complete",
-            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
+            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
             "has-minors": "",
             "next-steps": "['seat_selection', 'passenger_details']",
             "primary-next-step": "'seat_selection'"

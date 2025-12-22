@@ -110,7 +110,7 @@
             "step-name": "'passenger_details'",
             "step-data": "",
             "field-name": "'passengers'",
-            "is-valid": "stepData.passengers != null and all(stepData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null and $.documentNumber != null)",
+            "is-valid": "stepData.passengers != null and all(stepData.passengers, #.firstName != null and #.lastName != null and #.dateOfBirth != null and #.documentNumber != null)",
             "error-message": "'Complete passenger details required for all travelers'"
           },
           {
@@ -118,7 +118,7 @@
             "step-name": "'passenger_details'",
             "step-data": "",
             "field-name": "'passengerNames'",
-            "is-valid": "stepData.passengers == null or all(stepData.passengers, len($.firstName) > 1 and len($.lastName) > 1)",
+            "is-valid": "stepData.passengers == null or all(stepData.passengers, len(#.firstName) > 1 and len(#.lastName) > 1)",
             "error-message": "'Passenger names must be at least 2 characters'"
           },
           {
@@ -126,7 +126,7 @@
             "step-name": "'passenger_details'",
             "step-data": "",
             "field-name": "'passengerAges'",
-            "is-valid": "stepData.passengers == null or all(stepData.passengers, (date(now()).year - date($.dateOfBirth).year) >= 0 and (date(now()).year - date($.dateOfBirth).year) <= 120)",
+            "is-valid": "stepData.passengers == null or all(stepData.passengers, (date(now()).year - date(#.dateOfBirth).year) >= 0 and (date(now()).year - date(#.dateOfBirth).year) <= 120)",
             "error-message": "'Invalid passenger birth dates'"
           },
           {

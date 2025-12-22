@@ -340,7 +340,7 @@
           },
           {
             "_id": "seat-selection-premium",
-            "service-type": "selectedSeats != null and some(selectedSeats, $.type == 'premium')",
+            "service-type": "selectedSeats != null and some(selectedSeats, #.type == 'premium')",
             "cabin-class": "'economy'",
             "route-distance": "",
             "service-fee": "35",
