@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use crate::domain::events::JourneyEvent;
+use crate::utils::DataMerger;
 use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
 use async_trait::async_trait;
 use cqrs_es::Aggregate;
@@ -9,13 +10,28 @@ use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Journey {
     id: Uuid,
     state: JourneyState,
     data_capture: Vec<(String, Value)>,
     current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
+    #[serde(skip)]
+    data_merger: DataMerger,
+}
+
+impl Default for Journey {
+    fn default() -> Self {
+        Self {
+            id: Uuid::default(),
+            state: JourneyState::default(),
+            data_capture: Vec::new(),
+            current_step: None,
+            latest_workflow_decision: None,
+            data_merger: DataMerger::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -131,8 +147,13 @@ impl Aggregate for Journey {
                 self.state = JourneyState::InProgress;
             }
             JourneyEvent::Modified { form_data } => {
-                if let Some(data) = form_data {
-                    self.data_capture.push(data);
+                if let Some((key, value)) = form_data.clone() {
+                    self.data_capture.push((key.clone(), value.clone()));
+                    // Use DataMerger for consistent data handling
+                    if let Err(e) = self.data_merger.merge_form_data(&key, &value) {
+                        // Log error but don't fail the event application
+                        eprintln!("Warning: Failed to merge data for key '{key}': {e}");
+                    }
                 }
             }
             JourneyEvent::WorkflowEvaluated {
@@ -212,6 +233,18 @@ impl Journey {
     #[must_use]
     pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
+    }
+
+    /// Get the current merged data state
+    #[must_use]
+    pub fn get_merged_data(&self) -> &Value {
+        self.data_merger.get_merged_data()
+    }
+
+    /// Get a specific field from the merged data
+    #[must_use]
+    pub fn get_field(&self, field_path: &str) -> Option<&Value> {
+        self.data_merger.get_field(field_path)
     }
 }
 
@@ -597,6 +630,3 @@ mod tests {
             .then_expect_error(JourneyError::AlreadyCompleted);
     }
 }
-
-#[cfg(test)]
-mod flight_tests;

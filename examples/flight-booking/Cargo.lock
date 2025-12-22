@@ -723,6 +723,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d674e81391d1e1ab681a28d99df07927c6d4aa5b027d7da16ba32d1d21ecd99"
 
 [[package]]
+name = "flight-booking-example"
+version = "0.1.0"
+dependencies = [
+ "cqrs-es",
+ "journey_dynamics",
+ "schemars",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "fluent-uri"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2809,9 +2821,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.145"
+version = "1.0.146"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "402a6f66d8c709116cf22f558eab210f5a50187f702eb4d7e5ef38d9a7f1c79c"
+checksum = "217ca874ae0207aac254aa02c957ded05585a90892cc8d87f9e5fa49669dadd8"
 dependencies = [
  "itoa",
  "memchr",

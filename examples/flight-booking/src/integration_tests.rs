@@ -4,15 +4,17 @@ use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::*;
-use crate::services::decision_engine::GoRulesDecisionEngine;
+use journey_dynamics::domain::commands::JourneyCommand;
+use journey_dynamics::domain::events::JourneyEvent;
+use journey_dynamics::domain::journey::{Journey, JourneyServices};
+use journey_dynamics::services::decision_engine::GoRulesDecisionEngine;
 
 type JourneyTester = TestFramework<Journey>;
 
 #[test]
 fn flight_booking_search_criteria() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -70,7 +72,7 @@ fn flight_booking_search_criteria() {
 #[test]
 fn flight_booking_outbound_selection() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -173,7 +175,7 @@ fn flight_booking_outbound_selection() {
 #[test]
 fn flight_booking_return_selection() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -300,7 +302,7 @@ fn flight_booking_return_selection() {
 #[test]
 fn flight_booking_passenger_details() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -353,18 +355,22 @@ fn flight_booking_passenger_details() {
             data: (
                 "passenger_details".to_string(),
                 json!({
-                    "passengers": [
-                        {
-                            "firstName": "John",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1985-03-15"
-                        },
-                        {
-                            "firstName": "Jane",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1987-07-22"
-                        }
-                    ]
+                    "passengers": {
+                        "details": [
+                            {
+                                "firstName": "John",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1985-03-15",
+                                "passengerType": "adult"
+                            },
+                            {
+                                "firstName": "Jane",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1987-07-22",
+                                "passengerType": "adult"
+                            }
+                        ]
+                    }
                 }),
             ),
         })
@@ -373,18 +379,22 @@ fn flight_booking_passenger_details() {
                 form_data: Some((
                     "passenger_details".to_string(),
                     json!({
-                        "passengers": [
-                            {
-                                "firstName": "John",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1985-03-15"
-                            },
-                            {
-                                "firstName": "Jane",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1987-07-22"
-                            }
-                        ]
+                        "passengers": {
+                            "details": [
+                                {
+                                    "firstName": "John",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1985-03-15",
+                                    "passengerType": "adult"
+                                },
+                                {
+                                    "firstName": "Jane",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1987-07-22",
+                                    "passengerType": "adult"
+                                }
+                            ]
+                        }
                     }),
                 )),
             },
@@ -405,7 +415,7 @@ fn flight_booking_passenger_details() {
 #[test]
 fn flight_booking_payment_capture() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -452,7 +462,7 @@ fn flight_booking_payment_capture() {
 #[test]
 fn flight_booking_modify_search_criteria() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -528,7 +538,7 @@ fn flight_booking_modify_search_criteria() {
 #[test]
 fn flight_booking_passenger_details_incomplete() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -581,18 +591,22 @@ fn flight_booking_passenger_details_incomplete() {
             data: (
                 "passenger_details".to_string(),
                 json!({
-                    "passengers": [
-                        {
-                            "firstName": "John",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1985-03-15"
-                        },
-                        {
-                            "firstName": "Jane",
-                            "lastName": "Doe"
-                            // Missing dateOfBirth for second passenger
-                        }
-                    ]
+                    "passengers": {
+                        "details": [
+                            {
+                                "firstName": "John",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1985-03-15",
+                                "passengerType": "adult"
+                            },
+                            {
+                                "firstName": "Jane",
+                                "lastName": "Doe",
+                                "passengerType": "adult"
+                                // Missing dateOfBirth for second passenger
+                            }
+                        ]
+                    }
                 }),
             ),
         })
@@ -601,17 +615,21 @@ fn flight_booking_passenger_details_incomplete() {
                 form_data: Some((
                     "passenger_details".to_string(),
                     json!({
-                        "passengers": [
-                            {
-                                "firstName": "John",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1985-03-15"
-                            },
-                            {
-                                "firstName": "Jane",
-                                "lastName": "Doe"
-                            }
-                        ]
+                        "passengers": {
+                            "details": [
+                                {
+                                    "firstName": "John",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1985-03-15",
+                                    "passengerType": "adult"
+                                },
+                                {
+                                    "firstName": "Jane",
+                                    "lastName": "Doe",
+                                    "passengerType": "adult"
+                                }
+                            ]
+                        }
                     }),
                 )),
             },
@@ -630,7 +648,7 @@ fn flight_booking_passenger_details_incomplete() {
 #[test]
 fn flight_booking_passenger_details_three_passengers() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -671,8 +689,11 @@ fn flight_booking_passenger_details_three_passengers() {
                 )),
             },
             JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["passenger_details".to_string()],
-                primary_next_step: Some("passenger_details".to_string()),
+                available_actions: vec![
+                    "seat_selection".to_string(),
+                    "passenger_details".to_string(),
+                ],
+                primary_next_step: Some("seat_selection".to_string()),
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("outbound_flight_selection".to_string()),
@@ -683,23 +704,28 @@ fn flight_booking_passenger_details_three_passengers() {
             data: (
                 "passenger_details".to_string(),
                 json!({
-                    "passengers": [
-                        {
-                            "firstName": "John",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1985-03-15"
-                        },
-                        {
-                            "firstName": "Jane",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1987-07-22"
-                        },
-                        {
-                            "firstName": "Jimmy",
-                            "lastName": "Doe",
-                            "dateOfBirth": "2010-05-10"
-                        }
-                    ]
+                    "passengers": {
+                        "details": [
+                            {
+                                "firstName": "John",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1985-03-15",
+                                "passengerType": "adult"
+                            },
+                            {
+                                "firstName": "Jane",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1987-07-22",
+                                "passengerType": "adult"
+                            },
+                            {
+                                "firstName": "Jimmy",
+                                "lastName": "Doe",
+                                "dateOfBirth": "2010-05-10",
+                                "passengerType": "child"
+                            }
+                        ]
+                    }
                 }),
             ),
         })
@@ -708,23 +734,28 @@ fn flight_booking_passenger_details_three_passengers() {
                 form_data: Some((
                     "passenger_details".to_string(),
                     json!({
-                        "passengers": [
-                            {
-                                "firstName": "John",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1985-03-15"
-                            },
-                            {
-                                "firstName": "Jane",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1987-07-22"
-                            },
-                            {
-                                "firstName": "Jimmy",
-                                "lastName": "Doe",
-                                "dateOfBirth": "2010-05-10"
-                            }
-                        ]
+                        "passengers": {
+                            "details": [
+                                {
+                                    "firstName": "John",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1985-03-15",
+                                    "passengerType": "adult"
+                                },
+                                {
+                                    "firstName": "Jane",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1987-07-22",
+                                    "passengerType": "adult"
+                                },
+                                {
+                                    "firstName": "Jimmy",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "2010-05-10",
+                                    "passengerType": "child"
+                                }
+                            ]
+                        }
                     }),
                 )),
             },
@@ -746,7 +777,7 @@ fn flight_booking_passenger_details_three_passengers() {
 #[test]
 fn test_generic_data_merging() {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
@@ -779,18 +810,22 @@ fn test_generic_data_merging() {
             data: (
                 "passenger_details".to_string(),
                 json!({
-                    "passengers": [
-                        {
-                            "firstName": "John",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1985-03-15"
-                        },
-                        {
-                            "firstName": "Jane",
-                            "lastName": "Doe",
-                            "dateOfBirth": "1987-07-22"
-                        }
-                    ],
+                    "passengers": {
+                        "details": [
+                            {
+                                "firstName": "John",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1985-03-15",
+                                "passengerType": "adult"
+                            },
+                            {
+                                "firstName": "Jane",
+                                "lastName": "Doe",
+                                "dateOfBirth": "1987-07-22",
+                                "passengerType": "adult"
+                            }
+                        ]
+                    },
                     "preferences": {
                         "meals": ["vegetarian", "gluten-free"],
                         "seats": "aisle"
@@ -803,18 +838,22 @@ fn test_generic_data_merging() {
                 form_data: Some((
                     "passenger_details".to_string(),
                     json!({
-                        "passengers": [
-                            {
-                                "firstName": "John",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1985-03-15"
-                            },
-                            {
-                                "firstName": "Jane",
-                                "lastName": "Doe",
-                                "dateOfBirth": "1987-07-22"
-                            }
-                        ],
+                        "passengers": {
+                            "details": [
+                                {
+                                    "firstName": "John",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1985-03-15",
+                                    "passengerType": "adult"
+                                },
+                                {
+                                    "firstName": "Jane",
+                                    "lastName": "Doe",
+                                    "dateOfBirth": "1987-07-22",
+                                    "passengerType": "adult"
+                                }
+                            ]
+                        },
                         "preferences": {
                             "meals": ["vegetarian", "gluten-free"],
                             "seats": "aisle"
