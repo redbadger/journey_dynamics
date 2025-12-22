@@ -8,7 +8,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema = schema_for!(FlightBooking);
 
     // Ensure the schemas directory exists
-    let schemas_dir = Path::new("./generated");
+    let schemas_dir = Path::new("./schemas");
     if !schemas_dir.exists() {
         fs::create_dir_all(schemas_dir)?;
     }

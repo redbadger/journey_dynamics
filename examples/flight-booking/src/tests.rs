@@ -1,25 +1,47 @@
 #![allow(clippy::too_many_lines)]
 use cqrs_es::test::TestFramework;
+
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use journey_dynamics::domain::commands::JourneyCommand;
-use journey_dynamics::domain::events::JourneyEvent;
-use journey_dynamics::domain::journey::{Journey, JourneyServices};
-use journey_dynamics::services::decision_engine::GoRulesDecisionEngine;
+use journey_dynamics::{
+    domain::{
+        commands::JourneyCommand,
+        events::JourneyEvent,
+        journey::{Journey, JourneyServices},
+    },
+    services::{
+        decision_engine::GoRulesDecisionEngine,
+        schema_validator::{JsonSchemaValidator, NoOpValidator},
+    },
+};
 
 type JourneyTester = TestFramework<Journey>;
 
-#[test]
-fn flight_booking_search_criteria() {
+fn create_journey_services() -> JourneyServices {
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
         "../jdm-models/flight-booking-orchestrator.jdm.json"
     )));
-    let services = JourneyServices::new(decision_engine);
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../schemas/flight-booking-schema.json")).unwrap();
+    let schema_validator = Arc::new(JsonSchemaValidator::new(&schema).unwrap());
+    JourneyServices::new(decision_engine, schema_validator)
+}
+
+fn create_journey_services_with_no_validation() -> JourneyServices {
+    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
+        "../jdm-models/flight-booking-orchestrator.jdm.json"
+    )));
+    let schema_validator = Arc::new(NoOpValidator);
+    JourneyServices::new(decision_engine, schema_validator)
+}
+
+#[test]
+fn flight_booking_search_criteria() {
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
         .when(JourneyCommand::Capture {
             data: (
@@ -35,7 +57,8 @@ fn flight_booking_search_criteria() {
                         "adults": 2,
                         "children": 0,
                         "infants": 0
-                    }
+                    },
+                    "status": "search_criteria"
                 }),
             ),
         })
@@ -54,7 +77,8 @@ fn flight_booking_search_criteria() {
                             "adults": 2,
                             "children": 0,
                             "infants": 0
-                        }
+                        },
+                        "status": "search_criteria"
                     }),
                 )),
             },
@@ -71,13 +95,9 @@ fn flight_booking_search_criteria() {
 
 #[test]
 fn flight_booking_outbound_selection() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -94,7 +114,8 @@ fn flight_booking_outbound_selection() {
                             "adults": 2,
                             "children": 0,
                             "infants": 0
-                        }
+                        },
+                        "status": "search_criteria"
                     }),
                 )),
             },
@@ -174,13 +195,9 @@ fn flight_booking_outbound_selection() {
 
 #[test]
 fn flight_booking_return_selection() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -248,7 +265,8 @@ fn flight_booking_return_selection() {
                         "price": 480.00,
                         "departure": "14:20",
                         "arrival": "17:35"
-                    }
+                    },
+                    "status": "return_flight_selection"
                 }),
             ),
         })
@@ -281,7 +299,8 @@ fn flight_booking_return_selection() {
                             "price": 480.00,
                             "departure": "14:20",
                             "arrival": "17:35"
-                        }
+                        },
+                        "status": "return_flight_selection"
                     }),
                 )),
             },
@@ -301,13 +320,9 @@ fn flight_booking_return_selection() {
 
 #[test]
 fn flight_booking_passenger_details() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -370,7 +385,8 @@ fn flight_booking_passenger_details() {
                                 "passengerType": "adult"
                             }
                         ]
-                    }
+                    },
+                    "status": "passenger_details"
                 }),
             ),
         })
@@ -394,7 +410,8 @@ fn flight_booking_passenger_details() {
                                     "passengerType": "adult"
                                 }
                             ]
-                        }
+                        },
+                        "status": "passenger_details"
                     }),
                 )),
             },
@@ -414,12 +431,9 @@ fn flight_booking_passenger_details() {
 
 #[test]
 fn flight_booking_payment_capture() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
-    JourneyTester::with(services)
+
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -436,7 +450,8 @@ fn flight_booking_payment_capture() {
                             "adults": 2,
                             "children": 0,
                             "infants": 0
-                        }
+                        },
+                        "status": "search_criteria"
                     }),
                 )),
             },
@@ -461,13 +476,9 @@ fn flight_booking_payment_capture() {
 
 #[test]
 fn flight_booking_modify_search_criteria() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -506,7 +517,8 @@ fn flight_booking_modify_search_criteria() {
                         "adults": 1,
                         "children": 0,
                         "infants": 0
-                    }
+                    },
+                    "status": "search_criteria"
                 }),
             ),
         })
@@ -524,7 +536,8 @@ fn flight_booking_modify_search_criteria() {
                             "adults": 1,
                             "children": 0,
                             "infants": 0
-                        }
+                        },
+                        "status": "search_criteria"
                     }),
                 )),
             },
@@ -537,13 +550,9 @@ fn flight_booking_modify_search_criteria() {
 
 #[test]
 fn flight_booking_passenger_details_incomplete() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services_with_no_validation())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -606,7 +615,8 @@ fn flight_booking_passenger_details_incomplete() {
                                 // Missing dateOfBirth for second passenger
                             }
                         ]
-                    }
+                    },
+                    "status": "passenger_details"
                 }),
             ),
         })
@@ -629,7 +639,8 @@ fn flight_booking_passenger_details_incomplete() {
                                     "passengerType": "adult"
                                 }
                             ]
-                        }
+                        },
+                        "status": "passenger_details"
                     }),
                 )),
             },
@@ -647,13 +658,9 @@ fn flight_booking_passenger_details_incomplete() {
 
 #[test]
 fn flight_booking_passenger_details_three_passengers() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             JourneyEvent::Modified {
@@ -725,7 +732,8 @@ fn flight_booking_passenger_details_three_passengers() {
                                 "passengerType": "child"
                             }
                         ]
-                    }
+                    },
+                    "status": "passenger_details"
                 }),
             ),
         })
@@ -755,7 +763,8 @@ fn flight_booking_passenger_details_three_passengers() {
                                     "passengerType": "child"
                                 }
                             ]
-                        }
+                        },
+                        "status": "passenger_details"
                     }),
                 )),
             },
@@ -776,13 +785,9 @@ fn flight_booking_passenger_details_three_passengers() {
 
 #[test]
 fn test_generic_data_merging() {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let services = JourneyServices::new(decision_engine);
     let id = Uuid::new_v4();
 
-    JourneyTester::with(services)
+    JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
             // First, capture basic passenger count info
@@ -796,7 +801,8 @@ fn test_generic_data_merging() {
                             "adults": 2,
                             "children": 0,
                             "infants": 0
-                        }
+                        },
+                        "status": "search_criteria"
                     }),
                 )),
             },
@@ -829,7 +835,8 @@ fn test_generic_data_merging() {
                     "preferences": {
                         "meals": ["vegetarian", "gluten-free"],
                         "seats": "aisle"
-                    }
+                    },
+                    "status": "passenger_details"
                 }),
             ),
         })
@@ -857,7 +864,8 @@ fn test_generic_data_merging() {
                         "preferences": {
                             "meals": ["vegetarian", "gluten-free"],
                             "seats": "aisle"
-                        }
+                        },
+                        "status": "passenger_details"
                     }),
                 )),
             },
@@ -874,4 +882,111 @@ fn test_generic_data_merging() {
                 to_step: "passenger_details".to_string(),
             },
         ]);
+}
+
+#[test]
+fn test_invalid_data_rejected_with_schema_validation() {
+    let id = Uuid::new_v4();
+
+    // Test that invalid data (missing required fields) is now properly rejected
+    JourneyTester::with(create_journey_services())
+        .given(vec![JourneyEvent::Started { id }])
+        .when(JourneyCommand::Capture {
+            data: (
+                "search_criteria".to_string(),
+                json!({
+                    "origin": "LHR",
+                    "destination": "JFK"
+                    // Missing required fields: tripType, passengers
+                }),
+            ),
+        })
+        .then_expect_error(
+            journey_dynamics::domain::journey::JourneyError::InvalidData(
+                "Schema validation failed: \"tripType\" is a required property, \"passengers\" is a required property, \"status\" is a required property".to_string(),
+            ),
+        );
+}
+
+#[test]
+fn test_valid_data_passes_schema_validation() {
+    use crate::flight_booking_data::FlightBookingDataExt;
+
+    let id = Uuid::new_v4();
+
+    JourneyTester::with(create_journey_services())
+        .given(vec![JourneyEvent::Started { id }])
+        .when(JourneyCommand::Capture {
+            data: (
+                "search_criteria".to_string(),
+                json!({
+                    "tripType": "round-trip",
+                    "origin": "LHR",
+                    "destination": "JFK",
+                    "departureDate": "2024-06-15",
+                    "returnDate": "2024-06-22",
+                    "passengers": {
+                        "total": 2,
+                        "adults": 2,
+                        "children": 0,
+                        "infants": 0
+                    },
+                    "status": "search_criteria"
+                }),
+            ),
+        })
+        .then_expect_events(vec![
+            JourneyEvent::Modified {
+                form_data: Some((
+                    "search_criteria".to_string(),
+                    json!({
+                        "tripType": "round-trip",
+                        "origin": "LHR",
+                        "destination": "JFK",
+                        "departureDate": "2024-06-15",
+                        "returnDate": "2024-06-22",
+                        "passengers": {
+                            "total": 2,
+                            "adults": 2,
+                            "children": 0,
+                            "infants": 0
+                        },
+                        "status": "search_criteria"
+                    }),
+                )),
+            },
+            JourneyEvent::WorkflowEvaluated {
+                available_actions: vec!["flight_search_results".to_string()],
+                primary_next_step: Some("flight_search_results".to_string()),
+            },
+            JourneyEvent::StepProgressed {
+                from_step: None,
+                to_step: "search_criteria".to_string(),
+            },
+        ]);
+
+    // Verify that the data would pass FlightBooking validation
+    let mut handler = journey_dynamics::utils::SchemaDataHandler::new();
+    handler
+        .merge_form_data(
+            "search_criteria",
+            &json!({
+                "tripType": "round-trip",
+                "origin": "LHR",
+                "destination": "JFK",
+                "departureDate": "2024-06-15",
+                "returnDate": "2024-06-22",
+                "passengers": {
+                    "total": 2,
+                    "adults": 2,
+                    "children": 0,
+                    "infants": 0
+                },
+                "status": "search_criteria"
+            }),
+        )
+        .unwrap();
+
+    // This validation should pass
+    assert!(handler.validate_flight_booking_requirements().is_ok());
 }

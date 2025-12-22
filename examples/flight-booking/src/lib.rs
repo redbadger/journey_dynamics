@@ -167,5 +167,7 @@ pub enum BookingStatus {
     Cancelled,
 }
 
+pub mod flight_booking_data;
+
 #[cfg(test)]
 mod tests;

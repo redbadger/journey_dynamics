@@ -1,0 +1,530 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FlightBooking",
+  "type": "object",
+  "properties": {
+    "bookingReference": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "departureDate": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "destination": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AirportCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "insurance": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Insurance"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "isInternational": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "origin": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AirportCode"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "passengers": {
+      "$ref": "#/$defs/Passengers"
+    },
+    "payment": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Payment"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "pricing": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Pricing"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "requiresVisa": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "returnDate": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "searchResults": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchResults"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "selectedOutboundFlight": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlightSelection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "selectedReturnFlight": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlightSelection"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "status": {
+      "$ref": "#/$defs/BookingStatus"
+    },
+    "tripType": {
+      "$ref": "#/$defs/TripType"
+    }
+  },
+  "required": [
+    "tripType",
+    "passengers",
+    "status"
+  ],
+  "$defs": {
+    "AirportCode": {
+      "type": "string"
+    },
+    "BookingStatus": {
+      "type": "string",
+      "enum": [
+        "search_criteria",
+        "flight_search_results",
+        "outbound_flight_selection",
+        "return_flight_selection",
+        "passenger_details",
+        "insurance_selection",
+        "payment_details",
+        "booking_confirmation",
+        "completed",
+        "cancelled"
+      ]
+    },
+    "CabinClass": {
+      "type": "string",
+      "enum": [
+        "economy",
+        "premium_economy",
+        "business",
+        "first"
+      ]
+    },
+    "FlightOption": {
+      "type": "object",
+      "properties": {
+        "aircraft": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "airline": {
+          "type": "string"
+        },
+        "arrival": {
+          "type": "string"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "cabinClass": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CabinClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "departure": {
+          "type": "string"
+        },
+        "duration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flightId": {
+          "type": "string"
+        },
+        "flightNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price": {
+          "type": "number",
+          "format": "double"
+        },
+        "seatsRemaining": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
+        "stops": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "flightId",
+        "airline",
+        "price",
+        "departure",
+        "arrival",
+        "available"
+      ]
+    },
+    "FlightSelection": {
+      "type": "object",
+      "properties": {
+        "aircraft": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "airline": {
+          "type": "string"
+        },
+        "arrival": {
+          "type": "string"
+        },
+        "cabinClass": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CabinClass"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "departure": {
+          "type": "string"
+        },
+        "duration": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flightId": {
+          "type": "string"
+        },
+        "flightNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "price": {
+          "type": "number",
+          "format": "double"
+        },
+        "stops": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "flightId",
+        "airline",
+        "price",
+        "departure",
+        "arrival"
+      ]
+    },
+    "Insurance": {
+      "type": "object",
+      "properties": {
+        "insurance_type": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InsuranceType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "price": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
+        "selected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "selected"
+      ]
+    },
+    "InsuranceType": {
+      "type": "string",
+      "enum": [
+        "basic",
+        "comprehensive",
+        "premium"
+      ]
+    },
+    "PassengerDetail": {
+      "type": "object",
+      "properties": {
+        "dateOfBirth": {
+          "type": "string"
+        },
+        "firstName": {
+          "type": "string"
+        },
+        "lastName": {
+          "type": "string"
+        },
+        "nationality": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "passengerType": {
+          "$ref": "#/$defs/PassengerType"
+        },
+        "passportNumber": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "firstName",
+        "lastName",
+        "dateOfBirth",
+        "passengerType"
+      ]
+    },
+    "PassengerType": {
+      "type": "string",
+      "enum": [
+        "adult",
+        "child",
+        "infant"
+      ]
+    },
+    "Passengers": {
+      "type": "object",
+      "properties": {
+        "adults": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "children": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "details": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/PassengerDetail"
+          }
+        },
+        "infants": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total",
+        "adults",
+        "children",
+        "infants"
+      ]
+    },
+    "Payment": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaymentMethod"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/PaymentStatus"
+        },
+        "transaction_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "status"
+      ]
+    },
+    "PaymentMethod": {
+      "type": "string",
+      "enum": [
+        "credit_card",
+        "debit_card",
+        "paypal",
+        "bank_transfer"
+      ]
+    },
+    "PaymentStatus": {
+      "type": "string",
+      "enum": [
+        "pending",
+        "processing",
+        "completed",
+        "failed",
+        "refunded"
+      ]
+    },
+    "Pricing": {
+      "type": "object",
+      "properties": {
+        "basePrice": {
+          "type": "number",
+          "format": "double"
+        },
+        "currency": {
+          "type": "string"
+        },
+        "taxes": {
+          "type": "number",
+          "format": "double"
+        },
+        "totalPrice": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "basePrice",
+        "taxes",
+        "totalPrice",
+        "currency"
+      ]
+    },
+    "SearchResults": {
+      "type": "object",
+      "properties": {
+        "outbound": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FlightOption"
+          }
+        },
+        "returnFlights": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/FlightOption"
+          }
+        },
+        "totalResults": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "totalResults"
+      ]
+    },
+    "TripType": {
+      "type": "string",
+      "enum": [
+        "one-way",
+        "round-trip",
+        "multi-city"
+      ]
+    }
+  }
+}

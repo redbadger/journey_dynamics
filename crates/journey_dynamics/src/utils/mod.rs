@@ -1,3 +1,3 @@
-pub mod data_merger;
+pub mod schema_data_handler;
 
-pub use data_merger::DataMerger;
+pub use schema_data_handler::SchemaDataHandler;

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::domain::events::JourneyEvent;
-use crate::utils::DataMerger;
+use crate::services::schema_validator::SchemaValidator;
+use crate::utils::SchemaDataHandler;
 use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
 use async_trait::async_trait;
 use cqrs_es::Aggregate;
@@ -18,7 +19,7 @@ pub struct Journey {
     current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
     #[serde(skip)]
-    data_merger: DataMerger,
+    data_handler: SchemaDataHandler,
 }
 
 impl Default for Journey {
@@ -29,7 +30,7 @@ impl Default for Journey {
             data_capture: Vec::new(),
             current_step: None,
             latest_workflow_decision: None,
-            data_merger: DataMerger::new(),
+            data_handler: SchemaDataHandler::new(),
         }
     }
 }
@@ -64,7 +65,7 @@ impl Aggregate for Journey {
     async fn handle(
         &self,
         command: Self::Command,
-        _services: &Self::Services,
+        services: &Self::Services,
     ) -> Result<Vec<Self::Event>, Self::Error> {
         match command {
             JourneyCommand::Start { id } => {
@@ -89,35 +90,47 @@ impl Aggregate for Journey {
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
+                    // Extract the key-value pair for later use
+                    let (key, value) = &data;
+
+                    // Create a temporary handler to validate the merged data
+                    let mut temp_handler = self.data_handler.clone();
+                    temp_handler.merge_form_data(key, value).unwrap();
+
+                    // Validate against schema using the schema validator service
+                    if let Err(e) = services
+                        .schema_validator()
+                        .validate(temp_handler.get_merged_data())
+                    {
+                        return Err(JourneyError::InvalidData(e.to_string()));
+                    }
+
                     // Determine if the data key represents a step transition
-                    let (key, _) = &data;
                     let is_step_transition = key != "capturedData"
                         && key != "currentStep"
                         && Some(key) != self.current_step.as_ref();
 
-                    // If this is a step transition, temporarily update currentStep for evaluation
+                    // Prepare journey state for decision engine evaluation
                     let mut journey_for_eval = self.clone();
                     if is_step_transition {
                         journey_for_eval.current_step = Some(key.clone());
                     }
 
-                    let decision = _services
+                    let decision = services
                         .decision_engine()
                         .evaluate_next_steps(&journey_for_eval, &data)
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
-                    let mut events = vec![
-                        JourneyEvent::Modified {
-                            form_data: Some(data.clone()),
-                        },
-                        JourneyEvent::WorkflowEvaluated {
-                            available_actions: decision.available_actions.clone(),
-                            primary_next_step: decision.primary_next_step.clone(),
-                        },
-                    ];
+                    let mut events = vec![JourneyEvent::Modified {
+                        form_data: Some(data.clone()),
+                    }];
 
-                    // If the data key represents a step, emit StepProgressed event
+                    events.push(JourneyEvent::WorkflowEvaluated {
+                        available_actions: decision.available_actions,
+                        primary_next_step: decision.primary_next_step,
+                    });
+
                     if is_step_transition {
                         events.push(JourneyEvent::StepProgressed {
                             from_step: self.current_step.clone(),
@@ -149,11 +162,10 @@ impl Aggregate for Journey {
             JourneyEvent::Modified { form_data } => {
                 if let Some((key, value)) = form_data.clone() {
                     self.data_capture.push((key.clone(), value.clone()));
-                    // Use DataMerger for consistent data handling
-                    if let Err(e) = self.data_merger.merge_form_data(&key, &value) {
-                        // Log error but don't fail the event application
-                        eprintln!("Warning: Failed to merge data for key '{key}': {e}");
-                    }
+                    // This should never fail because we validated in handle method
+                    self.data_handler
+                        .merge_form_data(&key, &value)
+                        .expect("Data merge should succeed - was validated in command handler");
                 }
             }
             JourneyEvent::WorkflowEvaluated {
@@ -192,20 +204,34 @@ pub enum JourneyError {
     AlreadyCompleted,
     #[error("Decision engine error: {0}")]
     DecisionEngineError(String),
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 }
 
 pub struct JourneyServices {
     decision_engine: Arc<dyn DecisionEngine>,
+    schema_validator: Arc<dyn SchemaValidator>,
 }
 
 impl JourneyServices {
-    pub fn new(decision_engine: Arc<dyn DecisionEngine>) -> Self {
-        Self { decision_engine }
+    pub fn new(
+        decision_engine: Arc<dyn DecisionEngine>,
+        schema_validator: Arc<dyn SchemaValidator>,
+    ) -> Self {
+        Self {
+            decision_engine,
+            schema_validator,
+        }
     }
 
     #[must_use]
     pub fn decision_engine(&self) -> &Arc<dyn DecisionEngine> {
         &self.decision_engine
+    }
+
+    #[must_use]
+    pub fn schema_validator(&self) -> &Arc<dyn SchemaValidator> {
+        &self.schema_validator
     }
 }
 
@@ -238,13 +264,19 @@ impl Journey {
     /// Get the current merged data state
     #[must_use]
     pub fn get_merged_data(&self) -> &Value {
-        self.data_merger.get_merged_data()
+        self.data_handler.get_merged_data()
     }
 
     /// Get a specific field from the merged data
     #[must_use]
     pub fn get_field(&self, field_path: &str) -> Option<&Value> {
-        self.data_merger.get_field(field_path)
+        self.data_handler.get_field(field_path)
+    }
+
+    /// Get access to the data handler for domain-specific operations
+    #[must_use]
+    pub fn get_data_handler(&self) -> &SchemaDataHandler {
+        &self.data_handler
     }
 }
 
@@ -258,12 +290,14 @@ mod tests {
 
     use super::*;
     use crate::services::decision_engine::SimpleDecisionEngine;
+    use crate::services::schema_validator::NoOpValidator;
 
     type JourneyTester = TestFramework<Journey>;
 
     #[test]
     fn start_a_journey() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -274,7 +308,8 @@ mod tests {
 
     #[test]
     fn modify_journey() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -299,7 +334,8 @@ mod tests {
 
     #[test]
     fn complete_unmodified_journey() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -310,7 +346,8 @@ mod tests {
 
     #[test]
     fn complete_modified_journey() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -326,7 +363,8 @@ mod tests {
 
     #[test]
     fn capture_empty_form_data() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -351,7 +389,8 @@ mod tests {
 
     #[test]
     fn capture_form_data_with_values() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -401,7 +440,8 @@ mod tests {
 
     #[test]
     fn complete_journey_with_form_data() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -431,7 +471,8 @@ mod tests {
 
     #[test]
     fn open_already_opened() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -442,7 +483,8 @@ mod tests {
 
     #[test]
     fn complete_not_started() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
 
         JourneyTester::with(services)
             .given_no_previous_events()
@@ -452,7 +494,8 @@ mod tests {
 
     #[test]
     fn complete_already_completed() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -463,7 +506,8 @@ mod tests {
 
     #[test]
     fn modify_not_started() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
 
         JourneyTester::with(services)
             .given_no_previous_events()
@@ -475,7 +519,8 @@ mod tests {
 
     #[test]
     fn modify_already_completed() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -488,7 +533,8 @@ mod tests {
 
     #[test]
     fn automatic_workflow_evaluation_after_every_event() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -523,7 +569,8 @@ mod tests {
 
     #[test]
     fn automatic_workflow_evaluation_for_specific_data() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -558,7 +605,8 @@ mod tests {
 
     #[test]
     fn test_capture_person() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -577,7 +625,8 @@ mod tests {
 
     #[test]
     fn test_capture_person_update() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -603,7 +652,8 @@ mod tests {
 
     #[test]
     fn test_capture_person_journey_not_started() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
 
         JourneyTester::with(services)
             .given_no_previous_events()
@@ -617,7 +667,8 @@ mod tests {
 
     #[test]
     fn test_capture_person_journey_completed() {
-        let services = JourneyServices::new(Arc::new(SimpleDecisionEngine));
+        let services =
+            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)

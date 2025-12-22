@@ -113,13 +113,13 @@ impl DecisionEngine for GoRulesDecisionEngine {
             // Skip meta keys, merge step data into capturedData
             if key != "currentStep" && key != "capturedData" {
                 if let Value::Object(_) = value {
-                    // Use custom merge that prefers arrays over objects for generic conflict resolution
-                    Self::merge_with_array_preference(&mut captured_data, value);
+                    // Use standard JSON merge patch semantics
+                    json_patch::merge(&mut captured_data, value);
                 }
             } else if key == "capturedData" {
                 // If there's already a capturedData key, merge it too
                 if let Value::Object(_) = value {
-                    Self::merge_with_array_preference(&mut captured_data, value);
+                    json_patch::merge(&mut captured_data, value);
                 }
             }
         }
@@ -183,40 +183,5 @@ impl DecisionEngine for GoRulesDecisionEngine {
             available_actions,
             primary_next_step,
         })
-    }
-}
-
-impl GoRulesDecisionEngine {
-    /// Generic merge function that prefers arrays over objects when conflicts occur
-    /// This handles cases where the same field name has different data structures
-    fn merge_with_array_preference(target: &mut Value, source: &Value) {
-        if let (Value::Object(target_obj), Value::Object(source_obj)) = (target, source) {
-            for (key, source_value) in source_obj {
-                match target_obj.get(key) {
-                    Some(target_value) => {
-                        // Handle conflicts based on data type preference: Arrays > Objects > Others
-                        let merged_value = match (target_value, source_value) {
-                            // If source is array and target is not, prefer source (array)
-                            (_, Value::Array(_)) => source_value.clone(),
-                            // If target is array and source is not, keep target (array)
-                            (Value::Array(_), _) => target_value.clone(),
-                            // If both are objects, recursively merge them
-                            (Value::Object(_), Value::Object(_)) => {
-                                let mut merged = target_value.clone();
-                                Self::merge_with_array_preference(&mut merged, source_value);
-                                merged
-                            }
-                            // For all other cases, source overwrites target (standard merge behavior)
-                            _ => source_value.clone(),
-                        };
-                        target_obj.insert(key.clone(), merged_value);
-                    }
-                    None => {
-                        // No conflict, just insert the new value
-                        target_obj.insert(key.clone(), source_value.clone());
-                    }
-                }
-            }
-        }
     }
 }

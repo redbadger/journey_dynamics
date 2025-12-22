@@ -31,7 +31,10 @@ pub fn cqrs_framework(
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
         "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
     )));
-    let services = JourneyServices::new(decision_engine);
+    let services = JourneyServices::new(
+        decision_engine,
+        Arc::new(crate::services::schema_validator::NoOpValidator),
+    );
 
     (
         Arc::new(postgres_es::postgres_cqrs(pool, queries, services)),
