@@ -19,11 +19,15 @@ impl Default for DataMerger {
 }
 
 impl DataMerger {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Merge new form data into the existing data using deep merge semantics
+    ///
+    /// # Errors
+    /// Returns an error if the data cannot be merged.
     pub fn merge_form_data(&mut self, key: &str, data: &Value) -> Result<(), DataMergerError> {
         // Store the operation in history
         self.capture_history.push((key.to_string(), data.clone()));
@@ -44,11 +48,13 @@ impl DataMerger {
     }
 
     /// Get the current merged data state
+    #[must_use]
     pub fn get_merged_data(&self) -> &Value {
         &self.merged_data
     }
 
     /// Get the capture history
+    #[must_use]
     pub fn get_capture_history(&self) -> &[(String, Value)] {
         &self.capture_history
     }
@@ -103,10 +109,6 @@ impl DataMerger {
                 }
             }
             // Arrays - replace entirely (could implement array merging strategies if needed)
-            (_, Value::Array(_)) => {
-                target.insert(key.to_string(), new_value.clone());
-            }
-            // All other cases - replace the value
             _ => {
                 target.insert(key.to_string(), new_value.clone());
             }

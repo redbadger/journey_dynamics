@@ -29,7 +29,7 @@ pub fn cqrs_framework(
     ];
 
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
+        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
     )));
     let services = JourneyServices::new(decision_engine);
 
