@@ -3,21 +3,73 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct FlightBooking {
+pub struct SearchCriteria {
     pub trip_type: TripType,
-    pub origin: Option<AirportCode>,
-    pub destination: Option<AirportCode>,
-    pub departure_date: Option<String>, // ISO 8601 date format
-    pub return_date: Option<String>,    // ISO 8601 date format
-    pub passengers: Passengers,
-    pub selected_outbound_flight: Option<FlightSelection>,
-    pub selected_return_flight: Option<FlightSelection>,
-    pub search_results: Option<SearchResults>,
+    pub origin: AirportCode,
+    pub destination: AirportCode,
+    pub departure_date: String,      // ISO 8601 date format
+    pub return_date: Option<String>, // ISO 8601 date format, required for round-trip
+    pub passengers: PassengerCounts,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightBooking {
+    pub flights: Option<FlightSelections>,
+    pub passengers: Option<Vec<PassengerDetail>>,
     pub pricing: Option<Pricing>,
     pub insurance: Option<Insurance>,
     pub payment: Option<Payment>,
     pub booking_reference: Option<String>,
-    pub status: BookingStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightSelections {
+    pub selected_outbound_flight: FlightSelection,
+    pub selected_return_flight: Option<FlightSelection>, // required for round-trip
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightBookingJourney {
+    pub search_criteria: Option<SearchCriteria>,
+    pub booking: Option<FlightBooking>,
+    pub search_results: Option<SearchResults>,
+    pub is_international: Option<bool>,
+    pub requires_visa: Option<bool>,
+}
+
+// Combined schema for incremental validation - groups are optional but fields within groups are required
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightBookingSchema {
+    // Search criteria group - when present, core fields are required
+    pub trip_type: Option<TripType>,
+    pub origin: Option<AirportCode>,
+    pub destination: Option<AirportCode>,
+    pub departure_date: Option<String>,
+    pub return_date: Option<String>,
+
+    // Flight selection group - when present, outbound is required
+    pub selected_outbound_flight: Option<FlightSelection>,
+    pub selected_return_flight: Option<FlightSelection>,
+
+    // Passenger counts for search criteria
+    pub passengers: Option<PassengerCounts>,
+    // Passenger details for booking
+    pub passenger_details: Option<Vec<PassengerDetail>>,
+
+    // Payment group - when present, status is required
+    pub payment: Option<Payment>,
+
+    // Other optional groups
+    pub pricing: Option<Pricing>,
+    pub insurance: Option<Insurance>,
+    pub booking_reference: Option<String>,
+
+    // Journey metadata
+    pub search_results: Option<SearchResults>,
     pub is_international: Option<bool>,
     pub requires_visa: Option<bool>,
 }
@@ -34,12 +86,11 @@ pub enum TripType {
 pub struct AirportCode(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct Passengers {
+pub struct PassengerCounts {
     pub total: u32,
     pub adults: u32,
     pub children: u32,
     pub infants: u32,
-    pub details: Option<Vec<PassengerDetail>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -151,23 +202,6 @@ pub enum PaymentMethod {
     Paypal,
     BankTransfer,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum BookingStatus {
-    SearchCriteria,
-    FlightSearchResults,
-    OutboundFlightSelection,
-    ReturnFlightSelection,
-    PassengerDetails,
-    InsuranceSelection,
-    PaymentDetails,
-    BookingConfirmation,
-    Completed,
-    Cancelled,
-}
-
-pub mod flight_booking_data;
 
 #[cfg(test)]
 mod tests;

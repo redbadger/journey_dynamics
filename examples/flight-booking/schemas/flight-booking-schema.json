@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "FlightBooking",
+  "title": "FlightBookingSchema",
   "type": "object",
   "properties": {
     "bookingReference": {
@@ -51,8 +51,24 @@
         }
       ]
     },
+    "passengerDetails": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/PassengerDetail"
+      }
+    },
     "passengers": {
-      "$ref": "#/$defs/Passengers"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PassengerCounts"
+        },
+        {
+          "type": "null"
+        }
+      ]
     },
     "payment": {
       "anyOf": [
@@ -116,36 +132,20 @@
         }
       ]
     },
-    "status": {
-      "$ref": "#/$defs/BookingStatus"
-    },
     "tripType": {
-      "$ref": "#/$defs/TripType"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TripType"
+        },
+        {
+          "type": "null"
+        }
+      ]
     }
   },
-  "required": [
-    "tripType",
-    "passengers",
-    "status"
-  ],
   "$defs": {
     "AirportCode": {
       "type": "string"
-    },
-    "BookingStatus": {
-      "type": "string",
-      "enum": [
-        "search_criteria",
-        "flight_search_results",
-        "outbound_flight_selection",
-        "return_flight_selection",
-        "passenger_details",
-        "insurance_selection",
-        "payment_details",
-        "booking_confirmation",
-        "completed",
-        "cancelled"
-      ]
     },
     "CabinClass": {
       "type": "string",
@@ -332,6 +332,37 @@
         "premium"
       ]
     },
+    "PassengerCounts": {
+      "type": "object",
+      "properties": {
+        "adults": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "children": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "infants": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "total": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "total",
+        "adults",
+        "children",
+        "infants"
+      ]
+    },
     "PassengerDetail": {
       "type": "object",
       "properties": {
@@ -373,46 +404,6 @@
         "adult",
         "child",
         "infant"
-      ]
-    },
-    "Passengers": {
-      "type": "object",
-      "properties": {
-        "adults": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "children": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "details": {
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/PassengerDetail"
-          }
-        },
-        "infants": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        },
-        "total": {
-          "type": "integer",
-          "format": "uint32",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "total",
-        "adults",
-        "children",
-        "infants"
       ]
     },
     "Payment": {

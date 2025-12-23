@@ -16,22 +16,11 @@ CREATE TABLE journey_view
 (
     id                  UUID                         NOT NULL PRIMARY KEY,
     state               TEXT                         NOT NULL CHECK (state IN ('InProgress', 'Complete')),
+    accumulated_data    JSONB                        NOT NULL DEFAULT '{}',
     current_step        TEXT,
     version             BIGINT CHECK (version >= 0)  NOT NULL DEFAULT 0,
     created_at          TIMESTAMP                    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at          TIMESTAMP                    NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
--- Table for captured data in journeys
-CREATE TABLE journey_data_capture
-(
-    id                  SERIAL                       NOT NULL PRIMARY KEY,
-    journey_id          UUID                         NOT NULL REFERENCES journey_view(id) ON DELETE CASCADE,
-    key                 TEXT                         NOT NULL,
-    value               JSONB                        NOT NULL,
-    sequence            INTEGER                      NOT NULL,
-    created_at          TIMESTAMP                    NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (journey_id, sequence)
 );
 
 -- Table for workflow decisions
@@ -39,8 +28,7 @@ CREATE TABLE journey_workflow_decision
 (
     id                  SERIAL                       NOT NULL PRIMARY KEY,
     journey_id          UUID                         NOT NULL REFERENCES journey_view(id) ON DELETE CASCADE,
-    available_actions   TEXT[]                       NOT NULL,
-    primary_next_step   TEXT,
+    suggested_actions   TEXT[]                       NOT NULL,
     created_at          TIMESTAMP                    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     is_latest           BOOLEAN                      NOT NULL DEFAULT TRUE
 );
@@ -59,7 +47,7 @@ CREATE TABLE journey_person
 );
 
 -- Index for quick lookups
-CREATE INDEX idx_journey_data_capture_journey_id ON journey_data_capture(journey_id);
+CREATE INDEX idx_journey_accumulated_data ON journey_view USING GIN (accumulated_data);
 CREATE INDEX idx_journey_workflow_decision_journey_id ON journey_workflow_decision(journey_id);
 CREATE INDEX idx_journey_workflow_decision_latest ON journey_workflow_decision(journey_id, is_latest) WHERE is_latest = TRUE;
 CREATE INDEX idx_journey_person_journey_id ON journey_person(journey_id);

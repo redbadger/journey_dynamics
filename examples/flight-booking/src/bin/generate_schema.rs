@@ -1,11 +1,11 @@
 use std::fs;
 use std::path::Path;
 
-use flight_booking::FlightBooking;
+use flight_booking::FlightBookingSchema;
 use schemars::schema_for;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let schema = schema_for!(FlightBooking);
+    let schema = schema_for!(FlightBookingSchema);
 
     // Ensure the schemas directory exists
     let schemas_dir = Path::new("./schemas");

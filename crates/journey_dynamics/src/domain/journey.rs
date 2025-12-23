@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use crate::domain::events::JourneyEvent;
 use crate::services::schema_validator::SchemaValidator;
-use crate::utils::SchemaDataHandler;
 use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
 use async_trait::async_trait;
 use cqrs_es::Aggregate;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -15,30 +14,14 @@ use uuid::Uuid;
 pub struct Journey {
     id: Uuid,
     state: JourneyState,
-    data_capture: Vec<(String, Value)>,
+    accumulated_data: Value,
     current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
-    #[serde(skip)]
-    data_handler: SchemaDataHandler,
-}
-
-impl Default for Journey {
-    fn default() -> Self {
-        Self {
-            id: Uuid::default(),
-            state: JourneyState::default(),
-            data_capture: Vec::new(),
-            current_step: None,
-            latest_workflow_decision: None,
-            data_handler: SchemaDataHandler::new(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDecisionState {
-    pub available_actions: Vec<String>,
-    pub primary_next_step: Option<String>,
+    pub suggested_actions: Vec<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -84,57 +67,45 @@ impl Aggregate for Journey {
                     Ok(vec![JourneyEvent::PersonCaptured { name, email, phone }])
                 }
             }
-            JourneyCommand::Capture { data } => {
+            JourneyCommand::Capture { step, data } => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    // Extract the key-value pair for later use
-                    let (key, value) = &data;
-
-                    // Create a temporary handler to validate the merged data
-                    let mut temp_handler = self.data_handler.clone();
-                    temp_handler.merge_form_data(key, value).unwrap();
-
                     // Validate against schema using the schema validator service
-                    if let Err(e) = services
-                        .schema_validator()
-                        .validate(temp_handler.get_merged_data())
-                    {
+                    if let Err(e) = services.schema_validator().validate(&data) {
                         return Err(JourneyError::InvalidData(e.to_string()));
                     }
 
-                    // Determine if the data key represents a step transition
-                    let is_step_transition = key != "capturedData"
-                        && key != "currentStep"
-                        && Some(key) != self.current_step.as_ref();
+                    // Determine if this represents a step transition
+                    let is_step_transition = self.current_step.as_ref() != Some(&step);
 
                     // Prepare journey state for decision engine evaluation
                     let mut journey_for_eval = self.clone();
                     if is_step_transition {
-                        journey_for_eval.current_step = Some(key.clone());
+                        journey_for_eval.current_step = Some(step.clone());
                     }
 
                     let decision = services
                         .decision_engine()
-                        .evaluate_next_steps(&journey_for_eval, &data)
+                        .evaluate_next_steps(&journey_for_eval, &step, &data)
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
                     let mut events = vec![JourneyEvent::Modified {
-                        form_data: Some(data.clone()),
+                        step: step.clone(),
+                        data: data.clone(),
                     }];
 
                     events.push(JourneyEvent::WorkflowEvaluated {
-                        available_actions: decision.available_actions,
-                        primary_next_step: decision.primary_next_step,
+                        suggested_actions: decision.suggested_actions,
                     });
 
                     if is_step_transition {
                         events.push(JourneyEvent::StepProgressed {
                             from_step: self.current_step.clone(),
-                            to_step: key.clone(),
+                            to_step: step.clone(),
                         });
                     }
 
@@ -159,23 +130,11 @@ impl Aggregate for Journey {
                 self.id = id;
                 self.state = JourneyState::InProgress;
             }
-            JourneyEvent::Modified { form_data } => {
-                if let Some((key, value)) = form_data.clone() {
-                    self.data_capture.push((key.clone(), value.clone()));
-                    // This should never fail because we validated in handle method
-                    self.data_handler
-                        .merge_form_data(&key, &value)
-                        .expect("Data merge should succeed - was validated in command handler");
-                }
+            JourneyEvent::Modified { step: _, data } => {
+                json_patch::merge(&mut self.accumulated_data, &data);
             }
-            JourneyEvent::WorkflowEvaluated {
-                available_actions,
-                primary_next_step,
-            } => {
-                self.latest_workflow_decision = Some(WorkflowDecisionState {
-                    available_actions,
-                    primary_next_step,
-                });
+            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
+                self.latest_workflow_decision = Some(WorkflowDecisionState { suggested_actions });
             }
             JourneyEvent::PersonCaptured { .. } => {
                 // Person data is projected to read model tables
@@ -247,8 +206,8 @@ impl Journey {
     }
 
     #[must_use]
-    pub fn data_capture(&self) -> &[(String, Value)] {
-        &self.data_capture
+    pub fn accumulated_data(&self) -> &Value {
+        &self.accumulated_data
     }
 
     #[must_use]
@@ -260,23 +219,17 @@ impl Journey {
     pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
     }
+}
 
-    /// Get the current merged data state
-    #[must_use]
-    pub fn get_merged_data(&self) -> &Value {
-        self.data_handler.get_merged_data()
-    }
-
-    /// Get a specific field from the merged data
-    #[must_use]
-    pub fn get_field(&self, field_path: &str) -> Option<&Value> {
-        self.data_handler.get_field(field_path)
-    }
-
-    /// Get access to the data handler for domain-specific operations
-    #[must_use]
-    pub fn get_data_handler(&self) -> &SchemaDataHandler {
-        &self.data_handler
+impl Default for Journey {
+    fn default() -> Self {
+        Self {
+            id: Uuid::default(),
+            state: JourneyState::default(),
+            accumulated_data: json!({}),
+            current_step: None,
+            latest_workflow_decision: None,
+        }
     }
 }
 
@@ -290,14 +243,39 @@ mod tests {
 
     use super::*;
     use crate::services::decision_engine::SimpleDecisionEngine;
-    use crate::services::schema_validator::NoOpValidator;
+    use crate::services::schema_validator::JsonSchemaValidator;
 
     type JourneyTester = TestFramework<Journey>;
 
+    fn create_test_schema_validator() -> Arc<JsonSchemaValidator> {
+        let schema = json!({
+            "oneOf": [
+                {
+                    "type": "string"
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "alpha": { "type": "number" },
+                        "beta": { "type": "string" },
+                        "step": { "type": "string" },
+                        "email": { "type": "string", "format": "email" },
+                        "name": { "type": "string" },
+                        "first_name": { "type": "string" }
+                    },
+                    "additionalProperties": true
+                }
+            ]
+        });
+        Arc::new(JsonSchemaValidator::new(&schema).unwrap())
+    }
+
     #[test]
     fn start_a_journey() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -308,22 +286,25 @@ mod tests {
 
     #[test]
     fn modify_journey() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::Capture {
-                data: ("first_name".to_string(), json!("Joe")),
+                step: "first_name".to_string(),
+                data: json!("Joe"),
             })
             .then_expect_events(vec![
                 JourneyEvent::Modified {
-                    form_data: Some(("first_name".to_string(), json!("Joe"))),
+                    step: "first_name".to_string(),
+                    data: json!("Joe"),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -334,8 +315,10 @@ mod tests {
 
     #[test]
     fn complete_unmodified_journey() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -346,15 +329,18 @@ mod tests {
 
     #[test]
     fn complete_modified_journey() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![
                 JourneyEvent::Started { id },
                 JourneyEvent::Modified {
-                    form_data: Some(("first_name".to_string(), json!("Joe"))),
+                    step: "first_name".to_string(),
+                    data: json!("Joe"),
                 },
             ])
             .when(JourneyCommand::Complete)
@@ -363,22 +349,25 @@ mod tests {
 
     #[test]
     fn capture_empty_form_data() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::Capture {
-                data: ("form_data".to_string(), json!({})),
+                step: "form_data".to_string(),
+                data: json!({}),
             })
             .then_expect_events(vec![
                 JourneyEvent::Modified {
-                    form_data: Some(("form_data".to_string(), json!({}))),
+                    step: "form_data".to_string(),
+                    data: json!({}),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -389,19 +378,21 @@ mod tests {
 
     #[test]
     fn capture_form_data_with_values() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![
                 JourneyEvent::Started { id },
                 JourneyEvent::Modified {
-                    form_data: Some(("form_data".to_string(), json!({}))),
+                    step: "form_data".to_string(),
+                    data: json!({}),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -409,27 +400,22 @@ mod tests {
                 },
             ])
             .when(JourneyCommand::Capture {
-                data: (
-                    "alpha".to_string(),
-                    json!({
-                        "alpha": 42,
-                        "beta": "hello"
-                    }),
-                ),
+                step: "alpha".to_string(),
+                data: json!({
+                    "alpha": 42,
+                    "beta": "hello"
+                }),
             })
             .then_expect_events(vec![
                 JourneyEvent::Modified {
-                    form_data: Some((
-                        "alpha".to_string(),
-                        json!({
-                            "alpha": 42,
-                            "beta": "hello"
-                        }),
-                    )),
+                    step: "alpha".to_string(),
+                    data: json!({
+                        "alpha": 42,
+                        "beta": "hello"
+                    }),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
                 },
                 JourneyEvent::StepProgressed {
                     from_step: Some("form_data".to_string()),
@@ -440,25 +426,24 @@ mod tests {
 
     #[test]
     fn complete_journey_with_form_data() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![
                 JourneyEvent::Started { id },
                 JourneyEvent::Modified {
-                    form_data: Some((
-                        "alpha".to_string(),
-                        json!({
-                            "alpha": 42,
-                            "beta": "hello"
-                        }),
-                    )),
+                    step: "alpha".to_string(),
+                    data: json!({
+                        "alpha": 42,
+                        "beta": "hello"
+                    }),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
                 },
                 JourneyEvent::StepProgressed {
                     from_step: Some("form_data".to_string()),
@@ -471,8 +456,10 @@ mod tests {
 
     #[test]
     fn open_already_opened() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -483,8 +470,10 @@ mod tests {
 
     #[test]
     fn complete_not_started() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
 
         JourneyTester::with(services)
             .given_no_previous_events()
@@ -494,8 +483,10 @@ mod tests {
 
     #[test]
     fn complete_already_completed() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -506,107 +497,117 @@ mod tests {
 
     #[test]
     fn modify_not_started() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
 
         JourneyTester::with(services)
             .given_no_previous_events()
             .when(JourneyCommand::Capture {
-                data: ("first_name".to_string(), json!("Joe")),
+                step: "first_name".to_string(),
+                data: json!("Joe"),
             })
             .then_expect_error(JourneyError::NotFound);
     }
 
     #[test]
     fn modify_already_completed() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
             .when(JourneyCommand::Capture {
-                data: ("first_name".to_string(), json!("Joe")),
+                step: "first_name".to_string(),
+                data: json!("Joe"),
             })
             .then_expect_error(JourneyError::AlreadyCompleted);
     }
 
     #[test]
     fn automatic_workflow_evaluation_after_every_event() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::Capture {
-                data: (
-                    "capturedData".to_string(),
-                    json!({
+                step: "step-1".to_string(),
+                data: json!({
+                    "step": "personal_info",
+                    "email": "user@example.com",
+                    "name": "Alice"
+                }),
+            })
+            .then_expect_events(vec![
+                JourneyEvent::Modified {
+                    step: "step-1".to_string(),
+                    data: json!({
                         "step": "personal_info",
                         "email": "user@example.com",
                         "name": "Alice"
                     }),
-                ),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    form_data: Some((
-                        "capturedData".to_string(),
-                        json!({
-                            "step": "personal_info",
-                            "email": "user@example.com",
-                            "name": "Alice"
-                        }),
-                    )),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec![],
-                    primary_next_step: None,
+                    suggested_actions: vec![],
+                },
+                JourneyEvent::StepProgressed {
+                    from_step: None,
+                    to_step: "step-1".to_string(),
                 },
             ]);
     }
 
     #[test]
     fn automatic_workflow_evaluation_for_specific_data() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::Capture {
-                data: (
-                    "capturedData".to_string(),
-                    json!({
+                step: "step-1".to_string(),
+                data: json!({
+                    "step": "personal_info",
+                    "email": "user@example.com",
+                    "first_name": "Alice"
+                }),
+            })
+            .then_expect_events(vec![
+                JourneyEvent::Modified {
+                    step: "step-1".to_string(),
+                    data: json!({
                         "step": "personal_info",
                         "email": "user@example.com",
                         "first_name": "Alice"
                     }),
-                ),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    form_data: Some((
-                        "capturedData".to_string(),
-                        json!({
-                            "step": "personal_info",
-                            "email": "user@example.com",
-                            "first_name": "Alice"
-                        }),
-                    )),
                 },
                 JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec!["form_3".to_string()],
-                    primary_next_step: None,
+                    suggested_actions: vec!["form_3".to_string()],
+                },
+                JourneyEvent::StepProgressed {
+                    from_step: None,
+                    to_step: "step-1".to_string(),
                 },
             ]);
     }
 
     #[test]
     fn test_capture_person() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -625,8 +626,10 @@ mod tests {
 
     #[test]
     fn test_capture_person_update() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -652,8 +655,10 @@ mod tests {
 
     #[test]
     fn test_capture_person_journey_not_started() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
 
         JourneyTester::with(services)
             .given_no_previous_events()
@@ -667,8 +672,10 @@ mod tests {
 
     #[test]
     fn test_capture_person_journey_completed() {
-        let services =
-            JourneyServices::new(Arc::new(SimpleDecisionEngine), Arc::new(NoOpValidator));
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
         let id = Uuid::new_v4();
 
         JourneyTester::with(services)
@@ -679,5 +686,31 @@ mod tests {
                 phone: None,
             })
             .then_expect_error(JourneyError::AlreadyCompleted);
+    }
+
+    #[test]
+    fn test_capture_invalid_data_schema_validation_error() {
+        // Test that the JsonSchemaValidator properly rejects data that doesn't match the schema
+        // and returns an InvalidData error with validation details
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
+        let id = Uuid::new_v4();
+
+        // Create invalid data that violates the schema
+        // The schema expects "alpha" to be a number, but we're providing a string
+        let invalid_data = json!({
+            "alpha": "this should be a number",
+            "beta": 123  // This should be a string
+        });
+
+        JourneyTester::with(services)
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::Capture {
+                step: "test_step".to_string(),
+                data: invalid_data,
+            })
+            .then_expect_error(JourneyError::InvalidData("Schema validation failed: {\"alpha\":\"this should be a number\",\"beta\":123} is not valid under any of the schemas listed in the 'oneOf' keyword".to_string()));
     }
 }

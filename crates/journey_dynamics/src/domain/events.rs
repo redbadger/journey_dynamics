@@ -9,7 +9,8 @@ pub enum JourneyEvent {
         id: Uuid,
     },
     Modified {
-        form_data: Option<(String, Value)>,
+        step: String,
+        data: Value,
     },
     PersonCaptured {
         name: String,
@@ -17,8 +18,7 @@ pub enum JourneyEvent {
         phone: Option<String>,
     },
     WorkflowEvaluated {
-        available_actions: Vec<String>,
-        primary_next_step: Option<String>,
+        suggested_actions: Vec<String>,
     },
     StepProgressed {
         from_step: Option<String>,

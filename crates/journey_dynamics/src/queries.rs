@@ -2,7 +2,7 @@ use cqrs_es::persist::GenericQuery;
 use cqrs_es::{EventEnvelope, View};
 use postgres_es::PostgresViewRepository;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::domain::events::JourneyEvent;
@@ -24,8 +24,8 @@ pub struct JourneyView {
     /// Current state of the journey (`InProgress` or `Complete`)
     pub state: JourneyState,
 
-    /// All data captured during the journey as key-value pairs
-    pub data_capture: Vec<DataCaptureEntry>,
+    /// All data accumulated during the journey
+    pub accumulated_data: Value,
 
     /// The current step in the journey workflow
     pub current_step: Option<String>,
@@ -42,18 +42,10 @@ pub enum JourneyState {
     Complete,
 }
 
-/// A data capture entry with a key and JSON value
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct DataCaptureEntry {
-    pub key: String,
-    pub value: Value,
-}
-
 /// The workflow decision state in the view
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowDecisionView {
-    pub available_actions: Vec<String>,
-    pub primary_next_step: Option<String>,
+    pub suggested_actions: Vec<String>,
 }
 
 // This updates the view with events as they are committed.
@@ -65,19 +57,14 @@ impl View<Journey> for JourneyView {
                 // Initialize the journey view with the ID
                 self.id = *id;
                 self.state = JourneyState::InProgress;
-                self.data_capture = Vec::new();
+                self.accumulated_data = json!({});
                 self.current_step = None;
                 self.latest_workflow_decision = None;
             }
 
-            JourneyEvent::Modified { form_data } => {
-                // Add captured data to the journey
-                if let Some((key, value)) = form_data {
-                    self.data_capture.push(DataCaptureEntry {
-                        key: key.clone(),
-                        value: value.clone(),
-                    });
-                }
+            JourneyEvent::Modified { step: _, data } => {
+                // Merge new data into accumulated data
+                json_patch::merge(&mut self.accumulated_data, data);
             }
 
             JourneyEvent::PersonCaptured { .. } => {
@@ -85,14 +72,10 @@ impl View<Journey> for JourneyView {
                 // No need to update the view here
             }
 
-            JourneyEvent::WorkflowEvaluated {
-                available_actions,
-                primary_next_step,
-            } => {
+            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
                 // Update the latest workflow decision
                 self.latest_workflow_decision = Some(WorkflowDecisionView {
-                    available_actions: available_actions.clone(),
-                    primary_next_step: primary_next_step.clone(),
+                    suggested_actions: suggested_actions.clone(),
                 });
             }
 
@@ -135,7 +118,7 @@ mod tests {
 
         assert_eq!(view.id, id);
         assert_eq!(view.state, JourneyState::InProgress);
-        assert!(view.data_capture.is_empty());
+        assert_eq!(view.accumulated_data, json!({}));
         assert!(view.current_step.is_none());
         assert!(view.latest_workflow_decision.is_none());
     }
@@ -146,7 +129,7 @@ mod tests {
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
-            data_capture: Vec::new(),
+            accumulated_data: json!({}),
             current_step: None,
             latest_workflow_decision: None,
         };
@@ -155,16 +138,18 @@ mod tests {
             aggregate_id: id.to_string(),
             sequence: 2,
             payload: JourneyEvent::Modified {
-                form_data: Some(("user_name".to_string(), json!("John Doe"))),
+                step: "user_name".to_string(),
+                data: json!({"user_name": "John Doe"}),
             },
             metadata: HashMap::default(),
         };
 
         view.update(&envelope);
 
-        assert_eq!(view.data_capture.len(), 1);
-        assert_eq!(view.data_capture[0].key, "user_name");
-        assert_eq!(view.data_capture[0].value, json!("John Doe"));
+        assert_eq!(
+            view.accumulated_data.get("user_name"),
+            Some(&json!("John Doe"))
+        );
     }
 
     #[test]
@@ -173,7 +158,7 @@ mod tests {
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
-            data_capture: Vec::new(),
+            accumulated_data: json!({}),
             current_step: None,
             latest_workflow_decision: None,
         };
@@ -182,8 +167,11 @@ mod tests {
             aggregate_id: id.to_string(),
             sequence: 3,
             payload: JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["next".to_string(), "back".to_string()],
-                primary_next_step: Some("step2".to_string()),
+                suggested_actions: vec![
+                    "step2".to_string(),
+                    "next".to_string(),
+                    "back".to_string(),
+                ],
             },
             metadata: HashMap::default(),
         };
@@ -192,8 +180,10 @@ mod tests {
 
         assert!(view.latest_workflow_decision.is_some());
         let decision = view.latest_workflow_decision.as_ref().unwrap();
-        assert_eq!(decision.available_actions.len(), 2);
-        assert_eq!(decision.primary_next_step, Some("step2".to_string()));
+        assert_eq!(decision.suggested_actions.len(), 3);
+        assert_eq!(decision.suggested_actions[0], "step2");
+        assert_eq!(decision.suggested_actions[1], "next");
+        assert_eq!(decision.suggested_actions[2], "back");
     }
 
     #[test]
@@ -202,7 +192,7 @@ mod tests {
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
-            data_capture: Vec::new(),
+            accumulated_data: json!({}),
             current_step: Some("step1".to_string()),
             latest_workflow_decision: None,
         };
@@ -228,7 +218,7 @@ mod tests {
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
-            data_capture: Vec::new(),
+            accumulated_data: json!({}),
             current_step: Some("final_step".to_string()),
             latest_workflow_decision: None,
         };
@@ -263,7 +253,8 @@ mod tests {
             aggregate_id: id.to_string(),
             sequence: 2,
             payload: JourneyEvent::Modified {
-                form_data: Some(("email".to_string(), json!("test@example.com"))),
+                step: "email".to_string(),
+                data: json!({"email": "test@example.com"}),
             },
             metadata: HashMap::default(),
         });
@@ -273,8 +264,7 @@ mod tests {
             aggregate_id: id.to_string(),
             sequence: 3,
             payload: JourneyEvent::WorkflowEvaluated {
-                available_actions: vec!["continue".to_string()],
-                primary_next_step: Some("confirmation".to_string()),
+                suggested_actions: vec!["confirmation".to_string(), "continue".to_string()],
             },
             metadata: HashMap::default(),
         });
@@ -300,7 +290,10 @@ mod tests {
 
         assert_eq!(view.id, id);
         assert_eq!(view.state, JourneyState::Complete);
-        assert_eq!(view.data_capture.len(), 1);
+        assert_eq!(
+            view.accumulated_data.get("email"),
+            Some(&json!("test@example.com"))
+        );
         assert_eq!(view.current_step, Some("confirmation".to_string()));
         assert!(view.latest_workflow_decision.is_some());
     }

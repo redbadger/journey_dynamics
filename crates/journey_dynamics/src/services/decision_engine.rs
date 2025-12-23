@@ -1,15 +1,14 @@
 use crate::domain::journey::{Journey, JourneyState};
 use async_trait::async_trait;
 
-use serde_json::{Map, Value, json};
+use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 use zen_engine::model::DecisionContent;
 use zen_engine::{DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions};
 
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
-    pub available_actions: Vec<String>,
-    pub primary_next_step: Option<String>,
+    pub suggested_actions: Vec<String>,
 }
 
 #[async_trait]
@@ -17,7 +16,8 @@ pub trait DecisionEngine: Send + Sync {
     async fn evaluate_next_steps(
         &self,
         journey: &Journey,
-        data: &(String, Value),
+        current_step: &str,
+        new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>>;
 }
 
@@ -29,28 +29,29 @@ impl DecisionEngine for SimpleDecisionEngine {
     async fn evaluate_next_steps(
         &self,
         journey: &Journey,
-        new_data: &(String, Value),
+        current_step: &str,
+        new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut combined_data = journey.data_capture().to_vec();
+        let mut accumulated_data = journey.accumulated_data().clone();
+        let keyed_data = serde_json::json!({ current_step: new_data });
+        json_patch::merge(&mut accumulated_data, &keyed_data);
         let state = journey.state();
 
-        combined_data.push(new_data.to_owned());
-
-        let available_actions = match state {
+        let suggested_actions = match state {
             JourneyState::InProgress => {
-                // Check if any form has "first_name" key
-                let has_first_name = combined_data.iter().any(|(_, data)| {
-                    data.as_object()
-                        .and_then(|obj| obj.get("first_name"))
-                        .is_some()
+                // Check if any step has "first_name" key
+                let has_first_name = accumulated_data.as_object().is_some_and(|obj| {
+                    obj.values().any(|value| {
+                        value
+                            .as_object()
+                            .and_then(|obj| obj.get("first_name"))
+                            .is_some()
+                    })
                 });
 
                 if has_first_name {
                     vec!["form_3".to_string()]
-                } else if combined_data
-                    .iter()
-                    .any(|(section, _)| section.contains("section_2"))
-                {
+                } else if current_step.contains("section_2") {
                     vec!["form_4".to_string()]
                 } else {
                     vec![]
@@ -59,10 +60,7 @@ impl DecisionEngine for SimpleDecisionEngine {
             JourneyState::Complete => vec![],
         };
 
-        Ok(WorkflowDecision {
-            available_actions,
-            primary_next_step: None,
-        })
+        Ok(WorkflowDecision { suggested_actions })
     }
 }
 
@@ -85,60 +83,36 @@ impl DecisionEngine for GoRulesDecisionEngine {
     async fn evaluate_next_steps(
         &self,
         journey: &Journey,
-        new_data: &(String, Value),
+        current_step: &str,
+        new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut combined_data = journey.data_capture().to_vec();
-        let _state = journey.state();
-
-        combined_data.push(new_data.to_owned());
-
-        let map: Map<String, Value> = combined_data.into_iter().collect();
+        let mut captured_data = journey.accumulated_data().clone();
+        json_patch::merge(&mut captured_data, new_data);
 
         // Build the context for decision engine evaluation
         let mut context = Map::new();
 
         // Include currentStep so the decision engine can route correctly
-        if let Some(current_step) = journey.current_step() {
-            context.insert(
-                "currentStep".to_string(),
-                Value::String(current_step.clone()),
-            );
-        }
-
-        // Merge all step data into capturedData object for decision engine rules
-        // Rules expect capturedData.tripType, capturedData.selectedOutboundFlight, etc.
-        let mut captured_data = json!({});
-
-        for (key, value) in &map {
-            // Skip meta keys, merge step data into capturedData
-            if key != "currentStep" && key != "capturedData" {
-                if let Value::Object(_) = value {
-                    // Use standard JSON merge patch semantics
-                    json_patch::merge(&mut captured_data, value);
-                }
-            } else if key == "capturedData" {
-                // If there's already a capturedData key, merge it too
-                if let Value::Object(_) = value {
-                    json_patch::merge(&mut captured_data, value);
-                }
-            }
-        }
+        context.insert(
+            "currentStep".to_string(),
+            Value::String(current_step.to_string()),
+        );
 
         context.insert("capturedData".to_string(), captured_data);
 
-        let something = serde_json::to_value(&context).unwrap();
+        let context = serde_json::to_value(&context).unwrap();
 
-        // println!("JDM Context: {:#?}", something);
+        eprintln!("JDM Context: {context:#?}");
 
         // Create a new Decision for each evaluation
-        // Use spawn_blocking to move CPU-intensive decision evaluation off the async runtime
+        // Use spawn_blocking because ZenEngine contains non-Send types (Rc<str>)
         let decision_content = self.decision_content.clone();
         let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
             let engine = ZenEngine::default();
             let decision = engine.create_decision(decision_content.into());
             let response = Handle::current()
                 .block_on(decision.evaluate_with_opts(
-                    something.into(),
+                    context.into(),
                     EvaluationOptions {
                         trace: true,
                         ..Default::default()
@@ -159,29 +133,17 @@ impl DecisionEngine for GoRulesDecisionEngine {
         let unwrapped_map = result.as_object().unwrap();
         let take = unwrapped_map.take();
 
-        // Try to get available actions from either "output" or "availableNextSteps" field
-        let test = take
-            .get("output")
-            .or_else(|| take.get("availableNextSteps"))
-            .ok_or("No available actions")?;
-
-        let available_actions: Vec<String> = test
+        // Get suggested actions directly from the decision result
+        let suggested_actions: Vec<String> = take
+            .get("suggestedActions")
+            .ok_or("No suggested actions found")?
             .as_array()
-            .ok_or("No available actions")?
+            .ok_or("Suggested actions is not an array")?
             .take()
             .into_iter()
             .map(|item| item.as_str().unwrap().to_string())
             .collect();
 
-        // Try to get primary next step
-        let primary_next_step = take
-            .get("primaryNextStep")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string);
-
-        Ok(WorkflowDecision {
-            available_actions,
-            primary_next_step,
-        })
+        Ok(WorkflowDecision { suggested_actions })
     }
 }
