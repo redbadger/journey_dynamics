@@ -8,7 +8,8 @@ pub enum JourneyCommand {
         id: Uuid,
     },
     Capture {
-        data: (String, Value),
+        step: String,
+        data: Value,
     },
     CapturePerson {
         name: String,

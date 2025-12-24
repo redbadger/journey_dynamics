@@ -131,15 +131,9 @@
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
@@ -147,14 +141,12 @@
           {
             "_id": "logged-in-user",
             "user-status": "!= null",
-            "next-steps": "['search_criteria', 'saved_searches']",
-            "primary-next-step": "'search_criteria'"
+            "suggested-actions": "['search_criteria', 'saved_searches']"
           },
           {
             "_id": "guest-user",
             "user-status": "== null",
-            "next-steps": "['search_criteria', 'account_creation']",
-            "primary-next-step": "'search_criteria'"
+            "suggested-actions": "['search_criteria', 'account_creation']"
           }
         ]
       }
@@ -169,13 +161,13 @@
         "inputs": [
           {
             "id": "trip-type",
-            "field": "capturedData.tripType",
+            "field": "capturedData.search.tripType",
             "name": "Trip Type",
             "type": "expression"
           },
           {
             "id": "passenger-count",
-            "field": "capturedData.passengers.total",
+            "field": "capturedData.search.passengers.total",
             "name": "Passenger Count",
             "type": "expression"
           },
@@ -188,15 +180,9 @@
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
@@ -206,32 +192,28 @@
             "trip-type": "'multi-city'",
             "passenger-count": "",
             "required-fields": "",
-            "next-steps": "['multi_city_details']",
-            "primary-next-step": "'multi_city_details'"
+            "suggested-actions": "['multi_city_details']"
           },
           {
             "_id": "group-booking",
             "trip-type": "",
             "passenger-count": "> 9",
             "required-fields": "",
-            "next-steps": "['group_booking']",
-            "primary-next-step": "'group_booking'"
+            "suggested-actions": "['group_booking']"
           },
           {
             "_id": "search-ready",
             "trip-type": "!= 'multi-city'",
             "passenger-count": "<= 9",
-            "required-fields": "capturedData.origin != null and capturedData.destination != null and capturedData.departureDate != null and capturedData.passengers != null",
-            "next-steps": "['flight_search_results']",
-            "primary-next-step": "'flight_search_results'"
+            "required-fields": "capturedData.search.origin != null and capturedData.search.destination != null and capturedData.search.departureDate != null and capturedData.search.passengers != null",
+            "suggested-actions": "['flight_search_results']"
           },
           {
             "_id": "incomplete-search",
             "trip-type": "",
             "passenger-count": "",
             "required-fields": "",
-            "next-steps": "['search_criteria']",
-            "primary-next-step": "'search_criteria'"
+            "suggested-actions": "['search_criteria']"
           }
         ]
       }
@@ -246,22 +228,16 @@
         "inputs": [
           {
             "id": "results-count",
-            "field": "capturedData.searchResults",
+            "field": "capturedData.search_results",
             "name": "Results Available",
             "type": "expression"
           }
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
@@ -269,14 +245,12 @@
           {
             "_id": "flights-found",
             "results-count": "$ != null and len($) > 0",
-            "next-steps": "['outbound_flight_selection', 'search_criteria']",
-            "primary-next-step": "'outbound_flight_selection'"
+            "suggested-actions": "['outbound_flight_selection', 'search_criteria']"
           },
           {
             "_id": "no-flights",
             "results-count": "$ == null or len($) == 0",
-            "next-steps": "['alternative_search_suggestions', 'search_criteria']",
-            "primary-next-step": "'alternative_search_suggestions'"
+            "suggested-actions": "['alternative_search_suggestions', 'search_criteria']"
           }
         ]
       }
@@ -291,52 +265,43 @@
         "inputs": [
           {
             "id": "trip-type",
-            "field": "capturedData.tripType",
+            "field": "capturedData.search.tripType",
             "name": "Trip Type",
             "type": "expression"
           },
           {
             "id": "flight-selected",
-            "field": "capturedData.selectedOutboundFlight",
+            "field": "capturedData.booking.selectedOutboundFlight",
             "name": "Flight Selected",
             "type": "expression"
           }
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
         "rules": [
           {
-            "_id": "round-trip-selected",
+            "_id": "round-trip-outbound-selected",
             "trip-type": "'round-trip'",
-            "flight-selected": "$ != null",
-            "next-steps": "['return_flight_selection', 'flight_search_results']",
-            "primary-next-step": "'return_flight_selection'"
+            "flight-selected": "!= null",
+            "suggested-actions": "['return_flight_selection', 'flight_search_results']"
           },
           {
-            "_id": "one-way-selected",
+            "_id": "one-way-outbound-selected",
             "trip-type": "'one-way'",
-            "flight-selected": "$ != null",
-            "next-steps": "['passenger_details', 'flight_search_results']",
-            "primary-next-step": "'passenger_details'"
+            "flight-selected": "!= null",
+            "suggested-actions": "['passenger_details', 'flight_search_results']"
           },
           {
             "_id": "no-selection",
             "trip-type": "",
-            "flight-selected": "$ == null",
-            "next-steps": "['outbound_flight_selection', 'flight_search_results']",
-            "primary-next-step": "'outbound_flight_selection'"
+            "flight-selected": "== null",
+            "suggested-actions": "['outbound_flight_selection']"
           }
         ]
       }
@@ -351,37 +316,29 @@
         "inputs": [
           {
             "id": "return-selected",
-            "field": "capturedData.selectedReturnFlight",
+            "field": "capturedData.booking.selectedReturnFlight",
             "name": "Return Flight Selected",
             "type": "expression"
           }
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
         "rules": [
           {
             "_id": "return-selected",
-            "return-selected": "$ != null",
-            "next-steps": "['passenger_details', 'outbound_flight_selection']",
-            "primary-next-step": "'passenger_details'"
+            "return-selected": "!= null",
+            "suggested-actions": "['passenger_details', 'outbound_flight_selection']"
           },
           {
             "_id": "no-return-selection",
-            "return-selected": "$ == null",
-            "next-steps": "['return_flight_selection', 'outbound_flight_selection']",
-            "primary-next-step": "'return_flight_selection'"
+            "return-selected": "== null",
+            "suggested-actions": "['return_flight_selection']"
           }
         ]
       }
@@ -409,39 +366,30 @@
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
         "rules": [
           {
             "_id": "has-unaccompanied-minors",
-            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
-            "has-minors": "some(capturedData.passengers, (date('now') - date($.dateOfBirth)) / 31536000 < 18 and $.travelingAlone == true)",
-            "next-steps": "['unaccompanied_minor_services']",
-            "primary-next-step": "'unaccompanied_minor_services'"
+            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
+            "has-minors": "some(capturedData.booking.passengerDetails, (date('now') - date(#.dateOfBirth)) / 31536000 < 18 and #.travelingAlone == true)",
+            "suggested-actions": "['unaccompanied_minor_services']"
           },
           {
             "_id": "passengers-complete",
-            "passengers-complete": "capturedData.passengers != null and all(capturedData.passengers, $.firstName != null and $.lastName != null and $.dateOfBirth != null)",
+            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
             "has-minors": "",
-            "next-steps": "['seat_selection', 'passenger_details']",
-            "primary-next-step": "'seat_selection'"
+            "suggested-actions": "['seat_selection', 'passenger_details']"
           },
           {
             "_id": "passengers-incomplete",
             "passengers-complete": "",
             "has-minors": "",
-            "next-steps": "['passenger_details']",
-            "primary-next-step": "'passenger_details'"
+            "suggested-actions": "['passenger_details']"
           }
         ]
       }
@@ -454,14 +402,9 @@
       "content": {
         "expressions": [
           {
-            "id": "seat-next-steps",
-            "key": "availableNextSteps",
+            "id": "seat-suggested-actions",
+            "key": "suggestedActions",
             "value": "['ancillary_services', 'passenger_details']"
-          },
-          {
-            "id": "seat-primary-step",
-            "key": "primaryNextStep",
-            "value": "'ancillary_services'"
           }
         ]
       }
@@ -476,7 +419,7 @@
         "inputs": [
           {
             "id": "insurance-declined",
-            "field": "capturedData.insurance",
+            "field": "capturedData.booking.insurance",
             "name": "Insurance Declined",
             "type": "expression"
           },
@@ -489,15 +432,9 @@
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
@@ -505,16 +442,14 @@
           {
             "_id": "insurance-confirmation-needed",
             "insurance-declined": "== false or $ == null",
-            "is-international": "capturedData.origin != capturedData.destination",
-            "next-steps": "['insurance_confirmation']",
-            "primary-next-step": "'insurance_confirmation'"
+            "is-international": "capturedData.search.origin != capturedData.search.destination",
+            "suggested-actions": "['insurance_confirmation']"
           },
           {
             "_id": "proceed-to-summary",
             "insurance-declined": "",
             "is-international": "",
-            "next-steps": "['booking_summary', 'seat_selection']",
-            "primary-next-step": "'booking_summary'"
+            "suggested-actions": "['booking_summary', 'seat_selection']"
           }
         ]
       }
@@ -529,7 +464,7 @@
         "inputs": [
           {
             "id": "terms-accepted",
-            "field": "capturedData.termsAccepted",
+            "field": "capturedData.booking.termsAccepted",
             "name": "Terms Accepted",
             "type": "expression"
           },
@@ -542,15 +477,9 @@
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
@@ -559,22 +488,19 @@
             "_id": "guest-user-ready",
             "terms-accepted": "== true",
             "user-logged-in": "== null",
-            "next-steps": "['account_creation', 'payment']",
-            "primary-next-step": "'payment'"
+            "suggested-actions": "['payment', 'account_creation']"
           },
           {
             "_id": "logged-in-ready",
             "terms-accepted": "== true",
             "user-logged-in": "!= null",
-            "next-steps": "['payment']",
-            "primary-next-step": "'payment'"
+            "suggested-actions": "['payment']"
           },
           {
             "_id": "terms-not-accepted",
             "terms-accepted": "!= true",
             "user-logged-in": "",
-            "next-steps": "['booking_summary']",
-            "primary-next-step": "'booking_summary'"
+            "suggested-actions": "['booking_summary']"
           }
         ]
       }
@@ -589,43 +515,34 @@
         "inputs": [
           {
             "id": "payment-status",
-            "field": "capturedData.paymentStatus",
+            "field": "capturedData.booking.paymentStatus",
             "name": "Payment Status",
             "type": "expression"
           }
         ],
         "outputs": [
           {
-            "id": "next-steps",
-            "field": "availableNextSteps",
-            "name": "Next Steps",
-            "type": "expression"
-          },
-          {
-            "id": "primary-next-step",
-            "field": "primaryNextStep",
-            "name": "Primary Next Step",
+            "id": "suggested-actions",
+            "field": "suggestedActions",
+            "name": "Suggested Actions",
             "type": "expression"
           }
         ],
         "rules": [
           {
-            "_id": "payment-success",
-            "payment-status": "'success'",
-            "next-steps": "['booking_confirmation']",
-            "primary-next-step": "'booking_confirmation'"
+            "_id": "payment-successful",
+            "payment-status": "'completed'",
+            "suggested-actions": "['booking_confirmation']"
           },
           {
             "_id": "payment-failed",
             "payment-status": "'failed'",
-            "next-steps": "['payment_retry', 'alternative_payment_methods']",
-            "primary-next-step": "'payment_retry'"
+            "suggested-actions": "['payment_retry', 'alternative_payment_methods']"
           },
           {
             "_id": "payment-pending",
-            "payment-status": "",
-            "next-steps": "['payment', 'booking_summary']",
-            "primary-next-step": "'payment'"
+            "payment-status": "'pending'",
+            "suggested-actions": "['payment', 'booking_summary']"
           }
         ]
       }
@@ -638,14 +555,9 @@
       "content": {
         "expressions": [
           {
-            "id": "confirmation-next-steps",
-            "key": "availableNextSteps",
-            "value": "['post_booking_services', 'journey_end']"
-          },
-          {
-            "id": "confirmation-primary-step",
-            "key": "primaryNextStep",
-            "value": "'journey_end'"
+            "id": "confirmation-suggested-actions",
+            "key": "suggestedActions",
+            "value": "['journey_end', 'post_booking_services']"
           },
           {
             "id": "booking-reference",

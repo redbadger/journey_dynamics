@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::domain::events::JourneyEvent;
 use crate::domain::journey::Journey;
-use crate::queries::{DataCaptureEntry, JourneyState, JourneyView, WorkflowDecisionView};
+use crate::queries::{JourneyState, JourneyView, WorkflowDecisionView};
 
 /// Person data captured during a journey
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
@@ -59,32 +59,12 @@ impl StructuredJourneyViewRepository {
             _ => JourneyState::InProgress,
         };
         let current_step: Option<String> = row.get("current_step");
-
-        // Load data capture entries
-        let data_capture_rows = sqlx::query(
-            r"
-            SELECT key, value, sequence
-            FROM journey_data_capture
-            WHERE journey_id = $1
-            ORDER BY sequence ASC
-            ",
-        )
-        .bind(journey_id)
-        .fetch_all(&self.pool)
-        .await?;
-
-        let data_capture: Vec<DataCaptureEntry> = data_capture_rows
-            .iter()
-            .map(|row| DataCaptureEntry {
-                key: row.get("key"),
-                value: row.get("value"),
-            })
-            .collect();
+        let accumulated_data: serde_json::Value = row.get("accumulated_data");
 
         // Load latest workflow decision
         let workflow_decision_row = sqlx::query(
             r"
-            SELECT available_actions, primary_next_step
+            SELECT suggested_actions
             FROM journey_workflow_decision
             WHERE journey_id = $1 AND is_latest = TRUE
             ORDER BY created_at DESC
@@ -96,18 +76,14 @@ impl StructuredJourneyViewRepository {
         .await?;
 
         let latest_workflow_decision = workflow_decision_row.map(|row| {
-            let available_actions: Vec<String> = row.get("available_actions");
-            let primary_next_step: Option<String> = row.get("primary_next_step");
-            WorkflowDecisionView {
-                available_actions,
-                primary_next_step,
-            }
+            let suggested_actions: Vec<String> = row.get("suggested_actions");
+            WorkflowDecisionView { suggested_actions }
         });
 
         Ok(Some(JourneyView {
             id,
             state,
-            data_capture,
+            accumulated_data,
             current_step,
             latest_workflow_decision,
         }))
@@ -240,53 +216,25 @@ impl StructuredJourneyViewRepository {
                 .await?;
             }
 
-            JourneyEvent::Modified { form_data } => {
-                if let Some((key, value)) = form_data {
-                    // Get the next sequence number for this journey
-                    let sequence: i32 = sqlx::query_scalar(
-                        r"
-                        SELECT COALESCE(MAX(sequence), 0) + 1
-                        FROM journey_data_capture
-                        WHERE journey_id = $1
-                        ",
-                    )
-                    .bind(journey_id)
-                    .fetch_one(&self.pool)
-                    .await?;
-
-                    // Insert data capture entry
-                    sqlx::query(
-                        r"
-                        INSERT INTO journey_data_capture (journey_id, key, value, sequence)
-                        VALUES ($1, $2, $3, $4)
-                        ",
-                    )
-                    .bind(journey_id)
-                    .bind(key)
-                    .bind(value)
-                    .bind(sequence)
-                    .execute(&self.pool)
-                    .await?;
-                }
-
-                // Update version and timestamp
+            JourneyEvent::Modified { step: _, data } => {
+                // Update accumulated_data by merging new data
                 sqlx::query(
                     r"
                     UPDATE journey_view
-                    SET version = $1, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $2
+                    SET accumulated_data = accumulated_data || $2,
+                        version = $3,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $1
                     ",
                 )
-                .bind(event.sequence as i64)
                 .bind(journey_id)
+                .bind(data)
+                .bind(event.sequence as i64)
                 .execute(&self.pool)
                 .await?;
             }
 
-            JourneyEvent::WorkflowEvaluated {
-                available_actions,
-                primary_next_step,
-            } => {
+            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
                 // Mark all previous decisions as not latest
                 sqlx::query(
                     r"
@@ -302,13 +250,12 @@ impl StructuredJourneyViewRepository {
                 // Insert new workflow decision
                 sqlx::query(
                     r"
-                    INSERT INTO journey_workflow_decision (journey_id, available_actions, primary_next_step, is_latest)
-                    VALUES ($1, $2, $3, TRUE)
+                    INSERT INTO journey_workflow_decision (journey_id, suggested_actions, is_latest)
+                    VALUES ($1, $2, TRUE)
                     ",
                 )
                 .bind(journey_id)
-                .bind(available_actions)
-                .bind(primary_next_step)
+                .bind(suggested_actions)
                 .execute(&self.pool)
                 .await?;
 
@@ -477,7 +424,8 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::Modified {
-                    form_data: Some(("email".to_string(), json!("test@example.com"))),
+                    step: "email".to_string(),
+                    data: json!("test@example.com"),
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -485,8 +433,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 3,
                 payload: JourneyEvent::WorkflowEvaluated {
-                    available_actions: vec!["continue".to_string()],
-                    primary_next_step: Some("confirmation".to_string()),
+                    suggested_actions: vec!["confirmation".to_string(), "continue".to_string()],
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -513,8 +460,10 @@ mod tests {
 
         assert_eq!(view.id, journey_id);
         assert_eq!(view.state, JourneyState::Complete);
-        assert_eq!(view.data_capture.len(), 1);
-        assert_eq!(view.data_capture[0].key, "email");
+        assert_eq!(
+            view.accumulated_data.get("email"),
+            Some(&serde_json::json!("test@example.com"))
+        );
         assert_eq!(view.current_step, Some("confirmation".to_string()));
         assert!(view.latest_workflow_decision.is_some());
 
