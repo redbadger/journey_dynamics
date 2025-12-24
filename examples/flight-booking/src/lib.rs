@@ -1,6 +1,16 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+// Main schema with optional top-level groups
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct FlightBookingSchema {
+    pub search: Option<SearchCriteria>,
+    pub search_results: Option<SearchResults>,
+    pub booking: Option<BookingData>,
+}
+
+// Search criteria group - when present, core fields are required
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchCriteria {
@@ -12,64 +22,19 @@ pub struct SearchCriteria {
     pub passengers: PassengerCounts,
 }
 
+// Booking data group - contains all booking-related information
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct FlightBooking {
-    pub flights: Option<FlightSelections>,
-    pub passengers: Option<Vec<PassengerDetail>>,
-    pub pricing: Option<Pricing>,
-    pub insurance: Option<Insurance>,
-    pub payment: Option<Payment>,
-    pub booking_reference: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct FlightSelections {
-    pub selected_outbound_flight: FlightSelection,
-    pub selected_return_flight: Option<FlightSelection>, // required for round-trip
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct FlightBookingJourney {
-    pub search_criteria: Option<SearchCriteria>,
-    pub booking: Option<FlightBooking>,
-    pub search_results: Option<SearchResults>,
-    pub is_international: Option<bool>,
-    pub requires_visa: Option<bool>,
-}
-
-// Combined schema for incremental validation - groups are optional but fields within groups are required
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct FlightBookingSchema {
-    // Search criteria group - when present, core fields are required
-    pub trip_type: Option<TripType>,
-    pub origin: Option<AirportCode>,
-    pub destination: Option<AirportCode>,
-    pub departure_date: Option<String>,
-    pub return_date: Option<String>,
-
-    // Flight selection group - when present, outbound is required
+pub struct BookingData {
     pub selected_outbound_flight: Option<FlightSelection>,
     pub selected_return_flight: Option<FlightSelection>,
-
-    // Passenger counts for search criteria
-    pub passengers: Option<PassengerCounts>,
-    // Passenger details for booking
     pub passenger_details: Option<Vec<PassengerDetail>>,
-
-    // Payment group - when present, status is required
-    pub payment: Option<Payment>,
-
-    // Other optional groups
     pub pricing: Option<Pricing>,
     pub insurance: Option<Insurance>,
+    pub payment: Option<Payment>,
     pub booking_reference: Option<String>,
-
-    // Journey metadata
-    pub search_results: Option<SearchResults>,
+    pub terms_accepted: Option<bool>,
+    pub payment_status: Option<PaymentStatus>,
     pub is_international: Option<bool>,
     pub requires_visa: Option<bool>,
 }
@@ -96,7 +61,9 @@ pub struct PassengerCounts {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PassengerDetail {
+    #[schemars(length(min = 1))]
     pub first_name: String,
+    #[schemars(length(min = 1))]
     pub last_name: String,
     pub date_of_birth: String, // ISO 8601 date format
     pub passport_number: Option<String>,

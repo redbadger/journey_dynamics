@@ -161,13 +161,13 @@
         "inputs": [
           {
             "id": "trip-type",
-            "field": "capturedData.tripType",
+            "field": "capturedData.search.tripType",
             "name": "Trip Type",
             "type": "expression"
           },
           {
             "id": "passenger-count",
-            "field": "capturedData.passengers.total",
+            "field": "capturedData.search.passengers.total",
             "name": "Passenger Count",
             "type": "expression"
           },
@@ -205,7 +205,7 @@
             "_id": "search-ready",
             "trip-type": "!= 'multi-city'",
             "passenger-count": "<= 9",
-            "required-fields": "capturedData.origin != null and capturedData.destination != null and capturedData.departureDate != null and capturedData.passengers != null",
+            "required-fields": "capturedData.search.origin != null and capturedData.search.destination != null and capturedData.search.departureDate != null and capturedData.search.passengers != null",
             "suggested-actions": "['flight_search_results']"
           },
           {
@@ -228,7 +228,7 @@
         "inputs": [
           {
             "id": "results-count",
-            "field": "capturedData.searchResults",
+            "field": "capturedData.search_results",
             "name": "Results Available",
             "type": "expression"
           }
@@ -265,13 +265,13 @@
         "inputs": [
           {
             "id": "trip-type",
-            "field": "capturedData.tripType",
+            "field": "capturedData.search.tripType",
             "name": "Trip Type",
             "type": "expression"
           },
           {
             "id": "flight-selected",
-            "field": "capturedData.selectedOutboundFlight",
+            "field": "capturedData.booking.selectedOutboundFlight",
             "name": "Flight Selected",
             "type": "expression"
           }
@@ -316,7 +316,7 @@
         "inputs": [
           {
             "id": "return-selected",
-            "field": "capturedData.selectedReturnFlight",
+            "field": "capturedData.booking.selectedReturnFlight",
             "name": "Return Flight Selected",
             "type": "expression"
           }
@@ -375,13 +375,13 @@
         "rules": [
           {
             "_id": "has-unaccompanied-minors",
-            "passengers-complete": "capturedData.passenger_details != null and all(capturedData.passenger_details, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
-            "has-minors": "some(capturedData.passenger_details, (date('now') - date(#.dateOfBirth)) / 31536000 < 18 and #.travelingAlone == true)",
+            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
+            "has-minors": "some(capturedData.booking.passengerDetails, (date('now') - date(#.dateOfBirth)) / 31536000 < 18 and #.travelingAlone == true)",
             "suggested-actions": "['unaccompanied_minor_services']"
           },
           {
             "_id": "passengers-complete",
-            "passengers-complete": "capturedData.passenger_details != null and all(capturedData.passenger_details, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
+            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
             "has-minors": "",
             "suggested-actions": "['seat_selection', 'passenger_details']"
           },
@@ -419,7 +419,7 @@
         "inputs": [
           {
             "id": "insurance-declined",
-            "field": "capturedData.insurance",
+            "field": "capturedData.booking.insurance",
             "name": "Insurance Declined",
             "type": "expression"
           },
@@ -442,7 +442,7 @@
           {
             "_id": "insurance-confirmation-needed",
             "insurance-declined": "== false or $ == null",
-            "is-international": "capturedData.origin != capturedData.destination",
+            "is-international": "capturedData.search.origin != capturedData.search.destination",
             "suggested-actions": "['insurance_confirmation']"
           },
           {
@@ -464,7 +464,7 @@
         "inputs": [
           {
             "id": "terms-accepted",
-            "field": "capturedData.termsAccepted",
+            "field": "capturedData.booking.termsAccepted",
             "name": "Terms Accepted",
             "type": "expression"
           },
@@ -515,7 +515,7 @@
         "inputs": [
           {
             "id": "payment-status",
-            "field": "capturedData.paymentStatus",
+            "field": "capturedData.booking.paymentStatus",
             "name": "Payment Status",
             "type": "expression"
           }
@@ -531,7 +531,7 @@
         "rules": [
           {
             "_id": "payment-successful",
-            "payment-status": "'success'",
+            "payment-status": "'completed'",
             "suggested-actions": "['booking_confirmation']"
           },
           {

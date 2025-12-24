@@ -3,103 +3,24 @@
   "title": "FlightBookingSchema",
   "type": "object",
   "properties": {
-    "bookingReference": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "departureDate": {
-      "type": [
-        "string",
-        "null"
-      ]
-    },
-    "destination": {
+    "booking": {
       "anyOf": [
         {
-          "$ref": "#/$defs/AirportCode"
+          "$ref": "#/$defs/BookingData"
         },
         {
           "type": "null"
         }
       ]
     },
-    "insurance": {
+    "search": {
       "anyOf": [
         {
-          "$ref": "#/$defs/Insurance"
+          "$ref": "#/$defs/SearchCriteria"
         },
         {
           "type": "null"
         }
-      ]
-    },
-    "isInternational": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "origin": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/AirportCode"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "passengerDetails": {
-      "type": [
-        "array",
-        "null"
-      ],
-      "items": {
-        "$ref": "#/$defs/PassengerDetail"
-      }
-    },
-    "passengers": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/PassengerCounts"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "payment": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Payment"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "pricing": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/Pricing"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "requiresVisa": {
-      "type": [
-        "boolean",
-        "null"
-      ]
-    },
-    "returnDate": {
-      "type": [
-        "string",
-        "null"
       ]
     },
     "searchResults": {
@@ -111,41 +32,109 @@
           "type": "null"
         }
       ]
-    },
-    "selectedOutboundFlight": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/FlightSelection"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "selectedReturnFlight": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/FlightSelection"
-        },
-        {
-          "type": "null"
-        }
-      ]
-    },
-    "tripType": {
-      "anyOf": [
-        {
-          "$ref": "#/$defs/TripType"
-        },
-        {
-          "type": "null"
-        }
-      ]
     }
   },
   "$defs": {
     "AirportCode": {
       "type": "string"
+    },
+    "BookingData": {
+      "type": "object",
+      "properties": {
+        "bookingReference": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "insurance": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Insurance"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "isInternational": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "passengerDetails": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/PassengerDetail"
+          }
+        },
+        "payment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Payment"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "paymentStatus": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PaymentStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Pricing"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "requiresVisa": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "selectedOutboundFlight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlightSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "selectedReturnFlight": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FlightSelection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "termsAccepted": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        }
+      }
     },
     "CabinClass": {
       "type": "string",
@@ -370,10 +359,12 @@
           "type": "string"
         },
         "firstName": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "lastName": {
-          "type": "string"
+          "type": "string",
+          "minLength": 1
         },
         "nationality": {
           "type": [
@@ -476,6 +467,39 @@
         "taxes",
         "totalPrice",
         "currency"
+      ]
+    },
+    "SearchCriteria": {
+      "type": "object",
+      "properties": {
+        "departureDate": {
+          "type": "string"
+        },
+        "destination": {
+          "$ref": "#/$defs/AirportCode"
+        },
+        "origin": {
+          "$ref": "#/$defs/AirportCode"
+        },
+        "passengers": {
+          "$ref": "#/$defs/PassengerCounts"
+        },
+        "returnDate": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tripType": {
+          "$ref": "#/$defs/TripType"
+        }
+      },
+      "required": [
+        "tripType",
+        "origin",
+        "destination",
+        "departureDate",
+        "passengers"
       ]
     },
     "SearchResults": {
