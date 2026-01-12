@@ -12,13 +12,13 @@ cargo sqlx migrate run
 ## Run
 
 ```bash
-cargo run --bin journey_dynamics
+cargo run --p journey_dynamics
 ```
 
 To regenerate the flight-booking JSON schema:
 
 ```bash
-cargo run --bin generate_schema
+cargo run --p generate_schema
 ```
 
 1. Create a new journey

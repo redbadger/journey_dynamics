@@ -9,6 +9,8 @@ use crate::domain::journey::{Journey, JourneyServices};
 use crate::services::decision_engine::GoRulesDecisionEngine;
 use crate::view_repository::StructuredJourneyViewRepository;
 
+/// # Panics
+/// Panics if the JSON schema file cannot be parsed or compiled.
 #[must_use]
 pub fn cqrs_framework(
     pool: Pool<Postgres>,
@@ -37,8 +39,6 @@ pub fn cqrs_framework(
         ))
         .unwrap(),
     );
-
-    println!("{:?}", schema_validator);
 
     let services = JourneyServices::new(decision_engine, schema_validator);
     (
