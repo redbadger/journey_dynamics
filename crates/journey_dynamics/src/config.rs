@@ -31,11 +31,15 @@ pub fn cqrs_framework(
     let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
         "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
     )));
+    let schema_validator = Arc::new(crate::services::schema_validator::JsonSchemaValidator::from_json_str(include_str!(
+        "../../../examples/flight-booking/schemas/flight-booking-schema.json")).unwrap());
+
+    println!("{:?}", schema_validator);
+
     let services = JourneyServices::new(
         decision_engine,
-        Arc::new(crate::services::schema_validator::NoOpValidator),
+        schema_validator
     );
-
     (
         Arc::new(postgres_es::postgres_cqrs(pool, queries, services)),
         journey_view_repo,

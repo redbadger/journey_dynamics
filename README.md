@@ -4,7 +4,7 @@
 ## Setup
 
 ```bash
-cargo install cargo-sqlx
+cargo install sqlx-cli
 cargo sqlx database create
 cargo sqlx migrate run
 ```

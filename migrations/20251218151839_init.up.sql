@@ -53,13 +53,4 @@ CREATE INDEX idx_journey_workflow_decision_latest ON journey_workflow_decision(j
 CREATE INDEX idx_journey_person_journey_id ON journey_person(journey_id);
 CREATE INDEX idx_journey_person_email ON journey_person(email);
 
--- Legacy table for compatibility (can be removed if not needed)
-CREATE TABLE journey_query
-(
-    view_id             TEXT                        NOT NULL,
-    version             BIGINT CHECK (version >= 0) NOT NULL,
-    payload             JSON                        NOT NULL,
-    PRIMARY KEY (view_id)
-);
-
 GRANT ALL PRIVILEGES ON DATABASE journey_dynamics TO postgres;

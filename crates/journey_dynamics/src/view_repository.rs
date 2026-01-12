@@ -39,7 +39,7 @@ impl StructuredJourneyViewRepository {
         // Load the main journey record
         let journey_row = sqlx::query(
             r"
-            SELECT id, state, current_step, version, created_at, updated_at
+            SELECT id, state, accumulated_data, current_step, version, created_at, updated_at
             FROM journey_view
             WHERE id = $1
             ",
