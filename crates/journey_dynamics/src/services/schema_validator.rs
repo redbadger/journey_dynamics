@@ -50,7 +50,6 @@ impl JsonSchemaValidator {
         let validator = jsonschema::validator_for(schema)
             .map_err(|e| SchemaValidationError::InvalidSchema(e.to_string()))?;
 
-        println!("{:?}", validator);
         Ok(Self { validator })
     }
 
@@ -67,7 +66,6 @@ impl JsonSchemaValidator {
 
 impl SchemaValidator for JsonSchemaValidator {
     fn validate(&self, data: &Value) -> Result<(), SchemaValidationError> {
-        println!("{:?}", self);
         // Use iter_errors to get an iterator over validation errors
         let errors: Vec<String> = self
             .validator
