@@ -266,9 +266,11 @@ The `JourneyView` returned to clients contains everything the UI needs to render
 
 [GoRules ZEN](https://gorules.io/) is an embeddable business rules engine that evaluates JSON Decision Model (JDM) files — declarative graphs of decision tables, expression nodes, and switch nodes. In Journey Dynamics, the engine is invoked on every `Capture` command to determine what the user should do next.
 
+The following diagram illustrates the structure of a JDM model using the **flight-booking example** that ships with the repository. This example is not part of the core engine — it is an illustrative journey used to demonstrate the architecture. A real deployment would supply its own JDM models and schemas for the products it supports.
+
 ```mermaid
 graph TD
-    subgraph JDM["JDM Model (flight-booking-orchestrator.jdm.json)"]
+    subgraph JDM["Example JDM Model (flight-booking-orchestrator.jdm.json)"]
         IN([Input Node]) --> SW{Switch on<br/>currentStep}
         SW -->|"search_criteria"| SC["Search Criteria<br/>Decision Table"]
         SW -->|"outbound_selection"| OS["Outbound Selection<br/>Decision Table"]
@@ -299,13 +301,13 @@ graph TD
 
 2. **Separation of orchestration from domain logic.** The aggregate enforces invariants (journey must be started, must not be completed, data must be valid). The decision engine handles orchestration (what step to show next). This separation means domain experts can modify journey flows without understanding Rust, and engineers can modify validation logic without understanding the business routing.
 
-3. **Multiple JDM models for different concerns.** The flight-booking example ships four models:
+3. **Multiple JDM models for different concerns.** To illustrate this, the repository includes a **flight-booking example** (under `examples/flight-booking/`) that is entirely separate from the core engine. This example ships four models that demonstrate how a realistic product journey can be decomposed:
    - **`flight-booking-orchestrator.jdm.json`** — Step routing and flow control.
    - **`flight-validation-rules.jdm.json`** — Data validation rules per step.
    - **`flight-pricing-calculator.jdm.json`** — Dynamic pricing logic.
    - **`flight-error-handling.jdm.json`** — Error classification and recovery.
 
-   Each model is independently deployable and testable. New product journeys (e.g., insurance, hotel booking) require new JDM models, not new Rust code.
+   Each model is independently deployable and testable. Onboarding a new product journey (e.g., insurance, hotel booking) means authoring new JDM models and a JSON schema — not writing new Rust code in the core service.
 
 4. **The engine is embedded, not remote.** The ZEN engine runs in-process (via `zen-engine` crate), so decision evaluation adds microseconds, not milliseconds. There is no network hop, no separate service to deploy, no availability dependency. The JDM files are compiled into the binary at build time via `include_str!`, ensuring deterministic behaviour.
 
@@ -440,6 +442,8 @@ sequenceDiagram
 
 This is the core of the system's value. The front-end does not hard-code a step sequence. Instead, after every submission, it queries the journey and reads `latest_workflow_decision.suggested_actions` to determine what to render next.
 
+To make this concrete, here is how the flight-booking example (not part of the core engine) uses this mechanism to branch based on user input:
+
 ```mermaid
 flowchart TD
     A[User submits search criteria] --> B{Decision Engine evaluates}
@@ -452,6 +456,8 @@ flowchart TD
     E --> H[UI renders group booking form]
 ```
 
+The step names and branching logic shown above are specific to the flight-booking example. The core engine is product-agnostic — it simply passes accumulated data to whatever JDM model is configured and relays the resulting `suggested_actions` to the client.
+
 This means:
 
 - **Adding a new product** (e.g., hotel booking) requires a new JDM model and JSON schema — no changes to the Journey Dynamics service code.
@@ -462,20 +468,20 @@ This means:
 
 ## Schema & Validation Strategy
 
-Data captured at each step is validated against a **JSON Schema** (Draft 2020-12) before the aggregate accepts it. The schema is generated from Rust types using `schemars`, ensuring compile-time alignment between the domain model and validation rules.
+Data captured at each step is validated against a **JSON Schema** (Draft 2020-12) before the aggregate accepts it. The core engine accepts any schema — the specific schema is a product concern, not an engine concern. To demonstrate the approach, the flight-booking example generates its schema from Rust types using `schemars`, ensuring compile-time alignment between the domain model and validation rules.
 
 ```mermaid
 graph LR
-    RT["Rust Types<br/>(FlightBookingSchema)"] -->|schemars| JS["JSON Schema<br/>(flight-booking-schema.json)"]
+    RT["Rust Types<br/>(e.g. FlightBookingSchema)"] -->|schemars| JS["JSON Schema<br/>(e.g. flight-booking-schema.json)"]
     JS -->|jsonschema crate| SV["Runtime Validator"]
     SV -->|validate on Capture| AGG["Journey Aggregate"]
 ```
 
 This provides:
 
-- **Type-driven validation:** The schema is derived from the same types used to deserialise data, so they cannot drift apart.
+- **Type-driven validation:** In the example, the schema is derived from the same Rust types used to deserialise data, so they cannot drift apart. Other products may author schemas by hand or generate them from other sources — the core engine is indifferent.
 - **Product-specific schemas:** Each journey type (flight booking, insurance, etc.) has its own schema. The active schema is injected at service configuration time.
-- **Progressive validation:** Top-level groups in the schema (`search`, `searchResults`, `booking`) are optional, allowing the journey to accumulate data incrementally while still enforcing constraints within each group when present.
+- **Progressive validation:** In the flight-booking example, top-level groups (`search`, `searchResults`, `booking`) are optional, allowing the journey to accumulate data incrementally while still enforcing constraints within each group when present. Other product schemas can adopt the same pattern.
 
 ---
 
