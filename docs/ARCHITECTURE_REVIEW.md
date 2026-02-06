@@ -309,7 +309,7 @@ graph TD
 
    Each model is independently deployable and testable. Onboarding a new product journey (e.g., insurance, hotel booking) means authoring new JDM models and a JSON schema — not writing new Rust code in the core service.
 
-4. **The engine is embedded, not remote.** The ZEN engine runs in-process (via `zen-engine` crate), so decision evaluation adds microseconds, not milliseconds. There is no network hop, no separate service to deploy, no availability dependency. The JDM files are compiled into the binary at build time via `include_str!`, ensuring deterministic behaviour.
+4. **The engine is embedded, not remote.** The ZEN engine runs in-process (via `zen-engine` crate), so decision evaluation adds microseconds, not milliseconds. There is no network hop, no separate service to deploy, no availability dependency. JDM files are plain JSON and can be loaded at runtime from any source (filesystem, S3, a configuration service, etc.), so new journey definitions or rule changes can be deployed without recompiling the core service. The current flight-booking example happens to embed its JDM file at compile time via `include_str!` for simplicity, but this is not a constraint of the architecture.
 
 5. **Event sourcing provides the ideal input.** The decision engine receives the full `accumulated_data` and `current_step` — both of which are maintained by the aggregate's event-replay logic. This means the engine always evaluates against the complete, consistent state of the journey, not a partial or stale snapshot.
 
@@ -381,10 +381,10 @@ graph LR
 
 | Command | Preconditions | Events Produced |
 |---|---|---|
-| <nobr>`Start { id }`</nobr> | Journey does not already exist | `Started` |
-| <nobr>`Capture { step, data }`</nobr> | Journey is `InProgress`, data passes schema validation | `Modified`, `WorkflowEvaluated`, optionally `StepProgressed` |
-| <nobr>`CapturePerson { ... }`</nobr> | Journey is `InProgress` | `PersonCaptured` |
-| <nobr>`Complete`</nobr> | Journey is `InProgress` | `Completed` |
+| `Start&nbsp;{&nbsp;id&nbsp;}` | Journey does not already exist | `Started` |
+| `Capture&nbsp;{&nbsp;step,&nbsp;data&nbsp;}` | Journey is `InProgress`, data passes schema validation | `Modified`, `WorkflowEvaluated`, optionally `StepProgressed` |
+| `CapturePerson&nbsp;{&nbsp;...&nbsp;}` | Journey is `InProgress` | `PersonCaptured` |
+| `Complete` | Journey is `InProgress` | `Completed` |
 
 ### Events
 
@@ -508,7 +508,7 @@ graph TD
 |---|---|
 | **Application** | Single stateless binary; scales horizontally behind a load balancer. Aggregate state is rebuilt from PostgreSQL on each command (or from snapshots, if configured). |
 | **Database** | PostgreSQL 16. All tables (event store + read models) live in the same database. Migrations managed via `sqlx-cli`. |
-| **Decision Engine** | Embedded in-process. No external service dependency. JDM models currently compiled into the binary via `include_str!`. |
+| **Decision Engine** | Embedded in-process. No external service dependency. JDM models are plain JSON, loadable at runtime from filesystem, S3, or a configuration service — no recompilation required to change journey logic. |
 | **Infrastructure** | Docker Compose for local development. Production deployment is a standard container + managed PostgreSQL. |
 
 ---
