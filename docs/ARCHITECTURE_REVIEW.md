@@ -379,12 +379,25 @@ graph LR
     Complete["Complete"] --> Journey
 ```
 
-| Command | Preconditions | Events Produced |
-|---|---|---|
-| `Start&nbsp;{&nbsp;id&nbsp;}` | Journey does not already exist | `Started` |
-| `Capture&nbsp;{&nbsp;step,&nbsp;data&nbsp;}` | Journey is `InProgress`, data passes schema validation | `Modified`, `WorkflowEvaluated`, optionally `StepProgressed` |
-| `CapturePerson&nbsp;{&nbsp;...&nbsp;}` | Journey is `InProgress` | `PersonCaptured` |
-| `Complete` | Journey is `InProgress` | `Completed` |
+#### `Start { id }`
+
+- **Preconditions:** Journey does not already exist
+- **Events produced:** `Started`
+
+#### `Capture { step, data }`
+
+- **Preconditions:** Journey is `InProgress`, data passes schema validation
+- **Events produced:** `Modified`, `WorkflowEvaluated`, optionally `StepProgressed`
+
+#### `CapturePerson { ... }`
+
+- **Preconditions:** Journey is `InProgress`
+- **Events produced:** `PersonCaptured`
+
+#### `Complete`
+
+- **Preconditions:** Journey is `InProgress`
+- **Events produced:** `Completed`
 
 ### Events
 
