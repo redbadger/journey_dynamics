@@ -66,7 +66,7 @@ cqrs.execute(
 Send a POST request to capture person data:
 
 ```bash
-curl -X POST http://localhost:3030/journey/{journey_id} \
+curl -X POST http://localhost:3030/journeys/{journey_id} \
   -H "Content-Type: application/json" \
   -d '{
     "CapturePerson": {
@@ -219,7 +219,8 @@ cqrs.execute(
 cqrs.execute(
     &journey_id.to_string(),
     JourneyCommand::Capture {
-        data: ("preferences".to_string(), json!({"newsletter": true})),
+        step: "preferences".to_string(),
+        data: json!({"newsletter": true}),
     },
 ).await?;
 
@@ -254,7 +255,7 @@ cargo test test_person_update -- --ignored
 Run the example:
 
 ```bash
-cargo run --example capture_person
+cargo run -p journey_dynamics --example capture_person
 ```
 
 ## Adding More Domain Tables

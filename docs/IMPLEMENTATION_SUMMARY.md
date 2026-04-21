@@ -195,7 +195,7 @@ let journeys = repo.find_by_email("alice@example.com").await?;
 
 ### HTTP API:
 ```bash
-POST /journey/{id}
+POST /journeys/{id}
 {
   "CapturePerson": {
     "name": "Alice Johnson",
@@ -211,7 +211,7 @@ To add more domain tables (e.g., addresses, payments):
 
 1. Define command in `domain/commands.rs`
 2. Define event in `domain/events.rs`
-3. Create table in `db/init.sql`
+3. Create migration in `migrations/`
 4. Add handler in `domain/journey.rs`
 5. Add projection in `view_repository.rs`
 6. Add query methods
@@ -224,7 +224,7 @@ All tests passing:
 cargo test --lib
   21 passed; 0 failed; 5 ignored (integration tests)
   
-cargo run --example capture_person
+cargo run -p journey_dynamics --example capture_person
   ✓ Example runs successfully
 ```
 
@@ -235,7 +235,7 @@ cargo run --example capture_person
 - ✅ `src/domain/journey.rs` - Added handler and tests
 - ✅ `src/view_repository.rs` - Added projection and queries
 - ✅ `src/queries.rs` - Added event handler
-- ✅ `db/init.sql` - Added journey_person table
+- ✅ `migrations/20251218151839_init.up.sql` - Added journey_person table
 - ✅ `examples/capture_person.rs` - Created example
 - ✅ `docs/PERSON_CAPTURE.md` - Created documentation
 

@@ -36,7 +36,7 @@ let person = repo.load_person(&journey_id).await?;
 
 ```bash
 # Capture person
-curl -X POST http://localhost:3030/journey/{journey_id} \
+curl -X POST http://localhost:3030/journeys/{journey_id} \
   -H "Content-Type: application/json" \
   -d '{
     "CapturePerson": {
@@ -85,7 +85,7 @@ CREATE TABLE journey_person (
 ## Run Example
 
 ```bash
-cargo run --example capture_person
+cargo run -p journey_dynamics --example capture_person
 ```
 
 ## Run Tests
