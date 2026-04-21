@@ -1,6 +1,5 @@
 use crate::domain::journey::{Journey, JourneyState};
 use async_trait::async_trait;
-
 use serde_json::{Map, Value};
 use tokio::runtime::Handle;
 use zen_engine::model::DecisionContent;
