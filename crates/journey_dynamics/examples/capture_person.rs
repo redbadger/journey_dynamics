@@ -5,13 +5,14 @@
 //! - Capturing person information (name, email, phone) using the `CapturePerson` command
 //! - How person data is projected to the structured database table
 //!
-//! Run with: `cargo run --example capture_person`
+//! Run with: `cargo run -p journey_dynamics --example capture_person`
 
 use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
 use journey_dynamics::SimpleLoggingQuery;
 use journey_dynamics::domain::commands::JourneyCommand;
 use journey_dynamics::domain::journey::{Journey, JourneyServices};
 use journey_dynamics::services::decision_engine::SimpleDecisionEngine;
+use journey_dynamics::services::schema_validator::NoOpValidator;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -23,7 +24,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_store = MemStore::<Journey>::default();
     let query = SimpleLoggingQuery {};
     let decision_engine = Arc::new(SimpleDecisionEngine);
-    let services = JourneyServices::new(decision_engine);
+    let schema_validator = Arc::new(NoOpValidator);
+    let services = JourneyServices::new(decision_engine, schema_validator);
     let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
 
     // Create a new journey
