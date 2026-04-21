@@ -138,7 +138,7 @@ impl DecisionEngine for GoRulesDecisionEngine {
         // fall back to an empty list rather than propagating an error.
         let suggested_actions: Vec<String> = take
             .get("suggestedActions")
-            .and_then(|v| v.as_array())
+            .and_then(zen_engine::Variable::as_array)
             .map(|arr| {
                 arr.take()
                     .into_iter()
