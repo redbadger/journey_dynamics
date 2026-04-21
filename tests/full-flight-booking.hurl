@@ -22,17 +22,19 @@ Content-Type: application/json
     "Capture": {
         "step": "search_criteria",
         "data": {
-            "origin": "JFK",
-            "destination": "LAX",
-            "tripType": "round-trip",
-            "departureDate": "2024-03-15",
-            "returnDate": "2024-03-22",
-            "passengers": {
-                "adults": 2,
-                "children": 1,
-                "infants": 0
-            },
-            "cabinClass": "economy"
+            "search": {
+                "origin": "JFK",
+                "destination": "LAX",
+                "tripType": "round-trip",
+                "departureDate": "2024-03-15",
+                "returnDate": "2024-03-22",
+                "passengers": {
+                    "adults": 2,
+                    "children": 1,
+                    "infants": 0,
+                    "total": 3
+                }
+            }
         }
     }
 }
@@ -49,8 +51,8 @@ HTTP 200
 [Asserts]
 jsonpath "$.state" == "InProgress"
 jsonpath "$.current_step" == "search_criteria"
-jsonpath "$.accumulated_data.origin" == "JFK"
-jsonpath "$.accumulated_data.destination" == "LAX"
+jsonpath "$.accumulated_data.search.origin" == "JFK"
+jsonpath "$.accumulated_data.search.destination" == "LAX"
 
 
 # ===========================================
@@ -60,14 +62,17 @@ POST http://localhost:3030/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
-        "step": "outbound_selection",
+        "step": "outbound_flight_selection",
         "data": {
-            "selectedOutbound": {
-                "flightNumber": "AA1234",
-                "departureTime": "08:30",
-                "arrivalTime": "11:45",
-                "price": 299.99,
-                "airline": "American Airlines"
+            "booking": {
+                "selectedOutboundFlight": {
+                    "flightId": "AA1234",
+                    "flightNumber": "AA1234",
+                    "departure": "2024-03-15T08:30:00",
+                    "arrival": "2024-03-15T11:45:00",
+                    "price": 299.99,
+                    "airline": "American Airlines"
+                }
             }
         }
     }
@@ -83,14 +88,17 @@ POST http://localhost:3030/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
-        "step": "return_selection",
+        "step": "return_flight_selection",
         "data": {
-            "selectedReturn": {
-                "flightNumber": "AA5678",
-                "departureTime": "14:00",
-                "arrivalTime": "22:15",
-                "price": 279.99,
-                "airline": "American Airlines"
+            "booking": {
+                "selectedReturnFlight": {
+                    "flightId": "AA5678",
+                    "flightNumber": "AA5678",
+                    "departure": "2024-03-22T14:00:00",
+                    "arrival": "2024-03-22T22:15:00",
+                    "price": 279.99,
+                    "airline": "American Airlines"
+                }
             }
         }
     }
@@ -108,28 +116,30 @@ Content-Type: application/json
     "Capture": {
         "step": "passenger_details",
         "data": {
-            "passengers": [
-                {
-                    "type": "adult",
-                    "firstName": "Alice",
-                    "lastName": "Johnson",
-                    "dateOfBirth": "1985-06-15",
-                    "passportNumber": "AB123456"
-                },
-                {
-                    "type": "adult",
-                    "firstName": "Bob",
-                    "lastName": "Johnson",
-                    "dateOfBirth": "1983-09-22",
-                    "passportNumber": "CD789012"
-                },
-                {
-                    "type": "child",
-                    "firstName": "Charlie",
-                    "lastName": "Johnson",
-                    "dateOfBirth": "2016-03-10"
-                }
-            ]
+            "booking": {
+                "passengerDetails": [
+                    {
+                        "passengerType": "adult",
+                        "firstName": "Alice",
+                        "lastName": "Johnson",
+                        "dateOfBirth": "1985-06-15",
+                        "passportNumber": "AB123456"
+                    },
+                    {
+                        "passengerType": "adult",
+                        "firstName": "Bob",
+                        "lastName": "Johnson",
+                        "dateOfBirth": "1983-09-22",
+                        "passportNumber": "CD789012"
+                    },
+                    {
+                        "passengerType": "child",
+                        "firstName": "Charlie",
+                        "lastName": "Johnson",
+                        "dateOfBirth": "2016-03-10"
+                    }
+                ]
+            }
         }
     }
 }
@@ -162,9 +172,13 @@ Content-Type: application/json
     "Capture": {
         "step": "seat_selection",
         "data": {
-            "outboundSeats": ["12A", "12B", "12C"],
-            "returnSeats": ["14A", "14B", "14C"],
-            "seatUpgradeTotal": 45.00
+            "booking": {
+                "selectedSeats": {
+                    "outbound": ["12A", "12B", "12C"],
+                    "return": ["14A", "14B", "14C"]
+                },
+                "seatUpgradeTotal": 45.00
+            }
         }
     }
 }
@@ -179,19 +193,14 @@ POST http://localhost:3030/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
-        "step": "ancillaries",
+        "step": "ancillary_services",
         "data": {
-            "baggage": {
-                "checkedBags": 2,
-                "baggageTotal": 60.00
-            },
-            "meals": {
-                "selected": true,
-                "mealsTotal": 30.00
-            },
-            "insurance": {
-                "selected": true,
-                "insuranceTotal": 45.00
+            "booking": {
+                "insurance": {
+                    "selected": true,
+                    "insurance_type": "comprehensive",
+                    "price": 45.00
+                }
             }
         }
     }
@@ -209,19 +218,20 @@ Content-Type: application/json
     "Capture": {
         "step": "payment",
         "data": {
-            "paymentMethod": "credit_card",
-            "cardType": "visa",
-            "lastFourDigits": "4242",
-            "billingAddress": {
-                "street": "123 Main St",
-                "city": "New York",
-                "state": "NY",
-                "zipCode": "10001",
-                "country": "USA"
-            },
-            "totalAmount": 759.98,
-            "currency": "USD",
-            "transactionId": "txn_abc123xyz"
+            "booking": {
+                "paymentStatus": "completed",
+                "payment": {
+                    "method": "credit_card",
+                    "status": "completed",
+                    "transaction_id": "txn_abc123xyz"
+                },
+                "pricing": {
+                    "basePrice": 579.98,
+                    "taxes": 180.00,
+                    "totalPrice": 759.98,
+                    "currency": "USD"
+                }
+            }
         }
     }
 }
@@ -249,7 +259,7 @@ GET http://localhost:3030/journeys/{{journey_id}}
 HTTP 200
 [Asserts]
 jsonpath "$.state" == "Complete"
-jsonpath "$.accumulated_data.origin" == "JFK"
-jsonpath "$.accumulated_data.destination" == "LAX"
-jsonpath "$.accumulated_data.totalAmount" == 759.98
-jsonpath "$.accumulated_data.transactionId" == "txn_abc123xyz"
+jsonpath "$.accumulated_data.search.origin" == "JFK"
+jsonpath "$.accumulated_data.search.destination" == "LAX"
+jsonpath "$.accumulated_data.booking.pricing.totalPrice" == 759.98
+jsonpath "$.accumulated_data.booking.payment.transaction_id" == "txn_abc123xyz"
