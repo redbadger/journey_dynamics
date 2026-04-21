@@ -133,16 +133,19 @@ impl DecisionEngine for GoRulesDecisionEngine {
         let unwrapped_map = result.as_object().unwrap();
         let take = unwrapped_map.take();
 
-        // Get suggested actions directly from the decision result
+        // Get suggested actions directly from the decision result.
+        // If the key is absent (e.g. no JDM route matched the current step),
+        // fall back to an empty list rather than propagating an error.
         let suggested_actions: Vec<String> = take
             .get("suggestedActions")
-            .ok_or("No suggested actions found")?
-            .as_array()
-            .ok_or("Suggested actions is not an array")?
-            .take()
-            .into_iter()
-            .map(|item| item.as_str().unwrap().to_string())
-            .collect();
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.take()
+                    .into_iter()
+                    .filter_map(|item| item.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         Ok(WorkflowDecision { suggested_actions })
     }
