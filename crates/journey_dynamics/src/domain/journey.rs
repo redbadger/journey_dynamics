@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::domain::events::JourneyEvent;
 use crate::services::schema_validator::SchemaValidator;
 use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
-use async_trait::async_trait;
 use cqrs_es::Aggregate;
+use cqrs_es::event_sink::EventSink;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -31,7 +31,6 @@ pub enum JourneyState {
     Complete,
 }
 
-#[async_trait]
 impl Aggregate for Journey {
     type Command = JourneyCommand;
     type Event = JourneyEvent;
@@ -39,23 +38,23 @@ impl Aggregate for Journey {
     type Services = JourneyServices;
 
     // This identifier should be unique to the system.
-    fn aggregate_type() -> String {
-        "Journey".to_string()
-    }
+    const TYPE: &'static str = "Journey";
 
     // The aggregate logic goes here. Note that this will be the _bulk_ of a CQRS system
     // so expect to use helper functions elsewhere to keep the code clean.
     async fn handle(
-        &self,
+        &mut self,
         command: Self::Command,
         services: &Self::Services,
-    ) -> Result<Vec<Self::Event>, Self::Error> {
+        sink: &EventSink<Self>,
+    ) -> Result<(), Self::Error> {
         match command {
             JourneyCommand::Start { id } => {
                 if self.id == id {
                     Err(JourneyError::AlreadyStarted)
                 } else {
-                    Ok(vec![JourneyEvent::Started { id }])
+                    sink.write(JourneyEvent::Started { id }, self).await;
+                    Ok(())
                 }
             }
             JourneyCommand::CapturePerson { name, email, phone } => {
@@ -64,7 +63,9 @@ impl Aggregate for Journey {
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    Ok(vec![JourneyEvent::PersonCaptured { name, email, phone }])
+                    sink.write(JourneyEvent::PersonCaptured { name, email, phone }, self)
+                        .await;
+                    Ok(())
                 }
             }
             JourneyCommand::Capture { step, data } => {
@@ -93,23 +94,38 @@ impl Aggregate for Journey {
                         .await
                         .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
-                    let mut events = vec![JourneyEvent::Modified {
-                        step: step.clone(),
-                        data: data.clone(),
-                    }];
+                    // Capture from_step before any writes mutate self
+                    let from_step = self.current_step.clone();
 
-                    events.push(JourneyEvent::WorkflowEvaluated {
-                        suggested_actions: decision.suggested_actions,
-                    });
+                    sink.write(
+                        JourneyEvent::Modified {
+                            step: step.clone(),
+                            data: data.clone(),
+                        },
+                        self,
+                    )
+                    .await;
+
+                    sink.write(
+                        JourneyEvent::WorkflowEvaluated {
+                            suggested_actions: decision.suggested_actions,
+                        },
+                        self,
+                    )
+                    .await;
 
                     if is_step_transition {
-                        events.push(JourneyEvent::StepProgressed {
-                            from_step: self.current_step.clone(),
-                            to_step: step.clone(),
-                        });
+                        sink.write(
+                            JourneyEvent::StepProgressed {
+                                from_step,
+                                to_step: step.clone(),
+                            },
+                            self,
+                        )
+                        .await;
                     }
 
-                    Ok(events)
+                    Ok(())
                 }
             }
             JourneyCommand::Complete => {
@@ -118,7 +134,8 @@ impl Aggregate for Journey {
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    Ok(vec![JourneyEvent::Completed])
+                    sink.write(JourneyEvent::Completed, self).await;
+                    Ok(())
                 }
             }
         }

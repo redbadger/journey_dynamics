@@ -5,22 +5,21 @@ edition.workspace = true
 
 [dependencies]
 async-trait = "0.1"
-axum = "0.8.8"
-chrono = "0.4.42"
-cqrs-es = "0.4.12"
+axum = "0.8.9"
+chrono = "0.4.44"
+cqrs-es = "0.5.0"
 dotenv = "0.15.0"
 json-patch = "4.1.0"
-postgres-es = "0.4.12"
-schemars = "1.1.0"
+postgres-es = "0.5.0"
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0.146"
-jsonschema = "0.37"
+serde_json = "1.0.149"
+jsonschema = "0.46"
 sqlx = { version = "0.8.6", features = [
     "postgres",
     "runtime-tokio-native-tls",
     "uuid",
 ] }
-thiserror = "2.0.17"
+thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
-uuid = { version = "1.19.0", features = ["serde", "v4"] }
-zen-engine = "0.52.2"
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
+zen-engine = "0.55.0"
