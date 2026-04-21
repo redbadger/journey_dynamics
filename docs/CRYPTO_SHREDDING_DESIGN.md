@@ -4,7 +4,6 @@
 |---|---|
 | **Service** | Journey Dynamics |
 | **Feature** | Crypto-shredding for GDPR right-to-erasure |
-| **Date** | April 2026 |
 | **Status** | Design — ready for review |
 
 ---
@@ -13,11 +12,15 @@
 
 1. [Motivation](#motivation)
 2. [Problem Analysis](#problem-analysis)
+   - [PII in PersonCaptured events](#pii-in-personcaptured-events)
+   - [PII in Modified events](#pii-in-modified-events)
+   - [PII in read-side projections](#pii-in-read-side-projections)
 3. [Design Overview](#design-overview)
 4. [Key Concepts](#key-concepts)
    - [Subject ID](#subject-id)
    - [Data Encryption Key (DEK)](#data-encryption-key-dek)
-   - [PII Boundary](#pii-boundary)
+   - [Journey–Subject Association](#journeysubject-association)
+   - [PII Classification](#pii-classification)
 5. [Architecture](#architecture)
    - [Crypto-Shredding Event Repository](#crypto-shredding-event-repository)
    - [Key Store](#key-store)
@@ -29,10 +32,9 @@
 7. [Read-Side Projection Changes](#read-side-projection-changes)
 8. [Database Schema Changes](#database-schema-changes)
 9. [Shredding Flow](#shredding-flow)
-10. [PII Firewall](#pii-firewall)
-11. [Testing Strategy](#testing-strategy)
-12. [Migration Plan](#migration-plan)
-13. [Future Considerations](#future-considerations)
+10. [Testing Strategy](#testing-strategy)
+11. [Migration Plan](#migration-plan)
+12. [Future Considerations](#future-considerations)
 
 ---
 
@@ -46,29 +48,56 @@ GDPR Article 17 grants data subjects the "right to erasure" — the right to hav
 
 ## Problem Analysis
 
-### Current state
+PII currently enters the system through two distinct paths, and persists in three locations. All three must be addressed.
 
-Today, PII flows through two paths in the system:
+### PII in `PersonCaptured` events
 
-| Path | Event | Where PII ends up |
-|---|---|---|
-| `CapturePerson` command | `PersonCaptured { name, email, phone }` | `events.payload` (plaintext JSON), `journey_person` table |
-| `Capture` command | `Modified { step, data }` | `events.payload` (plaintext JSON), `journey_view.accumulated_data` |
+The `CapturePerson` command produces a `PersonCaptured` event containing `name`, `email`, and `phone`. These fields are serialized as plaintext JSON in the `events.payload` column.
 
-Both paths persist PII as plaintext in the event store. The first path is well-contained — `PersonCaptured` events carry clearly identified PII fields. The second path is more dangerous: arbitrary JSON in `Capture` commands could contain PII (e.g., an email field in form data), and this ends up merged into `accumulated_data` on both the aggregate and the read model.
+This path is well-contained: the PII fields are clearly identified and the event type is dedicated to person data. Encrypting these fields is straightforward.
 
-### What needs to change
+### PII in `Modified` events
 
-1. PII in events must be encrypted before it reaches the event store
-2. PII must be decryptable on the read path (for projections and aggregate rehydration) — until the subject is forgotten
-3. A per-subject encryption key must be managed in a dedicated key store
-4. Deleting the key must be sufficient to render all PII for that subject permanently unreadable
-5. PII must not leak through the `Capture` path into `accumulated_data`
-6. Read-side projections containing PII must be cleared or rebuilt on shredding
+The `Capture` command produces a `Modified` event carrying a `data: Value` field — arbitrary JSON from form submissions. In practice this JSON routinely contains PII. The flight-booking example schema makes this concrete:
+
+| Schema type | PII fields |
+|---|---|
+| `PassengerDetail` | `firstName`, `lastName`, `dateOfBirth`, `passportNumber`, `nationality` |
+| `Payment` | `transaction_id` |
+| `SearchCriteria` | `origin`, `destination`, `departureDate` (linkable to a person once a subject is established) |
+
+This data flows through the `Modified` event into `accumulated_data` on both the aggregate (in-memory) and the `journey_view` table (persisted). Crucially, the `Capture` path is the system's primary data-ingestion mechanism — blocking PII from it is not feasible. The decision engine needs this data to route the journey.
+
+**This is the harder problem.** A design that only encrypts `PersonCaptured` events and tries to "firewall" PII out of `Modified` events is insufficient. PII in JSON payloads is not a bug — it is a fundamental characteristic of the domain.
+
+### PII in read-side projections
+
+PII ends up in two read-model locations:
+
+| Table | PII content |
+|---|---|
+| `journey_person` | `name`, `email`, `phone` — projected from `PersonCaptured` |
+| `journey_view` | `accumulated_data` (JSONB) — projected from `Modified`, contains passenger details, payment info, etc. |
+
+Both must be scrubbed when a subject exercises their right to erasure.
+
+### Summary of PII surfaces
+
+| Location | Source | Contains PII | Encrypted today |
+|---|---|---|---|
+| `events.payload` — `PersonCaptured` | `CapturePerson` command | ✅ name, email, phone | ❌ |
+| `events.payload` — `Modified` | `Capture` command | ✅ passenger details, payment, etc. | ❌ |
+| `journey_person` table | Read-side projection | ✅ name, email, phone | ❌ |
+| `journey_view.accumulated_data` | Read-side projection | ✅ merged form data | ❌ |
+| `events.payload` — all other event types | Various | ❌ | N/A |
 
 ---
 
 ## Design Overview
+
+The core insight is that under GDPR, "personal data" is any information relating to an identified or identifiable natural person. Once a journey is linked to a subject (via `CapturePerson`), **all data captured in that journey is personal data** — the flight destination they searched for, the seat class they selected, the payment method they chose. It all relates to an identifiable person.
+
+This leads to a **journey-level encryption** approach: once a subject is associated with a journey, all event payloads in that journey that carry data fields are encrypted with the subject's key. This is simpler, safer, and more legally sound than attempting field-level PII classification.
 
 ```
                         Domain Layer
@@ -87,29 +116,26 @@ Both paths persist PII as plaintext in the event store. The first path is well-c
         │   CryptoShreddingEventRepository<R>   │
         │                                       │
         │   persist():                          │
-        │     match event_type:                 │
-        │       "PersonCaptured" →              │
-        │         extract subject_id            │
-        │         get/create DEK from KeyStore  │
-        │         encrypt PII fields in payload │
-        │       _ → pass through                │
-        │     delegate to inner.persist()       │
+        │     "PersonCaptured" →                │
+        │       record journey→subject mapping  │
+        │       encrypt PII fields with DEK     │
+        │     "Modified" →                      │
+        │       if journey has subject →        │
+        │         encrypt data field with DEK   │
+        │     other events → pass through       │
         │                                       │
         │   get_events():                       │
-        │     delegate to inner.get_events()    │
-        │     match event_type:                 │
-        │       "PersonCaptured" →              │
-        │         look up DEK from KeyStore     │
-        │         if found → decrypt PII fields │
-        │         if missing → substitute       │
-        │           redacted sentinel           │
-        │       _ → pass through                │
+        │     for each event →                  │
+        │       if encrypted fields present →   │
+        │         look up DEK                   │
+        │         if found → decrypt            │
+        │         if missing → redact           │
         └───────────────────┬───────────────────┘
                             │
         ┌───────────────────┴───────────────────┐
         │       PostgresEventRepository         │
         │       (unchanged — stores cipher-     │
-        │        text in payload column)         │
+        │        text in payload column)        │
         └───────────────────────────────────────┘
 ```
 
@@ -129,7 +155,7 @@ A `subject_id: Uuid` identifies the data subject (the person whose PII is being 
 - **Not itself PII** — it is an opaque identifier with no intrinsic meaning
 - Stable across journeys — the same person in multiple journeys uses the same `subject_id`, so a single key deletion shreds PII across all their journeys
 
-The `subject_id` is stored in plaintext in the event payload (it is not encrypted). This allows the crypto layer to find the right key on the read path without needing to decrypt anything first.
+The `subject_id` is stored in plaintext in the event payload (never encrypted). This allows the crypto layer to find the right key on the read path without needing to decrypt anything first.
 
 ### Data Encryption Key (DEK)
 
@@ -140,21 +166,50 @@ Each subject gets a unique symmetric encryption key (the DEK). The DEK is:
 - Used to encrypt/decrypt all PII fields for that subject across all events and all journeys
 - Itself encrypted at rest with a Key Encryption Key (KEK) — see [Encryption Scheme](#encryption-scheme)
 
-### PII Boundary
+### Journey–Subject Association
 
-We define a clear, strict boundary around which events and fields contain PII:
+The crypto layer must know which journeys belong to which subjects, so that `Modified` events can be encrypted with the correct key. This is maintained via a `journey_subject_mapping` table, populated by the crypto layer when it persists a `PersonCaptured` event.
 
-| Event type | PII fields | Non-PII fields |
-|---|---|---|
-| `PersonCaptured` | `name`, `email`, `phone` | `subject_id` |
-| `Started` | — | `id` |
-| `Modified` | **none** (enforced — see [PII Firewall](#pii-firewall)) | `step`, `data` |
-| `WorkflowEvaluated` | — | `suggested_actions` |
-| `StepProgressed` | — | `from_step`, `to_step` |
-| `Completed` | — | — |
-| `SubjectForgotten` | — | `subject_id` |
+```
+    journey_subject_mapping
+    ┌─────────────────────────────┐
+    │ aggregate_id  │ subject_id  │
+    │───────────────│─────────────│
+    │ journey-abc   │ subj-123    │
+    │ journey-def   │ subj-123    │  ← same person, two journeys
+    │ journey-ghi   │ subj-456    │
+    └─────────────────────────────┘
+```
 
-Only `PersonCaptured` events contain PII. This is enforced at the API and validation layers.
+When the crypto layer sees a `Modified` event, it checks this mapping by `aggregate_id`:
+
+- **Mapping exists** → encrypt the `data` field with the subject's DEK
+- **No mapping** → the journey has no associated subject yet; pass through unencrypted
+
+This means events persisted *before* `CapturePerson` is called remain in plaintext. This is acceptable: at that point the data is not yet linked to an identifiable person. The moment the person is identified (via `CapturePerson`), all subsequent data is encrypted. See [Pre-Subject Events](#pre-subject-events) for further discussion.
+
+### PII Classification
+
+Rather than classifying individual fields as PII, we adopt a journey-level approach:
+
+| Event type | Encryption rule |
+|---|---|
+| `PersonCaptured` | **Always encrypted.** The `name`, `email`, and `phone` fields are encrypted. The `subject_id` remains in plaintext. |
+| `Modified` | **Encrypted if the journey has a subject.** The entire `data` field is encrypted. The `step` field remains in plaintext (it is a workflow routing label, not personal data). |
+| `Started` | Never encrypted. |
+| `WorkflowEvaluated` | Never encrypted. Suggested actions are workflow metadata. |
+| `StepProgressed` | Never encrypted. Step names are workflow metadata. |
+| `Completed` | Never encrypted. |
+| `SubjectForgotten` | Never encrypted. Contains only the `subject_id` (not PII). |
+
+This approach is:
+
+- **Simple** — no need for field-level schema annotations or PII-pattern matching
+- **Safe** — no risk of missing a PII field buried in a JSON payload
+- **Legally sound** — all data relating to an identified person is treated as personal data, which aligns with GDPR's broad definition
+- **Transparent to the domain layer** — the aggregate and decision engine always work with decrypted data in memory
+
+The trade-off is that non-PII data in `Modified` events (e.g., trip type, cabin class) also becomes unreadable after shredding. This is acceptable: if the subject exercises their right to erasure, their entire journey context should be considered personal data. The structural events (`Started`, `StepProgressed`, `Completed`) remain readable and are sufficient for aggregate lifecycle management.
 
 ---
 
@@ -168,6 +223,7 @@ A new struct that wraps any `PersistedEventRepository` and adds encryption/decry
 pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     inner: R,
     key_store: Arc<dyn KeyStore>,
+    subject_mapping: Arc<dyn SubjectMapping>,
     cipher: PiiCipher,
 }
 ```
@@ -178,14 +234,30 @@ It implements `PersistedEventRepository` by delegating to `inner`, intercepting 
 
 ```
 for each SerializedEvent in events:
+
     if event.event_type == "PersonCaptured":
-        subject_id = event.payload["subject_id"]     // plaintext, always present
+        subject_id = event.payload["PersonCaptured"]["subject_id"]
+        subject_mapping.associate(event.aggregate_id, subject_id)
         dek = key_store.get_or_create_key(subject_id)
-        pii = extract { name, email, phone } from event.payload
-        encrypted = cipher.encrypt(dek, serialize(pii))
-        replace payload with:
+        pii = extract { name, email, phone } from event.payload["PersonCaptured"]
+        aad = aggregate_id || sequence
+        encrypted = cipher.encrypt(dek, serialize(pii), aad)
+        replace payload["PersonCaptured"] with:
             { "subject_id": <uuid>, "encrypted_pii": <base64>, "nonce": <base64> }
-    delegate to inner.persist(events)
+
+    else if event.event_type == "JourneyModified":
+        subject_id = subject_mapping.get_subject(event.aggregate_id)
+        if subject_id is Some:
+            dek = key_store.get_or_create_key(subject_id)
+            data = extract event.payload["Modified"]["data"]
+            aad = aggregate_id || sequence
+            encrypted = cipher.encrypt(dek, serialize(data), aad)
+            replace payload["Modified"]["data"] with:
+                { "encrypted_data": <base64>, "nonce": <base64> }
+
+    // All other event types: pass through unmodified
+
+delegate to inner.persist(events)
 ```
 
 #### Read path (`get_events`, `get_last_events`, `stream_events`, `stream_all_events`)
@@ -193,25 +265,42 @@ for each SerializedEvent in events:
 ```
 events = inner.get_events(aggregate_id)
 for each SerializedEvent in events:
-    if event.event_type == "PersonCaptured":
-        subject_id = event.payload["subject_id"]
+
+    if event.event_type == "PersonCaptured"
+       and event.payload contains "encrypted_pii":
+        subject_id = event.payload["PersonCaptured"]["subject_id"]
         dek = key_store.get_key(subject_id)
         if dek is Some:
-            pii = cipher.decrypt(dek, event.payload["encrypted_pii"], event.payload["nonce"])
-            restore payload to:
-                { "subject_id": <uuid>, "name": ..., "email": ..., "phone": ... }
+            aad = aggregate_id || sequence
+            pii = cipher.decrypt(dek, encrypted_pii, nonce, aad)
+            restore full payload: { subject_id, name, email, phone }
         else:
-            // Key has been deleted — subject was forgotten
-            restore payload to:
-                { "subject_id": <uuid>, "name": "[redacted]", "email": "[redacted]", "phone": null }
+            // Key deleted — subject was forgotten
+            substitute: { subject_id, name: "[redacted]", email: "[redacted]", phone: null }
+
+    else if event.event_type == "JourneyModified"
+       and event.payload["Modified"]["data"] contains "encrypted_data":
+        subject_id = subject_mapping.get_subject(event.aggregate_id)
+        if subject_id is Some:
+            dek = key_store.get_key(subject_id)
+        if dek is Some:
+            aad = aggregate_id || sequence
+            data = cipher.decrypt(dek, encrypted_data, nonce, aad)
+            restore full payload: { step, data: <decrypted> }
+        else:
+            // Key deleted — subject was forgotten
+            substitute: { step, data: {} }
+
 return events
 ```
 
-The redacted sentinel allows the aggregate and projections to process the event without crashing. The domain types remain `String`, so `"[redacted]"` is a valid value. Projections can check for this sentinel and handle accordingly.
+The redacted sentinels allow the aggregate and projections to process events without crashing. For `PersonCaptured`, `"[redacted]"` is a valid `String`. For `Modified`, an empty `{}` means the accumulated data for this step is lost — which is the desired outcome after shredding. The `step` field remains readable, so `StepProgressed` and workflow evaluation history are preserved.
+
+Note: the presence of `"encrypted_pii"` or `"encrypted_data"` keys in the payload is how the read path distinguishes encrypted events from legacy plaintext events. Events persisted before the crypto layer was introduced will not have these keys and will pass through unmodified.
 
 #### Snapshot path (`get_snapshot`)
 
-If snapshots are used in the future, the aggregate's serialized state could contain PII (if person data is ever added to the aggregate). For now, `PersonCaptured` produces no aggregate state change, so snapshots are clean. This should be revisited if person data is added to the aggregate struct.
+If snapshots are used in the future, the aggregate's serialized state could contain PII (if person data is ever added to the aggregate). For now, `PersonCaptured` produces minimal aggregate state change (only `subject_id`, which is not PII), so snapshots are clean. The `accumulated_data` on the aggregate *does* contain PII in memory, and would be serialized into a snapshot. If snapshots are introduced, the crypto layer must also encrypt the `accumulated_data` field in the snapshot payload. The `get_snapshot` method on the crypto repository wrapper is the natural place for this.
 
 ### Key Store
 
@@ -243,14 +332,36 @@ pub struct KeyMaterial {
 }
 ```
 
+### Subject Mapping
+
+A trait and Postgres implementation for the journey–subject association:
+
+```rust
+#[async_trait]
+pub trait SubjectMapping: Send + Sync {
+    /// Record that a journey (aggregate) belongs to a subject.
+    async fn associate(&self, aggregate_id: &str, subject_id: &Uuid) -> Result<(), MappingError>;
+
+    /// Look up the subject for a journey. Returns None if no subject has been
+    /// associated (i.e., CapturePerson has not yet been called for this journey).
+    async fn get_subject(&self, aggregate_id: &str) -> Result<Option<Uuid>, MappingError>;
+
+    /// Find all journeys belonging to a subject (used during shredding
+    /// to clean up read-model projections).
+    async fn get_journeys(&self, subject_id: &Uuid) -> Result<Vec<String>, MappingError>;
+}
+```
+
+The implementation is backed by the `journey_subject_mapping` table (see [Database Schema Changes](#database-schema-changes)). For performance, the crypto layer should cache mappings in memory with a bounded LRU cache, since `get_subject` is called on every `Modified` event during both persist and load.
+
 ### Encryption Scheme
 
 | Layer | Algorithm | Purpose |
 |---|---|---|
-| **Field encryption (DEK)** | AES-256-GCM | Encrypts PII fields within events. Authenticated encryption ensures integrity. |
+| **Field encryption (DEK)** | AES-256-GCM | Encrypts PII/data fields within events. Authenticated encryption ensures integrity. |
 | **Key encryption (KEK)** | AES-256-KWP or KMS envelope encryption | Encrypts DEKs at rest in the key store. The KEK is either a static secret from config/environment or, preferably, a key in an external KMS (AWS KMS, GCP KMS, HashiCorp Vault). |
 
-AES-256-GCM requires a unique nonce per encryption operation. The nonce is stored alongside the ciphertext in the event payload. The authenticated data (AAD) should include the `aggregate_id` and `sequence` number to bind the ciphertext to its position in the stream.
+AES-256-GCM requires a unique nonce per encryption operation. The nonce is stored alongside the ciphertext in the event payload. The authenticated additional data (AAD) includes the `aggregate_id` and `sequence` number, binding the ciphertext to its position in the stream and preventing event payload transplantation.
 
 ```rust
 pub struct PiiCipher {
@@ -259,10 +370,11 @@ pub struct PiiCipher {
 }
 
 impl PiiCipher {
-    /// Encrypt a PII payload with the given DEK.
+    /// Encrypt a plaintext payload with the given DEK.
+    /// aad should include aggregate_id and sequence to bind ciphertext to event position.
     pub fn encrypt(&self, dek: &KeyMaterial, plaintext: &[u8], aad: &[u8]) -> EncryptedPayload;
 
-    /// Decrypt a PII payload with the given DEK.
+    /// Decrypt a ciphertext payload with the given DEK.
     pub fn decrypt(&self, dek: &KeyMaterial, encrypted: &EncryptedPayload, aad: &[u8])
         -> Result<Vec<u8>, CryptoError>;
 
@@ -285,7 +397,7 @@ pub struct EncryptedPayload {
 
 ### Commands
 
-Add `subject_id` to `CapturePerson` and introduce a new `ForgetSubject` command:
+Add `subject_id` to `CapturePerson`:
 
 ```rust
 #[derive(Debug, Deserialize)]
@@ -307,11 +419,7 @@ pub enum JourneyCommand {
 }
 ```
 
-The `ForgetSubject` command is handled outside the journey aggregate (it does not belong to any single journey — it operates across all journeys for a subject). It is exposed as a dedicated API endpoint that:
-
-1. Calls `key_store.delete_key(subject_id)`
-2. Clears/anonymizes the `journey_person` read-side projection for that subject
-3. Optionally emits a `SubjectForgotten` audit event (see below)
+The `ForgetSubject` operation is handled outside the journey aggregate — it is not a journey command. It operates across all journeys for a subject and is exposed as a dedicated API endpoint. See [Shredding Flow](#shredding-flow).
 
 ### Events
 
@@ -337,7 +445,9 @@ pub enum JourneyEvent {
 }
 ```
 
-Note: in the event store, the `PersonCaptured` payload will actually look like this (after the crypto layer encrypts it):
+#### What events look like in the event store
+
+A `PersonCaptured` event is stored with encrypted PII:
 
 ```json
 {
@@ -349,20 +459,43 @@ Note: in the event store, the `PersonCaptured` payload will actually look like t
 }
 ```
 
-But the domain layer never sees this form — it always works with the decrypted `PersonCaptured` variant.
+A `Modified` event for a journey with an associated subject:
 
-### Aggregate
-
-The `apply` method for `PersonCaptured` currently does nothing:
-
-```rust
-JourneyEvent::PersonCaptured { .. } => {
-    // Person data is projected to read model tables
-    // No state change needed in the aggregate
+```json
+{
+    "Modified": {
+        "step": "passenger_details",
+        "data": {
+            "encrypted_data": "YW5vdGhlciBiYXNlNjQgY2lwaGVydGV4dA==...",
+            "nonce": "YW5vdGhlciBub25jZQ==..."
+        }
+    }
 }
 ```
 
-With the introduction of `subject_id`, we should store it on the aggregate so that business rules can reference it if needed in the future:
+A `Modified` event for a journey with *no* associated subject (pre-`CapturePerson`, or a journey that never captures a person):
+
+```json
+{
+    "Modified": {
+        "step": "search",
+        "data": {
+            "search": {
+                "tripType": "round-trip",
+                "origin": "LHR",
+                "destination": "JFK",
+                "departureDate": "2026-03-15"
+            }
+        }
+    }
+}
+```
+
+The domain layer never sees the encrypted forms — it always works with the decrypted variants.
+
+### Aggregate
+
+The `apply` method for `PersonCaptured` currently does nothing. With the introduction of `subject_id`, we store it on the aggregate so that business rules can reference it if needed:
 
 ```rust
 pub struct Journey {
@@ -389,43 +522,53 @@ The `subject_id` is not PII and does not need encryption in snapshots.
 
 ### `journey_person` table
 
-Add `subject_id` column:
-
-```sql
-ALTER TABLE journey_person ADD COLUMN subject_id UUID;
-CREATE INDEX idx_journey_person_subject_id ON journey_person(subject_id);
-```
-
-The projection in `StructuredJourneyViewRepository::update_view` continues to receive decrypted events (the crypto layer decrypts before events reach the query dispatchers). When the key has been deleted, the projection receives redacted sentinels and should handle them:
+Add `subject_id` column. The projection continues to receive decrypted events (the crypto layer decrypts before events reach the query dispatchers). When the key has been deleted, the projection receives redacted sentinels:
 
 ```rust
 JourneyEvent::PersonCaptured { subject_id, name, email, phone } => {
     if name == "[redacted]" {
         // Subject has been forgotten — skip projection update
-        // or delete existing row
         return Ok(());
     }
     // ... normal upsert logic, now including subject_id ...
 }
 ```
 
-### Shredding the read model
+### `journey_view` table — `accumulated_data`
 
-When `ForgetSubject` is invoked, in addition to deleting the key, we must clear PII from the read model:
+This is the more complex case. The `Modified` event projection merges `data` into `accumulated_data` via a JSON merge:
 
 ```sql
+UPDATE journey_view
+SET accumulated_data = accumulated_data || $2, ...
+WHERE id = $1
+```
+
+After shredding, `Modified` events for the shredded subject decrypt to `data: {}`. On a projection rebuild, this would produce empty merges — effectively dropping the shredded data from `accumulated_data`. But we do not want to rely on full projection rebuilds for the normal shredding flow.
+
+Instead, shredding directly clears the read model:
+
+```sql
+-- Clear accumulated_data for all journeys belonging to the shredded subject
+UPDATE journey_view
+SET accumulated_data = '{}', updated_at = CURRENT_TIMESTAMP
+WHERE id IN (
+    SELECT aggregate_id FROM journey_subject_mapping
+    WHERE subject_id = $1
+);
+
+-- Delete person records
 DELETE FROM journey_person WHERE subject_id = $1;
 ```
 
-Alternatively, anonymize rather than delete (to preserve the structural relationship):
+This is fast, atomic, and does not require replaying events.
 
-```sql
-UPDATE journey_person
-SET name = '[redacted]', email = '[redacted]', phone = NULL, updated_at = CURRENT_TIMESTAMP
-WHERE subject_id = $1;
-```
+If a more surgical approach is desired (preserving non-PII accumulated data for the journey's structural integrity), a projection rebuild for affected journeys can be triggered after shredding. The rebuilt projection would replay all events through the crypto layer, which would:
+- Decrypt non-encrypted events (pre-subject) normally
+- Return `data: {}` for encrypted events whose key has been deleted
+- Return `"[redacted]"` sentinels for `PersonCaptured` events
 
-The choice depends on whether downstream consumers need to know a person record once existed for a given journey.
+The result would be `accumulated_data` containing only the pre-subject data.
 
 ---
 
@@ -446,6 +589,21 @@ CREATE INDEX idx_subject_keys_subject_id ON subject_encryption_keys(subject_id);
 
 Note: there is no `deleted_at` column. When a key is deleted, the row is **hard-deleted**. This ensures the key material is irrecoverable and satisfies the erasure requirement. An audit trail is maintained via the `SubjectForgotten` event in the event store.
 
+### New table: `journey_subject_mapping`
+
+```sql
+CREATE TABLE journey_subject_mapping (
+    aggregate_id    TEXT        NOT NULL PRIMARY KEY,
+    subject_id      UUID        NOT NULL,
+    created_at      TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_journey_subject_mapping_subject_id
+    ON journey_subject_mapping(subject_id);
+```
+
+This table is populated by the crypto layer when it persists a `PersonCaptured` event, and queried on every `Modified` event to determine whether encryption is required.
+
 ### Altered table: `journey_person`
 
 ```sql
@@ -455,63 +613,71 @@ CREATE INDEX idx_journey_person_subject_id ON journey_person(subject_id);
 
 ### No changes to: `events`
 
-The `events` table schema is unchanged. The `payload` column continues to store JSON — it just happens to contain ciphertext for PII events instead of plaintext. The crypto layer is transparent to the storage layer.
+The `events` table schema is unchanged. The `payload` column continues to store JSON — it just happens to contain ciphertext for encrypted events instead of plaintext. The crypto layer is transparent to the storage layer.
 
 ---
 
 ## Shredding Flow
 
-### Sequence diagram
+### API endpoint
 
 ```
-    Client                API              KeyStore           Read Model
-      │                    │                  │                   │
-      │  DELETE /subjects  │                  │                   │
-      │  /{subject_id}     │                  │                   │
-      │───────────────────>│                  │                   │
-      │                    │                  │                   │
-      │                    │  delete_key()    │                   │
-      │                    │─────────────────>│                   │
-      │                    │                  │                   │
-      │                    │       Ok(())     │                   │
-      │                    │<─────────────────│                   │
-      │                    │                  │                   │
-      │                    │  DELETE FROM journey_person          │
-      │                    │  WHERE subject_id = ...              │
-      │                    │────────────────────────────────────> │
-      │                    │                  │                   │
-      │                    │  (emit SubjectForgotten event        │
-      │                    │   for audit trail)                   │
-      │                    │                  │                   │
-      │    204 No Content  │                  │                   │
-      │<───────────────────│                  │                   │
+DELETE /subjects/{subject_id}
+```
+
+This is a dedicated endpoint, separate from the journey command/query endpoints. It does not go through the CQRS command handler because it operates across aggregates.
+
+### Sequence
+
+```
+    Client                API              KeyStore        SubjectMapping      Read Model
+      │                    │                  │                 │                  │
+      │  DELETE /subjects  │                  │                 │                  │
+      │  /{subject_id}     │                  │                 │                  │
+      │───────────────────>│                  │                 │                  │
+      │                    │                  │                 │                  │
+      │                    │  delete_key()    │                 │                  │
+      │                    │─────────────────>│                 │                  │
+      │                    │       Ok(())     │                 │                  │
+      │                    │<─────────────────│                 │                  │
+      │                    │                  │                 │                  │
+      │                    │  get_journeys()  │                 │                  │
+      │                    │──────────────────────────────────> │                  │
+      │                    │  [journey-abc, journey-def]        │                  │
+      │                    │<────────────────────────────────── │                  │
+      │                    │                  │                 │                  │
+      │                    │  Clear accumulated_data & person rows                 │
+      │                    │─────────────────────────────────────────────────────> │
+      │                    │                  │                 │                  │
+      │                    │  (emit SubjectForgotten event for audit trail)        │
+      │                    │                  │                 │                  │
+      │    204 No Content  │                  │                 │                  │
+      │<───────────────────│                  │                 │                  │
 ```
 
 ### What happens after shredding
 
-1. **Event store**: `PersonCaptured` events for this subject still exist, but their PII fields are encrypted ciphertext. The key is gone. The data is permanently unreadable.
+1. **Event store**: `PersonCaptured` events still exist, but their PII fields are AES-256-GCM ciphertext. `Modified` events for post-subject captures still exist, but their `data` fields are ciphertext. The key is gone. The data is permanently unreadable.
 
-2. **Aggregate rehydration**: When a journey containing a shredded `PersonCaptured` event is loaded, the crypto layer detects the missing key and substitutes `"[redacted]"` sentinels. The aggregate loads successfully; `subject_id` is set but the PII is gone.
+2. **Aggregate rehydration**: When a shredded journey is loaded, the crypto layer detects the missing key and substitutes sentinels. `PersonCaptured` yields `"[redacted]"` strings. `Modified` yields `data: {}`. The aggregate loads successfully — `subject_id` is set, `state` and `current_step` are preserved, but `accumulated_data` and person details are empty.
 
-3. **Read model**: The `journey_person` rows for this subject have been deleted (or anonymized). Queries by email for this subject return nothing.
+3. **Read model**: The `journey_person` rows for this subject have been deleted. The `journey_view.accumulated_data` for affected journeys has been cleared to `'{}'`. Queries for this subject return no personal data.
 
-4. **Audit trail**: A `SubjectForgotten { subject_id }` event records when the erasure occurred, without containing any PII.
+4. **Workflow decisions and step history**: `WorkflowEvaluated` and `StepProgressed` events are not encrypted and remain fully readable. The structural history of the journey — which steps were taken, what actions were suggested — survives shredding. This is intentional: these are workflow metadata, not personal data.
 
----
+5. **Audit trail**: A `SubjectForgotten { subject_id }` event records when the erasure occurred, without containing any PII.
 
-## PII Firewall
+### Pre-subject events
 
-A critical invariant: **PII must only enter the system through the `CapturePerson` command.** If PII leaks through the `Capture` command into `Modified` events and `accumulated_data`, crypto-shredding is bypassed entirely.
+Events persisted before `CapturePerson` is called for a journey remain in plaintext. This includes any `Modified` events from early journey steps (e.g., a flight search before the user identifies themselves).
 
-### Enforcement strategy
+This is acceptable for two reasons:
 
-1. **Schema validation**: The `SchemaValidator` service already validates `Capture` payloads. We extend the schema to **reject known PII field names** (e.g., `name`, `email`, `phone`, `date_of_birth`, etc.) in `Capture` payloads. This is a blocklist approach.
+1. **Legal**: Before a subject is identified, the data is not linked to a natural person. Under GDPR, it is not personal data until it can be attributed to someone.
 
-2. **API-level guidance**: Documentation and API design make it clear that `CapturePerson` is the only correct path for person data. The `Capture` command is for journey/form data only.
+2. **Practical**: If the search data itself is sensitive (e.g., destination reveals health-related travel), the correct mitigation is to require `CapturePerson` early in the journey — ideally as the first step after `Start`. This is an API-level convention, not an encryption-layer concern.
 
-3. **Review and monitoring**: A query or scheduled job can scan `journey_view.accumulated_data` for patterns that look like PII (email regex, phone patterns) and flag them. This is a detective control, not a preventive one, but it catches mistakes.
-
-The blocklist in the schema validator is the primary enforcement mechanism. It runs inside the aggregate's `handle` method for every `Capture` command, before any events are emitted.
+For maximum safety, journey designs should call `CapturePerson` as early as possible — before any `Capture` commands that include sensitive form data.
 
 ---
 
@@ -524,28 +690,36 @@ The blocklist in the schema validator is the primary enforcement mechanism. It r
 | `test_encrypt_decrypt_round_trip` | PII encrypts and decrypts correctly with a known key |
 | `test_encrypt_produces_different_ciphertext` | Same plaintext with different nonces produces different ciphertext |
 | `test_decrypt_with_wrong_key_fails` | Decryption with an incorrect key returns an error |
-| `test_decrypt_with_deleted_key_returns_redacted` | When key store returns `None`, redacted sentinels are substituted |
-| `test_non_pii_events_pass_through` | `Started`, `Modified`, `Completed`, etc. are not modified by the crypto layer |
+| `test_decrypt_with_deleted_key_returns_redacted` | When key store returns `None`, `PersonCaptured` yields `"[redacted]"` sentinels |
+| `test_decrypt_modified_with_deleted_key_returns_empty` | When key store returns `None`, `Modified` yields `data: {}` |
+| `test_non_pii_events_pass_through` | `Started`, `WorkflowEvaluated`, `StepProgressed`, `Completed` are not modified by the crypto layer |
 | `test_subject_id_remains_plaintext` | The `subject_id` field in an encrypted `PersonCaptured` payload is readable without decryption |
+| `test_step_remains_plaintext` | The `step` field in an encrypted `Modified` payload is readable without decryption |
 | `test_aad_binding` | Ciphertext cannot be moved to a different aggregate/sequence position |
+| `test_modified_before_subject_not_encrypted` | `Modified` events persisted before `CapturePerson` remain plaintext |
+| `test_modified_after_subject_encrypted` | `Modified` events persisted after `CapturePerson` are encrypted |
 
 ### Integration tests
 
 | Test | Description |
 |---|---|
-| `test_persist_and_load_with_encryption` | Write a `PersonCaptured` event through the crypto repository, read it back, verify plaintext matches |
-| `test_shred_then_load` | Write event, delete key, load events, verify redacted sentinels |
-| `test_shred_clears_read_model` | Write event, project to `journey_person`, shred, verify `journey_person` row is gone |
+| `test_persist_and_load_person_captured` | Write a `PersonCaptured` event through the crypto repo, read it back, verify plaintext matches |
+| `test_persist_and_load_modified_with_subject` | Write `PersonCaptured` then `Modified` through the crypto repo, verify `Modified.data` is encrypted in DB but decrypted on load |
+| `test_persist_modified_without_subject` | Write `Modified` without a prior `CapturePerson`, verify it is stored in plaintext |
+| `test_shred_then_load_person_captured` | Write event, delete key, load events, verify redacted sentinels |
+| `test_shred_then_load_modified` | Write `PersonCaptured` + `Modified`, delete key, load events, verify `data: {}` |
+| `test_shred_clears_read_model` | Write events, project to read model, shred, verify `journey_person` rows deleted and `accumulated_data` cleared |
 | `test_projection_receives_plaintext` | Verify the query dispatcher receives decrypted events (not ciphertext) |
-| `test_pii_firewall_rejects_email_in_capture` | `Capture` command with an `email` field in `data` is rejected by schema validation |
-| `test_multiple_journeys_same_subject` | Two journeys with the same `subject_id` — shredding deletes PII from both |
+| `test_multiple_journeys_same_subject` | Two journeys with the same `subject_id` — shredding affects both |
+| `test_legacy_plaintext_events_still_load` | Events persisted before the crypto layer was introduced load correctly (no encrypted markers present → no decryption attempted) |
+| `test_mixed_event_stream` | A stream with pre-subject plaintext `Modified`, `PersonCaptured`, and post-subject encrypted `Modified` all load correctly |
 
 ### Property-based tests
 
 | Test | Description |
 |---|---|
-| `test_event_stream_integrity` | After encrypt → persist → load → decrypt, the full event stream (PII and non-PII events interleaved) is identical to the original |
-| `test_shredding_is_complete` | After shredding, no plaintext PII for the subject exists in any table (events, journey_person, journey_view) |
+| `test_event_stream_integrity` | After encrypt → persist → load → decrypt, the full event stream (all event types interleaved) is identical to the original |
+| `test_shredding_is_complete` | After shredding, no plaintext PII for the subject exists in any table (`events`, `journey_person`, `journey_view`) |
 
 ---
 
@@ -554,38 +728,44 @@ The blocklist in the schema validator is the primary enforcement mechanism. It r
 ### Phase 1: Infrastructure
 
 1. Add `subject_encryption_keys` table (migration)
-2. Add `subject_id` column to `journey_person` (migration)
-3. Implement `KeyStore` trait and `PostgresKeyStore`
-4. Implement `PiiCipher` (AES-256-GCM encryption/decryption)
-5. Implement `CryptoShreddingEventRepository<R>`
+2. Add `journey_subject_mapping` table (migration)
+3. Add `subject_id` column to `journey_person` (migration)
+4. Implement `KeyStore` trait and `PostgresKeyStore`
+5. Implement `SubjectMapping` trait and `PostgresSubjectMapping`
+6. Implement `PiiCipher` (AES-256-GCM encryption/decryption, KEK wrapping)
 
-### Phase 2: Domain changes
+### Phase 2: Crypto repository
 
-6. Add `subject_id` to `CapturePerson` command and `PersonCaptured` event
-7. Add `subject_id` to `Journey` aggregate struct and `apply`
-8. Add `SubjectForgotten` event variant
-9. Update `StructuredJourneyViewRepository` projection to include `subject_id` and handle redacted sentinels
+7. Implement `CryptoShreddingEventRepository<R>` wrapping `PersistedEventRepository`
+8. Implement write-path encryption for `PersonCaptured` events
+9. Implement write-path encryption for `Modified` events (with subject lookup)
+10. Implement read-path decryption and redaction
 
-### Phase 3: Wiring
+### Phase 3: Domain changes
 
-10. Update `config.rs` to wrap `PostgresEventRepository` with `CryptoShreddingEventRepository`
-11. Update `ApplicationState` and type aliases
-12. Add `ForgetSubject` API endpoint
+11. Add `subject_id` to `CapturePerson` command and `PersonCaptured` event
+12. Add `subject_id` to `Journey` aggregate struct and `apply`
+13. Add `SubjectForgotten` event variant
+14. Update `StructuredJourneyViewRepository` projection to include `subject_id` and handle redacted sentinels
 
-### Phase 4: PII firewall
+### Phase 4: Wiring
 
-13. Extend schema validation to reject PII field names in `Capture` payloads
-14. Add monitoring/scanning for PII in `accumulated_data`
+15. Update `config.rs` to wrap `PostgresEventRepository` with `CryptoShreddingEventRepository`
+16. Update `ApplicationState` and type aliases
+17. Add `DELETE /subjects/{subject_id}` API endpoint for shredding
+18. Add shredding logic: delete key, clear read model, emit audit event
 
 ### Phase 5: Backfill (if existing data contains plaintext PII)
 
-15. Write a one-time migration script that:
+19. Write a one-time migration script that:
     - Reads all existing `PersonCaptured` events from the event store
-    - Generates DEKs for each distinct subject
-    - Re-encrypts the payloads in place (this is the one permitted mutation of event data)
+    - Generates DEKs for each distinct subject (or uses a default subject_id derived from email for legacy events that lack one)
+    - Populates `journey_subject_mapping` for all affected journeys
+    - Re-encrypts `PersonCaptured` payloads in place
+    - Re-encrypts `Modified` payloads for journeys with established subjects
     - Populates `subject_id` in `journey_person` rows
 
-This backfill is a sensitive operation — it should be run in a maintenance window with a full database backup taken first.
+This backfill is a sensitive operation — it should be run in a maintenance window with a full database backup taken first. It is the one permitted mutation of historical event data.
 
 ---
 
@@ -603,11 +783,11 @@ The `PiiCipher` abstraction is designed to make this a drop-in change — swap t
 
 ### Extending to other PII event types
 
-The `CryptoShreddingEventRepository` identifies PII events by `event_type` string matching. If new event types containing PII are introduced (e.g., `AddressCaptured`, `PaymentDetailsCaptured`), they simply need to be added to the match list in the crypto layer. The pattern is designed to be repeatable.
+The `CryptoShreddingEventRepository` identifies encryptable events by `event_type` string matching. If new event types containing PII are introduced (e.g., `AddressCaptured`, `PaymentDetailsCaptured`), they simply need to be added to the match list in the crypto layer. The pattern is designed to be repeatable.
 
 ### Right to portability (GDPR Article 20)
 
-The same key-store and crypto infrastructure supports data portability requests. To export all PII for a subject: query all events across all aggregates where `subject_id` matches, decrypt them, and package them in a portable format. The `subject_id` as a cross-journey stable identifier makes this query straightforward.
+The same key-store and crypto infrastructure supports data portability requests. To export all PII for a subject: use `journey_subject_mapping` to find all journeys, load and decrypt all events, and package them in a portable format. The `subject_id` as a cross-journey stable identifier makes this query straightforward.
 
 ### Key rotation
 
@@ -615,4 +795,13 @@ DEK rotation (re-encrypting existing events with a new key) is possible but expe
 
 ### Aggregate snapshots
 
-If snapshots are introduced and the aggregate stores PII (e.g., person name for display), snapshot payloads would also need encryption. The `get_snapshot` method on the crypto repository wrapper is the natural place for this. For now, the aggregate does not store PII (only `subject_id`), so snapshots are clean.
+If snapshots are introduced, the aggregate's serialized state will include `accumulated_data` — which contains PII (the merged form data). Snapshot payloads must be encrypted using the subject's DEK. The `get_snapshot` / `persist` (snapshot path) methods on the crypto repository wrapper are the natural place for this. The `subject_id` on the aggregate (which would be serialized in the snapshot) provides the key lookup handle. If the key has been deleted, the snapshot should be treated as stale and the aggregate rehydrated from events instead.
+
+### Caching and performance
+
+The crypto layer adds latency: key lookups, subject mapping lookups, and AES operations on every event. Mitigations:
+
+- **LRU cache for subject mappings**: Once a journey → subject association is established, it never changes. Cache aggressively.
+- **LRU cache for DEKs**: Cache unwrapped DEKs in memory (with TTL). Use `Zeroizing<Vec<u8>>` to ensure keys are cleared from memory when evicted.
+- **Batch key lookups**: When loading a full event stream for an aggregate, look up the subject mapping once, then use the cached DEK for all events.
+- **Skip non-encrypted events early**: Check for `"encrypted_pii"` / `"encrypted_data"` keys in the JSON before attempting any crypto operations on the read path.
