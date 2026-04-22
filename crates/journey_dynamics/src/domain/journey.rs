@@ -17,6 +17,7 @@ pub struct Journey {
     accumulated_data: Value,
     current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
+    subject_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,14 +58,27 @@ impl Aggregate for Journey {
                     Ok(())
                 }
             }
-            JourneyCommand::CapturePerson { name, email, phone } => {
+            JourneyCommand::CapturePerson {
+                subject_id,
+                name,
+                email,
+                phone,
+            } => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
                 } else if JourneyState::Complete == self.state {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
-                    sink.write(JourneyEvent::PersonCaptured { name, email, phone }, self)
-                        .await;
+                    sink.write(
+                        JourneyEvent::PersonCaptured {
+                            subject_id,
+                            name,
+                            email,
+                            phone,
+                        },
+                        self,
+                    )
+                    .await;
                     Ok(())
                 }
             }
@@ -153,9 +167,8 @@ impl Aggregate for Journey {
             JourneyEvent::WorkflowEvaluated { suggested_actions } => {
                 self.latest_workflow_decision = Some(WorkflowDecisionState { suggested_actions });
             }
-            JourneyEvent::PersonCaptured { .. } => {
-                // Person data is projected to read model tables
-                // No state change needed in the aggregate
+            JourneyEvent::PersonCaptured { subject_id, .. } => {
+                self.subject_id = Some(subject_id);
             }
             JourneyEvent::StepProgressed {
                 from_step: _,
@@ -165,6 +178,9 @@ impl Aggregate for Journey {
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
+            }
+            JourneyEvent::SubjectForgotten { .. } => {
+                // Audit event — no aggregate state change needed
             }
         }
     }
@@ -236,6 +252,11 @@ impl Journey {
     pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
     }
+
+    #[must_use]
+    pub fn subject_id(&self) -> Option<Uuid> {
+        self.subject_id
+    }
 }
 
 impl Default for Journey {
@@ -246,6 +267,7 @@ impl Default for Journey {
             accumulated_data: json!({}),
             current_step: None,
             latest_workflow_decision: None,
+            subject_id: None,
         }
     }
 }
@@ -626,15 +648,18 @@ mod tests {
             create_test_schema_validator(),
         );
         let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::CapturePerson {
+                subject_id,
                 name: "John Doe".to_string(),
                 email: "john@example.com".to_string(),
                 phone: Some("+1234567890".to_string()),
             })
             .then_expect_events(vec![JourneyEvent::PersonCaptured {
+                subject_id,
                 name: "John Doe".to_string(),
                 email: "john@example.com".to_string(),
                 phone: Some("+1234567890".to_string()),
@@ -648,22 +673,27 @@ mod tests {
             create_test_schema_validator(),
         );
         let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let subject_id_2 = Uuid::new_v4();
 
         JourneyTester::with(services)
             .given(vec![
                 JourneyEvent::Started { id },
                 JourneyEvent::PersonCaptured {
+                    subject_id,
                     name: "John Doe".to_string(),
                     email: "john@example.com".to_string(),
                     phone: Some("+1234567890".to_string()),
                 },
             ])
             .when(JourneyCommand::CapturePerson {
+                subject_id: subject_id_2,
                 name: "Jane Smith".to_string(),
                 email: "jane@example.com".to_string(),
                 phone: None,
             })
             .then_expect_events(vec![JourneyEvent::PersonCaptured {
+                subject_id: subject_id_2,
                 name: "Jane Smith".to_string(),
                 email: "jane@example.com".to_string(),
                 phone: None,
@@ -680,6 +710,7 @@ mod tests {
         JourneyTester::with(services)
             .given_no_previous_events()
             .when(JourneyCommand::CapturePerson {
+                subject_id: Uuid::new_v4(),
                 name: "John Doe".to_string(),
                 email: "john@example.com".to_string(),
                 phone: None,
@@ -698,6 +729,7 @@ mod tests {
         JourneyTester::with(services)
             .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
             .when(JourneyCommand::CapturePerson {
+                subject_id: Uuid::new_v4(),
                 name: "John Doe".to_string(),
                 email: "john@example.com".to_string(),
                 phone: None,

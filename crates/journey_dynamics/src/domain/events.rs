@@ -13,6 +13,7 @@ pub enum JourneyEvent {
         data: Value,
     },
     PersonCaptured {
+        subject_id: Uuid,
         name: String,
         email: String,
         phone: Option<String>,
@@ -25,6 +26,9 @@ pub enum JourneyEvent {
         to_step: String,
     },
     Completed,
+    SubjectForgotten {
+        subject_id: Uuid,
+    },
 }
 
 impl DomainEvent for JourneyEvent {
@@ -36,6 +40,7 @@ impl DomainEvent for JourneyEvent {
             JourneyEvent::WorkflowEvaluated { .. } => "WorkflowEvaluated",
             JourneyEvent::StepProgressed { .. } => "StepProgressed",
             JourneyEvent::Completed => "JourneyClosed",
+            JourneyEvent::SubjectForgotten { .. } => "SubjectForgotten",
         };
         event_type.to_string()
     }

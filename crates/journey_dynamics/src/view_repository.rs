@@ -273,20 +273,51 @@ impl StructuredJourneyViewRepository {
                 .await?;
             }
 
-            JourneyEvent::PersonCaptured { name, email, phone } => {
+            JourneyEvent::PersonCaptured {
+                subject_id,
+                name,
+                email,
+                phone,
+            } => {
                 // Insert or update person data in journey_person table
                 sqlx::query(
                     r"
-                    INSERT INTO journey_person (journey_id, name, email, phone)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO journey_person (journey_id, name, email, phone, subject_id)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (journey_id) DO UPDATE
-                    SET name = $2, email = $3, phone = $4, updated_at = CURRENT_TIMESTAMP
+                    SET name = $2, email = $3, phone = $4, subject_id = $5, updated_at = CURRENT_TIMESTAMP
                     ",
                 )
                 .bind(journey_id)
                 .bind(name)
                 .bind(email)
                 .bind(phone)
+                .bind(subject_id)
+                .execute(&self.pool)
+                .await?;
+
+                // Update version and timestamp on journey_view
+                sqlx::query(
+                    r"
+                    UPDATE journey_view
+                    SET version = $1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                    ",
+                )
+                .bind(event.sequence as i64)
+                .bind(journey_id)
+                .execute(&self.pool)
+                .await?;
+            }
+
+            JourneyEvent::SubjectForgotten { subject_id: _ } => {
+                // Delete PII from journey_person table (crypto-shredding / right to be forgotten)
+                sqlx::query(
+                    r"
+                    DELETE FROM journey_person WHERE journey_id = $1
+                    ",
+                )
+                .bind(journey_id)
                 .execute(&self.pool)
                 .await?;
 
@@ -492,6 +523,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: "john@example.com".to_string(),
                     phone: Some("+1234567890".to_string()),
@@ -542,6 +574,7 @@ mod tests {
                 aggregate_id: journey_id_1.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: unique_email.clone(),
                     phone: None,
@@ -564,6 +597,7 @@ mod tests {
                 aggregate_id: journey_id_2.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: unique_email.clone(),
                     phone: Some("+9876543210".to_string()),
@@ -600,6 +634,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: "john@example.com".to_string(),
                     phone: None,
@@ -615,6 +650,7 @@ mod tests {
             aggregate_id: journey_id.to_string(),
             sequence: 3,
             payload: JourneyEvent::PersonCaptured {
+                subject_id: Uuid::new_v4(),
                 name: "Jane Smith".to_string(),
                 email: "jane@example.com".to_string(),
                 phone: Some("+1234567890".to_string()),

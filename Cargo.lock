@@ -1589,6 +1589,7 @@ dependencies = [
  "aes-kw",
  "async-trait",
  "axum",
+ "base64",
  "chrono",
  "cqrs-es",
  "dotenv",
