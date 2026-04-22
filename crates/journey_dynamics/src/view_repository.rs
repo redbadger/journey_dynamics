@@ -381,7 +381,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_journey_started_event() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -407,7 +406,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_journey_full_lifecycle() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -471,7 +469,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_person_captured_event() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -516,7 +513,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_find_by_email() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -580,7 +576,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_person_update() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());

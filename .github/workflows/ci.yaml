@@ -17,6 +17,7 @@ env:
   CI: 1
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
+  DATABASE_URL: postgres://postgres:postgres@localhost:5432/journey_dynamics
 
 jobs:
   ci:
@@ -26,6 +27,21 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name ==
       github.event.pull_request.base.repo.full_name
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: journey_dynamics
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -48,6 +64,19 @@ jobs:
         run: |
           set -euxo pipefail
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: Install sqlx-cli
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo install sqlx-cli \
+            --no-default-features \
+            --features native-tls,postgres \
+            --locked
+
+      - name: Run database migrations
+        shell: bash
+        run: sqlx migrate run
 
       - name: Tests
         shell: bash

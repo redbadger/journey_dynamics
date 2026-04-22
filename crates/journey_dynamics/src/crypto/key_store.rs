@@ -372,7 +372,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_get_or_create_creates_key() {
         let pool = setup_test_db().await;
         let store = PostgresKeyStore::new(pool.clone(), test_cipher());
@@ -391,7 +390,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_get_or_create_is_idempotent() {
         let pool = setup_test_db().await;
         let store = PostgresKeyStore::new(pool.clone(), test_cipher());
@@ -407,7 +405,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_get_key_returns_none_for_unknown_subject() {
         let pool = setup_test_db().await;
         let store = PostgresKeyStore::new(pool, test_cipher());
@@ -418,7 +415,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_delete_key_removes_it() {
         let pool = setup_test_db().await;
         let store = PostgresKeyStore::new(pool.clone(), test_cipher());
@@ -436,7 +432,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_delete_key_is_idempotent() {
         let pool = setup_test_db().await;
         let store = PostgresKeyStore::new(pool.clone(), test_cipher());
@@ -452,7 +447,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_wrap_unwrap_survives_db_roundtrip() {
         // Verifies that the cipher's wrap/unwrap is consistent with what Postgres stores:
         // the bytes written are the same bytes read back, so DEK material is preserved.

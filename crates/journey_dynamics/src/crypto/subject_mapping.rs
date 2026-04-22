@@ -262,7 +262,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_associate_and_get_subject() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());
@@ -284,7 +283,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_get_journeys_for_subject() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());
@@ -318,7 +316,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_postgres_associate_is_idempotent() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());
