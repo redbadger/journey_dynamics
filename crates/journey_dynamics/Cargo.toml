@@ -4,6 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
+aes = "0.8"
+aes-gcm = "0.10"
+aes-kw = { version = "0.2", features = ["alloc"] }
 async-trait = "0.1"
 axum = "0.8.9"
 chrono = "0.4.44"
@@ -23,3 +26,4 @@ thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
 zen-engine = "0.55.0"
+zeroize = "1"

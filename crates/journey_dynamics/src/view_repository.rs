@@ -425,7 +425,7 @@ mod tests {
                 sequence: 2,
                 payload: JourneyEvent::Modified {
                     step: "email".to_string(),
-                    data: json!("test@example.com"),
+                    data: json!({"email": "test@example.com"}),
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -523,6 +523,10 @@ mod tests {
         let journey_id_1 = Uuid::new_v4();
         let journey_id_2 = Uuid::new_v4();
 
+        // Use a unique email per run so leftover rows from previous runs don't
+        // interfere with the count assertion below.
+        let unique_email = format!("john+{}@example.com", Uuid::new_v4());
+
         // Create first journey with person
         let events_1 = vec![
             EventEnvelope {
@@ -536,7 +540,7 @@ mod tests {
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
                     name: "John Doe".to_string(),
-                    email: "john@example.com".to_string(),
+                    email: unique_email.clone(),
                     phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
@@ -545,7 +549,7 @@ mod tests {
 
         repo.dispatch(&journey_id_1.to_string(), &events_1).await;
 
-        // Create second journey with same email
+        // Create second journey with the same unique email
         let events_2 = vec![
             EventEnvelope {
                 aggregate_id: journey_id_2.to_string(),
@@ -558,7 +562,7 @@ mod tests {
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
                     name: "John Doe".to_string(),
-                    email: "john@example.com".to_string(),
+                    email: unique_email.clone(),
                     phone: Some("+9876543210".to_string()),
                 },
                 metadata: std::collections::HashMap::default(),
@@ -567,8 +571,8 @@ mod tests {
 
         repo.dispatch(&journey_id_2.to_string(), &events_2).await;
 
-        // Find journeys by email
-        let journeys = repo.find_by_email("john@example.com").await.unwrap();
+        // Exactly two journeys should be found — no more, no less.
+        let journeys = repo.find_by_email(&unique_email).await.unwrap();
         assert_eq!(journeys.len(), 2);
 
         cleanup_test_journey(&pool, &journey_id_1).await;
