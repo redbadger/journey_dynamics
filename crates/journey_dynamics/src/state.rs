@@ -16,6 +16,12 @@ pub async fn new_application_state() -> ApplicationState {
     // - a simple query that prints events to stdout as they are published
     // - `journey_query` stores the current state of journeys in structured SQL tables
     let pool = default_postgress_pool(std::env::var("DATABASE_URL").unwrap().as_str()).await;
+
+    sqlx::migrate!("../../migrations")
+        .run(&pool)
+        .await
+        .expect("Failed to run database migrations");
+
     let (cqrs, journey_query) = cqrs_framework(pool);
     ApplicationState {
         cqrs,

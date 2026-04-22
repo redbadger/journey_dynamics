@@ -254,11 +254,18 @@ mod tests {
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
         });
-        sqlx::postgres::PgPoolOptions::new()
+        let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(5)
             .connect(&url)
             .await
-            .expect("Failed to connect to database")
+            .expect("Failed to connect to database");
+
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("Failed to run database migrations");
+
+        pool
     }
 
     #[tokio::test]
