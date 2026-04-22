@@ -1,20 +1,31 @@
-use crate::config::cqrs_framework;
-use crate::domain::journey::Journey;
-use crate::view_repository::StructuredJourneyViewRepository;
-use postgres_es::{PostgresCqrs, default_postgress_pool};
 use std::sync::Arc;
+
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use postgres_es::default_postgress_pool;
+
+use crate::config::{CryptoCqrs, cqrs_framework};
+use crate::crypto::cipher::PiiCipher;
+use crate::crypto::key_store::{KeyStore, PostgresKeyStore};
+use crate::crypto::subject_mapping::{PostgresSubjectMapping, SubjectMapping};
+use crate::view_repository::StructuredJourneyViewRepository;
 
 #[derive(Clone)]
 pub struct ApplicationState {
-    pub cqrs: Arc<PostgresCqrs<Journey>>,
+    pub cqrs: Arc<CryptoCqrs>,
     pub journey_query: Arc<StructuredJourneyViewRepository>,
+    pub key_store: Arc<dyn KeyStore>,
+    pub subject_mapping: Arc<dyn SubjectMapping>,
 }
 
+/// # Panics
+///
+/// Panics if:
+/// - `DATABASE_URL` environment variable is not set
+/// - `JOURNEY_KEK` environment variable is not set, is not valid base64, or does not decode
+///   to exactly 32 bytes
+/// - Database migrations fail
 #[allow(clippy::missing_panics_doc)]
 pub async fn new_application_state() -> ApplicationState {
-    // Configure the CQRS framework, backed by a Postgres database, along with two queries:
-    // - a simple query that prints events to stdout as they are published
-    // - `journey_query` stores the current state of journeys in structured SQL tables
     let pool = default_postgress_pool(std::env::var("DATABASE_URL").unwrap().as_str()).await;
 
     sqlx::migrate!("../../migrations")
@@ -22,9 +33,37 @@ pub async fn new_application_state() -> ApplicationState {
         .await
         .expect("Failed to run database migrations");
 
-    let (cqrs, journey_query) = cqrs_framework(pool);
+    // Load the Key Encryption Key (KEK) from the environment.
+    // Generate one with: openssl rand -base64 32
+    let kek_b64 = std::env::var("JOURNEY_KEK")
+        .expect("JOURNEY_KEK must be set (generate with: openssl rand -base64 32)");
+    let kek = BASE64
+        .decode(kek_b64.trim())
+        .expect("JOURNEY_KEK must be valid base64");
+
+    // The KeyStore needs its own PiiCipher instance for wrapping/unwrapping DEKs.
+    let key_store: Arc<dyn KeyStore> = Arc::new(PostgresKeyStore::new(
+        pool.clone(),
+        PiiCipher::new(kek.clone()).expect("JOURNEY_KEK must decode to exactly 32 bytes"),
+    ));
+
+    let subject_mapping: Arc<dyn SubjectMapping> =
+        Arc::new(PostgresSubjectMapping::new(pool.clone()));
+
+    // The CryptoShreddingEventRepository gets its own PiiCipher for field encryption.
+    let cipher = PiiCipher::new(kek).expect("JOURNEY_KEK must decode to exactly 32 bytes");
+
+    let (cqrs, journey_query) = cqrs_framework(
+        pool,
+        Arc::clone(&key_store),
+        Arc::clone(&subject_mapping),
+        cipher,
+    );
+
     ApplicationState {
         cqrs,
         journey_query,
+        key_store,
+        subject_mapping,
     }
 }

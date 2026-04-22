@@ -43,6 +43,7 @@ impl Aggregate for Journey {
 
     // The aggregate logic goes here. Note that this will be the _bulk_ of a CQRS system
     // so expect to use helper functions elsewhere to keep the code clean.
+    #[allow(clippy::too_many_lines)]
     async fn handle(
         &mut self,
         command: Self::Command,
@@ -149,6 +150,15 @@ impl Aggregate for Journey {
                     Err(JourneyError::AlreadyCompleted)
                 } else {
                     sink.write(JourneyEvent::Completed, self).await;
+                    Ok(())
+                }
+            }
+            JourneyCommand::ForgetSubject { subject_id } => {
+                if self.id == Uuid::default() {
+                    Err(JourneyError::NotFound)
+                } else {
+                    sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
+                        .await;
                     Ok(())
                 }
             }
@@ -735,6 +745,44 @@ mod tests {
                 phone: None,
             })
             .then_expect_error(JourneyError::AlreadyCompleted);
+    }
+
+    #[test]
+    fn test_forget_subject() {
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services)
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::PersonCaptured {
+                    subject_id,
+                    name: "Alice".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+            ])
+            .when(JourneyCommand::ForgetSubject { subject_id })
+            .then_expect_events(vec![JourneyEvent::SubjectForgotten { subject_id }]);
+    }
+
+    #[test]
+    fn test_forget_subject_journey_not_found() {
+        let services = JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+        );
+
+        JourneyTester::with(services)
+            .given_no_previous_events()
+            .when(JourneyCommand::ForgetSubject {
+                subject_id: Uuid::new_v4(),
+            })
+            .then_expect_error(JourneyError::NotFound);
     }
 
     #[test]

@@ -18,4 +18,7 @@ pub enum JourneyCommand {
         phone: Option<String>,
     },
     Complete,
+    ForgetSubject {
+        subject_id: Uuid,
+    },
 }

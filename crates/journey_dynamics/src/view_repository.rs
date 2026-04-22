@@ -311,21 +311,20 @@ impl StructuredJourneyViewRepository {
             }
 
             JourneyEvent::SubjectForgotten { subject_id: _ } => {
-                // Delete PII from journey_person table (crypto-shredding / right to be forgotten)
-                sqlx::query(
-                    r"
-                    DELETE FROM journey_person WHERE journey_id = $1
-                    ",
-                )
-                .bind(journey_id)
-                .execute(&self.pool)
-                .await?;
+                // Delete PII from journey_person table (crypto-shredding / right to be forgotten).
+                sqlx::query("DELETE FROM journey_person WHERE journey_id = $1")
+                    .bind(journey_id)
+                    .execute(&self.pool)
+                    .await?;
 
-                // Update version and timestamp on journey_view
+                // Clear accumulated_data in journey_view — the underlying Modified events are
+                // now irrecoverable, so the cached merge is stale and must be wiped.
                 sqlx::query(
                     r"
                     UPDATE journey_view
-                    SET version = $1, updated_at = CURRENT_TIMESTAMP
+                    SET accumulated_data = '{}',
+                        version          = $1,
+                        updated_at       = CURRENT_TIMESTAMP
                     WHERE id = $2
                     ",
                 )
