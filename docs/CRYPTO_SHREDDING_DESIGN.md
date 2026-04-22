@@ -1,4 +1,4 @@
-# GDPR Crypto-Shredding for PII Data
+# General Data Protection Regulation (GDPR) Crypto-Shredding for personally identifiable information (PII) Data
 
 | | |
 |---|---|
@@ -352,14 +352,14 @@ pub trait SubjectMapping: Send + Sync {
 }
 ```
 
-The implementation is backed by the `journey_subject_mapping` table (see [Database Schema Changes](#database-schema-changes)). For performance, the crypto layer should cache mappings in memory with a bounded LRU cache, since `get_subject` is called on every `Modified` event during both persist and load.
+The implementation is backed by the `journey_subject_mapping` table (see [Database Schema Changes](#database-schema-changes)). For performance, the crypto layer should cache mappings in memory with a bounded Least Recently Used (LRU) cache, since `get_subject` is called on every `Modified` event during both persist and load.
 
 ### Encryption Scheme
 
 | Layer | Algorithm | Purpose |
 |---|---|---|
-| **Field encryption (DEK)** | AES-256-GCM | Encrypts PII/data fields within events. Authenticated encryption ensures integrity. |
-| **Key encryption (KEK)** | AES-256-KWP or KMS envelope encryption | Encrypts DEKs at rest in the key store. The KEK is either a static secret from config/environment or, preferably, a key in an external KMS (AWS KMS, GCP KMS, HashiCorp Vault). |
+| **Field encryption (DEK)** | Advanced Encryption Standard (AES)-256-Galois/Counter Mode (GCM) | Encrypts PII/data fields within events. Authenticated encryption ensures integrity. |
+| **Key encryption (KEK)** | AES-256-Key Wrap with Padding (KWP) or Key Management Service (KMS) envelope encryption | Encrypts DEKs at rest in the key store. The KEK is either a static secret from config/environment or, preferably, a key in an external KMS (AWS KMS, GCP KMS, HashiCorp Vault). |
 
 AES-256-GCM requires a unique nonce per encryption operation. The nonce is stored alongside the ciphertext in the event payload. The authenticated additional data (AAD) includes the `aggregate_id` and `sequence` number, binding the ciphertext to its position in the stream and preventing event payload transplantation.
 
@@ -625,7 +625,7 @@ The `events` table schema is unchanged. The `payload` column continues to store 
 DELETE /subjects/{subject_id}
 ```
 
-This is a dedicated endpoint, separate from the journey command/query endpoints. It does not go through the CQRS command handler because it operates across aggregates.
+This is a dedicated endpoint, separate from the journey command/query endpoints. It does not go through the Command Query Responsibility Segregation (CQRS) command handler because it operates across aggregates.
 
 ### Sequence
 
@@ -802,6 +802,6 @@ If snapshots are introduced, the aggregate's serialized state will include `accu
 The crypto layer adds latency: key lookups, subject mapping lookups, and AES operations on every event. Mitigations:
 
 - **LRU cache for subject mappings**: Once a journey → subject association is established, it never changes. Cache aggressively.
-- **LRU cache for DEKs**: Cache unwrapped DEKs in memory (with TTL). Use `Zeroizing<Vec<u8>>` to ensure keys are cleared from memory when evicted.
+- **LRU cache for DEKs**: Cache unwrapped DEKs in memory (with Time to Live (TTL)). Use `Zeroizing<Vec<u8>>` to ensure keys are cleared from memory when evicted.
 - **Batch key lookups**: When loading a full event stream for an aggregate, look up the subject mapping once, then use the cached DEK for all events.
 - **Skip non-encrypted events early**: Check for `"encrypted_pii"` / `"encrypted_data"` keys in the JSON before attempting any crypto operations on the read path.

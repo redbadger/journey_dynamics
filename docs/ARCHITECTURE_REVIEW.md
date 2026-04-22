@@ -6,7 +6,7 @@
 | **Language** | Rust |
 | **Repository** | `journey_dynamics` |
 | **Date** | February 2026 |
-| **Status** | Draft for ARB Review |
+| **Status** | Draft for Architectural Review Board (ARB) Review |
 
 ---
 
@@ -17,7 +17,7 @@
 3. [Architectural Overview](#architectural-overview)
 4. [Key Architectural Decisions](#key-architectural-decisions)
    - [Event Sourcing](#1-event-sourcing)
-   - [CQRS](#2-cqrs-command-query-responsibility-segregation)
+   - [Command Query Responsibility Segregation (CQRS)](#2-cqrs-command-query-responsibility-segregation)
    - [GoRules Decision Engine](#3-gorules-zen-decision-engine)
    - [Rust](#4-rust-as-implementation-language)
 5. [Domain Model](#domain-model)
