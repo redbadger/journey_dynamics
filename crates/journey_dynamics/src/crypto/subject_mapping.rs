@@ -269,6 +269,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "journey_subject_mapping table removed in Phase 1; whole module deleted in Phase 3"]
     async fn test_postgres_associate_and_get_subject() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());
@@ -290,6 +291,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "journey_subject_mapping table removed in Phase 1; whole module deleted in Phase 3"]
     async fn test_postgres_get_journeys_for_subject() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());
@@ -323,6 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "journey_subject_mapping table removed in Phase 1; whole module deleted in Phase 3"]
     async fn test_postgres_associate_is_idempotent() {
         let pool = setup_test_db().await;
         let mapping = PostgresSubjectMapping::new(pool.clone());

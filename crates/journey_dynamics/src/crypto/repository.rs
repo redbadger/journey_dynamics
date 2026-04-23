@@ -251,6 +251,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         let subject_id = Uuid::parse_str(&subject_id_str)
             .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
+        // person_ref is not PII — keep it in plaintext alongside subject_id.
+        let person_ref_str = event.payload[PC_KEY]["person_ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+
         // Record the journey → subject mapping so Modified events can be encrypted.
         self.subject_mapping
             .associate(&event.aggregate_id, &subject_id)
@@ -284,6 +290,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
         event.payload = serde_json::json!({
             "PersonCaptured": {
+                "person_ref":    person_ref_str,
                 "subject_id":    subject_id_str,
                 "encrypted_pii": BASE64.encode(&encrypted.ciphertext),
                 "nonce":         BASE64.encode(&encrypted.nonce),
@@ -373,6 +380,11 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
                 ))
             })?
             .to_string();
+        // person_ref is stored in plaintext — restore it verbatim.
+        let person_ref_str = event.payload[PC_KEY]["person_ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
         let subject_id = Uuid::parse_str(&subject_id_str)
             .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
@@ -406,6 +418,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
                 event.payload = serde_json::json!({
                     "PersonCaptured": {
+                        "person_ref": person_ref_str,
                         "subject_id": subject_id_str,
                         "name":       pii["name"],
                         "email":      pii["email"],
@@ -417,6 +430,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
                 // Key deleted — subject was forgotten. Redact.
                 event.payload = serde_json::json!({
                     "PersonCaptured": {
+                        "person_ref": person_ref_str,
                         "subject_id": subject_id_str,
                         "name":       "[redacted]",
                         "email":      "[redacted]",
@@ -636,6 +650,7 @@ mod tests {
             "1.0".to_string(),
             serde_json::json!({
                 "PersonCaptured": {
+                    "person_ref": "passenger_0",
                     "subject_id": subject_id.to_string(),
                     "name":       "Alice Smith",
                     "email":      "alice@example.com",
@@ -1121,6 +1136,7 @@ mod tests {
 
         match envelope.payload {
             crate::domain::events::JourneyEvent::PersonCaptured {
+                person_ref: _,
                 name,
                 email,
                 phone,

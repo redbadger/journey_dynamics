@@ -31,7 +31,7 @@ impl DecisionEngine for SimpleDecisionEngine {
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut accumulated_data = journey.accumulated_data().clone();
+        let mut accumulated_data = journey.shared_data().clone();
         let keyed_data = serde_json::json!({ current_step: new_data });
         json_patch::merge(&mut accumulated_data, &keyed_data);
         let state = journey.state();
@@ -85,7 +85,7 @@ impl DecisionEngine for GoRulesDecisionEngine {
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut captured_data = journey.accumulated_data().clone();
+        let mut captured_data = journey.shared_data().clone();
         json_patch::merge(&mut captured_data, new_data);
 
         // Build the context for decision engine evaluation
