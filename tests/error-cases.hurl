@@ -47,6 +47,7 @@ POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "CapturePerson": {
+        "person_ref": "lead_booker",
         "subject_id": "{{newUuid}}",
         "name": "Test",
         "email": "test@example.com",

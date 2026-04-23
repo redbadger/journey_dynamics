@@ -1,8 +1,13 @@
-# Complete Flight Booking Journey
-# Run: hurl --test full-flight-booking.hurl
+# Complete Flight Booking Journey with GDPR Crypto-Shredding
+#
+# Demonstrates the key property of the multi-subject design: shredding one
+# subject's DEK destroys only that subject's PII.  All shared journey data
+# (search criteria, flight selections, pricing) survives completely intact.
+#
+# Run: hurl --variable host=http://localhost:3030 --test full-flight-booking_with_shredding.hurl
 
 # ===========================================
-# Step 1: Create a new journey (UUID auto-generated)
+# Step 1: Create a new journey
 # ===========================================
 POST {{host}}/journeys
 
@@ -14,7 +19,7 @@ header "Location" matches "/journeys/[a-f0-9-]+"
 
 
 # ===========================================
-# Step 2: Capture search criteria
+# Step 2: Capture search criteria (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -51,12 +56,12 @@ HTTP 200
 [Asserts]
 jsonpath "$.state" == "InProgress"
 jsonpath "$.current_step" == "search_criteria"
-jsonpath "$.accumulated_data.search.origin" == "JFK"
-jsonpath "$.accumulated_data.search.destination" == "LAX"
+jsonpath "$.shared_data.search.origin" == "JFK"
+jsonpath "$.shared_data.search.destination" == "LAX"
 
 
 # ===========================================
-# Step 4: Select outbound flight
+# Step 4: Select outbound flight (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -82,7 +87,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 5: Select return flight
+# Step 5: Select return flight (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -108,7 +113,8 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture primary contact person
+# Step 6: Capture lead booker identity (PII — encrypted at rest)
+# Capture the subject_id so we can shred it later.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -116,6 +122,7 @@ Content-Type: application/json
 variable: subject_id={{newUuid}}
 {
     "CapturePerson": {
+        "person_ref": "passenger_0",
         "subject_id": "{{subject_id}}",
         "name": "Alice Johnson",
         "email": "alice.johnson@email.com",
@@ -127,7 +134,107 @@ HTTP 204
 
 
 # ===========================================
-# Step 7: Capture passenger details
+# Step 7: Capture lead booker PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_0",
+        "data": {
+            "firstName": "Alice",
+            "lastName": "Johnson",
+            "dateOfBirth": "1985-06-15",
+            "passportNumber": "AB123456",
+            "passengerType": "adult"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 8: Capture passenger 1 identity (PII — encrypted under a different DEK)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePerson": {
+        "person_ref": "passenger_1",
+        "subject_id": "{{newUuid}}",
+        "name": "Bob Johnson",
+        "email": "bob.johnson@email.com",
+        "phone": null
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 9: Capture passenger 1 PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_1",
+        "data": {
+            "firstName": "Bob",
+            "lastName": "Johnson",
+            "dateOfBirth": "1983-09-22",
+            "passportNumber": "CD789012",
+            "passengerType": "adult"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 10: Capture passenger 2 identity (PII — encrypted under a different DEK)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePerson": {
+        "person_ref": "passenger_2",
+        "subject_id": "{{newUuid}}",
+        "name": "Charlie Johnson",
+        "email": "charlie.johnson@email.com",
+        "phone": null
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 11: Capture passenger 2 PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_2",
+        "data": {
+            "firstName": "Charlie",
+            "lastName": "Johnson",
+            "dateOfBirth": "2016-03-10",
+            "passengerType": "child"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 12: Signal passengers ready (non-PII workflow signal)
+# The decision engine uses this to advance to seat selection.
+# Actual PII details live in encrypted person slots — never in shared_data.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -136,28 +243,7 @@ Content-Type: application/json
         "step": "passenger_details",
         "data": {
             "booking": {
-                "passengerDetails": [
-                    {
-                        "passengerType": "adult",
-                        "firstName": "Alice",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "1985-06-15",
-                        "passportNumber": "AB123456"
-                    },
-                    {
-                        "passengerType": "adult",
-                        "firstName": "Bob",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "1983-09-22",
-                        "passportNumber": "CD789012"
-                    },
-                    {
-                        "passengerType": "child",
-                        "firstName": "Charlie",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "2016-03-10"
-                    }
-                ]
+                "passengersReady": 3
             }
         }
     }
@@ -167,7 +253,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 8: Select seats
+# Step 13: Select seats (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -190,7 +276,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 9: Add extras/ancillaries
+# Step 14: Add extras / ancillaries (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -213,7 +299,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 10: Payment
+# Step 15: Payment (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -243,7 +329,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 11: Complete the journey
+# Step 16: Complete the journey
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -255,32 +341,47 @@ HTTP 204
 
 
 # ===========================================
-# Step 12: Verify final state
+# Step 17: Verify final state before shredding
+# All shared_data is visible; PII is in encrypted person slots.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
 jsonpath "$.state" == "Complete"
-jsonpath "$.accumulated_data.search.origin" == "JFK"
-jsonpath "$.accumulated_data.search.destination" == "LAX"
-jsonpath "$.accumulated_data.booking.pricing.totalPrice" == 759.98
-jsonpath "$.accumulated_data.booking.payment.transaction_id" == "txn_abc123xyz"
+jsonpath "$.shared_data.search.origin" == "JFK"
+jsonpath "$.shared_data.search.destination" == "LAX"
+jsonpath "$.shared_data.booking.pricing.totalPrice" == 759.98
+jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
+
 
 # ===========================================
-# Step 13: Shred
+# Step 18: GDPR erasure — shred passenger_0's DEK
+# This permanently destroys Alice's PersonCaptured and PersonDetailsUpdated
+# event payloads.  All other passengers' data and all shared_data survive.
 # ===========================================
-
 DELETE {{host}}/subjects/{{subject_id}}
 
 HTTP 204
 
 
 # ===========================================
-# Step 14: Verify journey is redacted
+# Step 19: Verify journey after shredding
+#
+# KEY ASSERTION: shared_data is completely intact.
+# Search criteria, flight selections, pricing, and booking reference all
+# survive because they were never PII and were never encrypted.
+#
+# Alice's person slot (passenger_0) is now a tombstone in journey_person
+# (forgotten = true, all fields nulled).  Bob and Charlie's slots are
+# unaffected — their DEKs were not deleted.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
-jsonpath "$.accumulated_data" isEmpty
+jsonpath "$.state" == "Complete"
+jsonpath "$.shared_data.search.origin" == "JFK"
+jsonpath "$.shared_data.search.destination" == "LAX"
+jsonpath "$.shared_data.booking.pricing.totalPrice" == 759.98
+jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
