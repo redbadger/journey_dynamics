@@ -207,12 +207,22 @@ impl Aggregate for Journey {
 
             JourneyCommand::ForgetSubject { subject_id } => {
                 if self.id == Uuid::default() {
-                    Err(JourneyError::NotFound)
-                } else {
+                    return Err(JourneyError::NotFound);
+                }
+                // Only emit SubjectForgotten if the subject has at least one
+                // non-forgotten slot in this journey.  This makes the shredding
+                // endpoint idempotent: a second erasure request for the same
+                // subject (or one issued after the journey is already complete)
+                // does not produce a duplicate audit event.
+                let needs_forgetting = self
+                    .persons
+                    .values()
+                    .any(|slot| slot.subject_id == subject_id && !slot.forgotten);
+                if needs_forgetting {
                     sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
                         .await;
-                    Ok(())
                 }
+                Ok(())
             }
         }
     }
@@ -987,6 +997,56 @@ mod tests {
             ])
             .when(JourneyCommand::ForgetSubject { subject_id })
             .then_expect_events(vec![JourneyEvent::SubjectForgotten { subject_id }]);
+    }
+
+    #[test]
+    fn test_forget_subject_already_forgotten_is_noop() {
+        // A second ForgetSubject for the same subject must not emit another
+        // SubjectForgotten event — shredding is idempotent.
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id,
+                    name: "Alice Smith".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+                // The subject was already forgotten in a prior shredding call.
+                JourneyEvent::SubjectForgotten { subject_id },
+            ])
+            .when(JourneyCommand::ForgetSubject { subject_id })
+            .then_expect_events(vec![]);
+    }
+
+    #[test]
+    fn test_forget_subject_for_subject_not_in_journey_is_noop() {
+        // ForgetSubject for a subject that never appeared in this journey
+        // must not emit SubjectForgotten.
+        let id = Uuid::new_v4();
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id: subject_a,
+                    name: "Alice Smith".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+            ])
+            // subject_b has no slot in this journey.
+            .when(JourneyCommand::ForgetSubject {
+                subject_id: subject_b,
+            })
+            .then_expect_events(vec![]);
     }
 
     #[test]
