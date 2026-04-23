@@ -4,7 +4,7 @@
 # ===========================================
 # Step 1: Create a new journey (UUID auto-generated)
 # ===========================================
-POST http://localhost:3030/journeys
+POST {{host}}/journeys
 
 HTTP 201
 [Captures]
@@ -16,7 +16,7 @@ header "Location" matches "/journeys/[a-f0-9-]+"
 # ===========================================
 # Step 2: Capture search criteria
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -45,7 +45,7 @@ HTTP 204
 # ===========================================
 # Step 3: Verify search criteria captured
 # ===========================================
-GET http://localhost:3030/journeys/{{journey_id}}
+GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
@@ -58,7 +58,7 @@ jsonpath "$.accumulated_data.search.destination" == "LAX"
 # ===========================================
 # Step 4: Select outbound flight
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -84,7 +84,7 @@ HTTP 204
 # ===========================================
 # Step 5: Select return flight
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -110,7 +110,7 @@ HTTP 204
 # ===========================================
 # Step 6: Capture passenger details
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -150,7 +150,7 @@ HTTP 204
 # ===========================================
 # Step 7: Capture primary contact person
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "CapturePerson": {
@@ -167,7 +167,7 @@ HTTP 204
 # ===========================================
 # Step 8: Select seats
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -190,7 +190,7 @@ HTTP 204
 # ===========================================
 # Step 9: Add extras/ancillaries
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -213,7 +213,7 @@ HTTP 204
 # ===========================================
 # Step 10: Payment
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {
@@ -243,7 +243,7 @@ HTTP 204
 # ===========================================
 # Step 11: Complete the journey
 # ===========================================
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Complete": null
@@ -255,7 +255,7 @@ HTTP 204
 # ===========================================
 # Step 12: Verify final state
 # ===========================================
-GET http://localhost:3030/journeys/{{journey_id}}
+GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]

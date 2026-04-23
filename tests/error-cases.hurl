@@ -4,7 +4,7 @@
 # ===========================================
 # Error: Query non-existent journey
 # ===========================================
-GET http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000
+GET {{host}}/journeys/00000000-0000-0000-0000-000000000000
 
 HTTP 404
 
@@ -12,7 +12,7 @@ HTTP 404
 # ===========================================
 # Error: Capture on non-existent journey
 # ===========================================
-POST http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000
+POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "Capture": {
@@ -29,7 +29,7 @@ body contains "not found"
 # ===========================================
 # Error: Complete non-existent journey
 # ===========================================
-POST http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000
+POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "Complete": null
@@ -43,7 +43,7 @@ body contains "not found"
 # ===========================================
 # Error: CapturePerson on non-existent journey
 # ===========================================
-POST http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000
+POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "CapturePerson": {
@@ -62,7 +62,7 @@ body contains "not found"
 # ===========================================
 # Error: Invalid JSON command
 # ===========================================
-POST http://localhost:3030/journeys/00000000-0000-0000-0000-000000000001
+POST {{host}}/journeys/00000000-0000-0000-0000-000000000001
 Content-Type: application/json
 {
     "InvalidCommand": {}

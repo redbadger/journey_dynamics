@@ -1,7 +1,7 @@
 # Capture step data on an existing journey
-# Run: hurl --variable journey_id=YOUR_UUID 02-capture-data.hurl
+# Run: hurl --variable host=http://localhost::3030 --variable journey_id=YOUR_UUID 02-capture-data.hurl
 
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "Capture": {

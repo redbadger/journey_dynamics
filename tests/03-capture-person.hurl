@@ -1,7 +1,7 @@
 # Capture person (contact) data
-# Run: hurl --variable journey_id=YOUR_UUID 03-capture-person.hurl
+# Run: hurl --variable host=http://localhost::3030 --variable journey_id=YOUR_UUID 03-capture-person.hurl
 
-POST http://localhost:3030/journeys/{{journey_id}}
+POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "CapturePerson": {

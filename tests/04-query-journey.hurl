@@ -1,7 +1,7 @@
 # Query a journey's current state
-# Run: hurl --variable journey_id=YOUR_UUID 04-query-journey.hurl
+# Run: hurl --variable host=http://localhost::3030 --variable journey_id=YOUR_UUID 04-query-journey.hurl
 
-GET http://localhost:3030/journeys/{{journey_id}}
+GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
