@@ -47,6 +47,13 @@
             "null"
           ]
         },
+        "hasUnaccompaniedMinors": {
+          "description": "Set to `true` by the application when any passenger is an unaccompanied minor.\nDrives the decision engine to the unaccompanied-minor-services step.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "insurance": {
           "anyOf": [
             {
@@ -63,14 +70,14 @@
             "null"
           ]
         },
-        "passengerDetails": {
+        "passengersReady": {
+          "description": "Number of passengers whose PII details have been submitted via `CapturePersonDetails`.\nSet by the application after capturing each passenger's details; used by the decision\nengine to determine when to advance to seat selection.",
           "type": [
-            "array",
+            "integer",
             "null"
           ],
-          "items": {
-            "$ref": "#/$defs/PassengerDetail"
-          }
+          "format": "uint32",
+          "minimum": 0
         },
         "payment": {
           "anyOf": [
@@ -350,51 +357,6 @@
         "adults",
         "children",
         "infants"
-      ]
-    },
-    "PassengerDetail": {
-      "type": "object",
-      "properties": {
-        "dateOfBirth": {
-          "type": "string"
-        },
-        "firstName": {
-          "type": "string",
-          "minLength": 1
-        },
-        "lastName": {
-          "type": "string",
-          "minLength": 1
-        },
-        "nationality": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "passengerType": {
-          "$ref": "#/$defs/PassengerType"
-        },
-        "passportNumber": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "firstName",
-        "lastName",
-        "dateOfBirth",
-        "passengerType"
-      ]
-    },
-    "PassengerType": {
-      "type": "string",
-      "enum": [
-        "adult",
-        "child",
-        "infant"
       ]
     },
     "Payment": {

@@ -1,47 +1,69 @@
 # Capturing Person Data in Journeys
 
-This guide explains how to capture structured personally identifiable information (PII) — name, email, and phone — in journeys using the
-`CapturePerson` command, how the `subject_id` field ties a person's identity across journeys,
+This guide explains how to capture personally identifiable information (PII) for one or more
+data subjects within a journey, how `person_ref` ties a slot to a subject across the journey,
 and what to expect from the encryption and crypto-shredding layer.
+
+---
 
 ## Overview
 
-The `CapturePerson` command captures a real person's identity into a journey. When executed it:
+Two commands capture PII. Neither triggers workflow evaluation — only `Capture` does that.
 
-1. Validates the journey is in a started (not completed) state
-2. Emits a `PersonCaptured` event carrying the person's PII and their `subject_id`
-3. Persists the event to the event store — **PII fields are encrypted at rest** (see
-   [CRYPTO_SHREDDING_DESIGN.md](./CRYPTO_SHREDDING_DESIGN.md) for full details)
-4. Projects the decrypted data into the `journey_person` table for efficient querying
+| Command | Purpose | Event emitted | Encrypted? |
+|---|---|---|---|
+| `CapturePerson` | Register or update a person's identity fields (name, email, phone) in a named slot | `PersonCaptured` | ✅ name, email, phone |
+| `CapturePersonDetails` | Capture free-form PII details (passport, DoB, nationality, …) for an existing slot | `PersonDetailsUpdated` | ✅ entire `data` blob |
 
-## The `subject_id` Field
+Both commands require `person_ref`, a client-assigned slot name that is **not PII** and is
+stored in plaintext. `CapturePerson` must be called before `CapturePersonDetails` for the same
+`person_ref`.
 
-`subject_id` is a stable, caller-supplied `Uuid` that identifies the **data subject** — the real
-person — independently of any individual journey.
+---
+
+## The `person_ref` Field
+
+`person_ref` is a journey-local string that names a slot within the journey. Examples:
+`"lead_booker"`, `"passenger_0"`, `"passenger_1"`.
 
 | Property | Details |
 |---|---|
 | **Who supplies it** | The caller (your application layer or API client) |
-| **When to create it** | Once per person, at account creation or first contact; reuse it for every subsequent journey |
-| **Why it matters** | One `subject_id` may span many journeys. A single `DELETE /subjects/{subject_id}` call shreds that person's PII across **all** of their journeys simultaneously |
-| **Format** | Standard UUID v4 |
+| **Scope** | Local to a single journey — the same string in two different journeys refers to two unrelated slots |
+| **Format** | Any non-empty string; use a consistent convention (e.g. `"passenger_N"`) |
+| **PII?** | No — stored in plaintext in the event store |
 
-The `subject_id` is stored in both the `journey_person` read-model table and the
-`journey_subject_mapping` table (maintained by the crypto layer). It is also embedded in every
-`PersonCaptured` event so the aggregate and projections can reference it.
+---
+
+## The `subject_id` Field
+
+`subject_id` is supplied on `CapturePerson` and identifies the **data subject** — the real
+person — independently of any individual journey or slot.
+
+| Property | Details |
+|---|---|
+| **Who supplies it** | The caller (from your identity system) |
+| **When to create it** | Once per person, at account creation or first contact; reuse it for every subsequent journey |
+| **Why it matters** | One `subject_id` may span many journeys and many slots. A single `DELETE /subjects/{subject_id}` call shreds that person's PII across **all** of their journeys simultaneously |
+| **Format** | Standard UUID v4 |
+| **PII?** | No — stored in plaintext; used as the DEK lookup key |
+
+---
 
 ## Rust Usage
 
 ```rust
 use journey_dynamics::domain::commands::JourneyCommand;
+use serde_json::json;
 use uuid::Uuid;
 
 let subject_id = Uuid::new_v4(); // generate once per person; reuse across journeys
 
-// Capture person with phone number
+// 1. Register the person's identity in a named slot.
 cqrs.execute(
     &journey_id.to_string(),
     JourneyCommand::CapturePerson {
+        person_ref: "lead_booker".to_string(),
         subject_id,
         name: "Alice Johnson".to_string(),
         email: "alice.johnson@example.com".to_string(),
@@ -49,11 +71,27 @@ cqrs.execute(
     },
 ).await?;
 
-// Capture person without phone number
+// 2. Capture additional PII details for the same slot.
+//    CapturePerson must be called first for the same person_ref.
+cqrs.execute(
+    &journey_id.to_string(),
+    JourneyCommand::CapturePersonDetails {
+        person_ref: "lead_booker".to_string(),
+        data: json!({
+            "dateOfBirth":    "1990-05-15",
+            "passportNumber": "GB123456789",
+            "nationality":    "GB"
+        }),
+    },
+).await?;
+
+// 3. Add a second passenger with a different subject_id.
+let subject_id_2 = Uuid::new_v4();
 cqrs.execute(
     &journey_id.to_string(),
     JourneyCommand::CapturePerson {
-        subject_id,
+        person_ref: "passenger_1".to_string(),
+        subject_id: subject_id_2,
         name: "Bob Smith".to_string(),
         email: "bob.smith@example.com".to_string(),
         phone: None,
@@ -61,15 +99,18 @@ cqrs.execute(
 ).await?;
 ```
 
+---
+
 ## HTTP API
 
-Send a `POST` to `/journeys/{journey_id}` with a `CapturePerson` payload:
+### `CapturePerson`
 
 ```bash
 curl -X POST http://localhost:3030/journeys/{journey_id} \
   -H "Content-Type: application/json" \
   -d '{
     "CapturePerson": {
+      "person_ref": "lead_booker",
       "subject_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
       "name": "Alice Johnson",
       "email": "alice.johnson@example.com",
@@ -78,21 +119,81 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
   }'
 ```
 
-`subject_id` must be a valid UUID. Generate it in your identity layer and keep it stable for the
-lifetime of the person's relationship with your system.
+`person_ref` must be unique within the journey for each data subject. Calling `CapturePerson`
+again with the same `person_ref` and the same `subject_id` updates the identity fields
+(idempotent). Calling it with the same `person_ref` but a **different** `subject_id` returns
+an error (`PersonRefConflict`).
+
+### `CapturePersonDetails`
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "CapturePersonDetails": {
+      "person_ref": "lead_booker",
+      "data": {
+        "dateOfBirth":    "1990-05-15",
+        "passportNumber": "GB123456789",
+        "nationality":    "GB"
+      }
+    }
+  }'
+```
+
+`CapturePersonDetails` does not include `subject_id` — it is looked up automatically from the
+slot created by the prior `CapturePerson` call. If `person_ref` does not exist,
+`PersonNotFound` is returned.
+
+Multiple `CapturePersonDetails` calls for the same `person_ref` are allowed; the `data` is
+**merged** (JSON merge-patch) into the slot's existing details on each call.
+
+---
 
 ## PII Encryption at Rest
 
-All three PII fields (`name`, `email`, `phone`) in every `PersonCaptured` event are **encrypted
-before being written to the event store** using Advanced Encryption Standard 256-bit Galois/Counter Mode (AES-256-GCM) with a per-subject Data Encryption
-Key (DEK). The `journey_person` read-model table stores the projected plaintext (decrypted on the
-way out of the event store), but the event log itself never contains plaintext PII.
+### `PersonCaptured` events
 
-`Modified` events emitted after a `CapturePerson` on the same journey are also encrypted using the
-same subject DEK.
+`name`, `email`, and `phone` are serialised into a single JSON blob and encrypted with
+AES-256-GCM before being written to the event store. The `person_ref` and `subject_id` remain
+in plaintext so the read path can locate the correct DEK without decrypting anything first.
 
-See [CRYPTO_SHREDDING_DESIGN.md](./CRYPTO_SHREDDING_DESIGN.md) for the full design: key
-management, authenticated additional data (AAD) binding, the `CryptoShreddingEventRepository` wrapper, and the shredding endpoint.
+Stored event payload:
+
+```json
+{
+  "PersonCaptured": {
+    "person_ref":    "lead_booker",
+    "subject_id":    "a1b2c3d4-...",
+    "encrypted_pii": "<base64-ciphertext>",
+    "nonce":         "<base64-nonce>"
+  }
+}
+```
+
+### `PersonDetailsUpdated` events
+
+The entire `data` field is encrypted under the same subject's DEK. `person_ref` and
+`subject_id` remain in plaintext.
+
+Stored event payload:
+
+```json
+{
+  "PersonDetailsUpdated": {
+    "person_ref":     "lead_booker",
+    "subject_id":     "a1b2c3d4-...",
+    "encrypted_data": "<base64-ciphertext>",
+    "nonce":          "<base64-nonce>"
+  }
+}
+```
+
+### `Modified` events
+
+`Modified` events carry only shared, non-PII journey data and are **never** encrypted.
+
+---
 
 ## Database Schema
 
@@ -101,45 +202,52 @@ management, authenticated additional data (AAD) binding, the `CryptoShreddingEve
 ```sql
 CREATE TABLE journey_person
 (
-    id          SERIAL      NOT NULL PRIMARY KEY,
-    journey_id  UUID        NOT NULL REFERENCES journey_view(id) ON DELETE CASCADE,
-    subject_id  UUID,
-    name        TEXT        NOT NULL,
-    email       TEXT        NOT NULL,
-    phone       TEXT,
-    created_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at  TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (journey_id)
+    journey_id  UUID      NOT NULL REFERENCES journey_view(id) ON DELETE CASCADE,
+    person_ref  TEXT      NOT NULL,
+    subject_id  UUID      NOT NULL,
+    name        TEXT,                         -- nulled on SubjectForgotten
+    email       TEXT,                         -- nulled on SubjectForgotten
+    phone       TEXT,                         -- nulled on SubjectForgotten
+    details     JSONB     NOT NULL DEFAULT '{}', -- cleared on SubjectForgotten
+    forgotten   BOOLEAN   NOT NULL DEFAULT FALSE,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (journey_id, person_ref)
 );
 
-CREATE INDEX idx_journey_person_journey_id ON journey_person(journey_id);
-CREATE INDEX idx_journey_person_email      ON journey_person(email);
-CREATE INDEX idx_journey_person_subject_id ON journey_person(subject_id);
+CREATE INDEX idx_journey_person_subject_id ON journey_person (subject_id);
 ```
 
-`subject_id` is nullable to remain compatible with legacy rows captured before crypto-shredding
-support was introduced.
+Multiple rows per journey — one per `person_ref`. Shredding one subject nulls only that
+subject's row; all other rows and the journey's shared data are untouched.
+
+---
 
 ## Querying Person Data
 
 All query methods live on `StructuredJourneyViewRepository`.
 
-### `load_person` — get the person for a specific journey
+### `load_persons` — all person slots for a journey
 
 ```rust
 let repo = StructuredJourneyViewRepository::new(pool);
 
-if let Some(person) = repo.load_person(&journey_id).await? {
-    println!("Name:  {}", person.name);
-    println!("Email: {}", person.email);
-    println!("Phone: {:?}", person.phone);
+let persons = repo.load_persons(&journey_id).await?;
+for person in &persons {
+    if person.forgotten {
+        println!("{}: [forgotten]", person.person_ref);
+    } else {
+        println!(
+            "{}: {} <{}>",
+            person.person_ref,
+            person.name.as_deref().unwrap_or(""),
+            person.email.as_deref().unwrap_or(""),
+        );
+    }
 }
 ```
 
-If the subject's DEK has been deleted (i.e. the person has been forgotten), the projection row is
-also deleted and `load_person` returns `None`.
-
-### `find_by_email` — look up journeys by email address
+### `find_by_email` — look up journeys by email (non-forgotten only)
 
 ```rust
 let journeys = repo.find_by_email("alice.johnson@example.com").await?;
@@ -149,108 +257,83 @@ for journey in journeys {
 }
 ```
 
-### `load_all_persons` — enumerate all known persons
+---
 
-```rust
-let persons = repo.load_all_persons().await?;
+## Business Rules
 
-for person in persons {
-    println!("{} — {} (journey {})", person.name, person.email, person.journey_id);
-}
-```
+- The journey **must be started** before either command can be issued.
+- The journey **must not be completed**.
+- `CapturePersonDetails` requires a prior `CapturePerson` for the same `person_ref` —
+  otherwise `PersonNotFound` is returned.
+- `CapturePerson` with an existing `person_ref` and the **same** `subject_id` is an upsert
+  (updates identity fields).
+- `CapturePerson` with an existing `person_ref` but a **different** `subject_id` returns
+  `PersonRefConflict` — a slot cannot be reassigned to a different subject.
+- There is no hard limit on the number of persons per journey.
+
+---
+
+## After GDPR Shredding
+
+When `DELETE /subjects/{subject_id}` is called:
+
+1. The subject's DEK is hard-deleted from `subject_encryption_keys`.
+2. `PersonCaptured` and `PersonDetailsUpdated` events for that subject become permanently
+   unreadable (ciphertext remains; key is gone).
+3. A `ForgetSubject { subject_id }` command is issued for each affected journey, emitting a
+   `SubjectForgotten { subject_id }` audit event.
+4. All `journey_person` rows for that `subject_id` are nulled (`name`, `email`, `phone`,
+   `details` cleared; `forgotten = TRUE`).
+5. **`journey_view.shared_data` is not modified.** Other persons' rows are not modified.
+
+The shredding operation is **irreversible**.
+
+---
 
 ## Event Flow
 
 ```
-CapturePerson { subject_id, name, email, phone }
+CapturePerson { person_ref, subject_id, name, email, phone }
         │
         ▼
-Journey::handle()  ──validates──▶  journey must be Started, not Completed
+Journey::handle()  ──validates──▶  started, not completed, no person_ref conflict
         │
         ▼
-PersonCaptured { subject_id, name, email, phone }
+PersonCaptured { person_ref, subject_id, name, email, phone }
         │
         ▼
 CryptoShreddingEventRepository::persist()
-  • looks up (or creates) the DEK for subject_id
+  • gets or creates the DEK for subject_id
   • encrypts name/email/phone → encrypted_pii blob
-  • records aggregate_id → subject_id in journey_subject_mapping
+  • person_ref and subject_id stored in plaintext
         │
         ▼
-events table  (payload contains ciphertext, never plaintext PII)
+events table (payload: person_ref + subject_id in plaintext, PII ciphertext)
         │
         ▼ (read path — crypto layer decrypts before events reach projectors)
         │
         ▼
 StructuredJourneyViewRepository::update_view()
-  • upserts journey_person row (with subject_id, plaintext fields)
-  • uses ON CONFLICT (journey_id) DO UPDATE for re-captures
-```
+  • upserts journey_person row on (journey_id, person_ref)
 
-## Business Rules
 
-- The journey **must be started** before `CapturePerson` can be issued.
-- The journey **must not be completed** — attempting to capture person data on a completed journey
-  returns an error.
-- **One person per journey** — enforced by a `UNIQUE (journey_id)` constraint. A second
-  `CapturePerson` on the same journey performs an upsert (updates name/email/phone/subject_id).
-
-## After General Data Protection Regulation (GDPR) Shredding
-
-When `DELETE /subjects/{subject_id}` is called:
-
-1. The subject's DEK is hard-deleted from `subject_encryption_keys`.
-2. A `ForgetSubject { subject_id }` command is issued for each affected journey aggregate,
-   emitting a `SubjectForgotten { subject_id }` event as an audit trail.
-3. All `journey_person` rows for that `subject_id` are deleted.
-4. `journey_view.accumulated_data` is cleared to `{}` for all affected journeys.
-5. Subsequent reads of `PersonCaptured` events in the store return `"[redacted]"` for
-   name/email/phone (the ciphertext is present but the key is gone).
-
-The shredding operation is **irreversible**.
-
-## Complete Flow Example
-
-```rust
-use journey_dynamics::domain::commands::JourneyCommand;
-use uuid::Uuid;
-
-// 1. Start the journey
-let journey_id = Uuid::new_v4();
-cqrs.execute(
-    &journey_id.to_string(),
-    JourneyCommand::Start { id: journey_id },
-).await?;
-
-// 2. Capture person — supply a stable subject_id from your identity system
-let subject_id = Uuid::new_v4();
-cqrs.execute(
-    &journey_id.to_string(),
-    JourneyCommand::CapturePerson {
-        subject_id,
-        name: "Alice Johnson".to_string(),
-        email: "alice.johnson@example.com".to_string(),
-        phone: Some("+1-555-0123".to_string()),
-    },
-).await?;
-
-// 3. Capture step data (will be encrypted because a subject is now associated)
-cqrs.execute(
-    &journey_id.to_string(),
-    JourneyCommand::Capture {
-        step: "preferences".to_string(),
-        data: serde_json::json!({"newsletter": true}),
-    },
-).await?;
-
-// 4. Complete the journey
-cqrs.execute(
-    &journey_id.to_string(),
-    JourneyCommand::Complete,
-).await?;
-
-// 5. Query person data from the read model
-let repo = StructuredJourneyViewRepository::new(pool.clone());
-let person = repo.load_person(&journey_id).await?.unwrap();
-println!("Journey completed for: {} ({})", person.name, person.email);
+CapturePersonDetails { person_ref, data }
+        │
+        ▼
+Journey::handle()  ──looks up──▶  subject_id from persons[person_ref]
+        │
+        ▼
+PersonDetailsUpdated { person_ref, subject_id, data }
+        │
+        ▼
+CryptoShreddingEventRepository::persist()
+  • gets or creates the DEK for subject_id
+  • encrypts data → encrypted_data blob
+        │
+        ▼
+events table
+        │
+        ▼
+StructuredJourneyViewRepository::update_view()
+  • merges data into journey_person.details (JSONB merge)
 ```

@@ -375,13 +375,13 @@
         "rules": [
           {
             "_id": "has-unaccompanied-minors",
-            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
-            "has-minors": "some(capturedData.booking.passengerDetails, (date('now') - date(#.dateOfBirth)) / 31536000 < 18 and #.travelingAlone == true)",
+            "passengers-complete": "capturedData.booking.passengersReady != null and capturedData.booking.passengersReady > 0",
+            "has-minors": "capturedData.booking.hasUnaccompaniedMinors == true",
             "suggested-actions": "['unaccompanied_minor_services']"
           },
           {
             "_id": "passengers-complete",
-            "passengers-complete": "capturedData.booking.passengerDetails != null and all(capturedData.booking.passengerDetails, #.firstName != null and #.lastName != null and #.dateOfBirth != null)",
+            "passengers-complete": "capturedData.booking.passengersReady != null and capturedData.booking.passengersReady > 0",
             "has-minors": "",
             "suggested-actions": "['seat_selection', 'passenger_details']"
           },

@@ -1,10 +1,20 @@
 # General Data Protection Regulation (GDPR) Crypto-Shredding for personally identifiable information (PII) Data
 
+> **⚠️ SUPERSEDED**
+>
+> This document describes the original single-subject crypto-shredding design.
+> It has been superseded by [MULTI_SUBJECT_DESIGN.md](./MULTI_SUBJECT_DESIGN.md),
+> which extends the model to support multiple independent data subjects per journey
+> and eliminates the `journey_subject_mapping` table.
+>
+> The implementation reflects the new design. This document is retained for
+> historical reference only.
+
 | | |
 |---|---|
 | **Service** | Journey Dynamics |
 | **Feature** | Crypto-shredding for GDPR right-to-erasure |
-| **Status** | Design — ready for review |
+| **Status** | Superseded — see [MULTI_SUBJECT_DESIGN.md](./MULTI_SUBJECT_DESIGN.md) |
 
 ---
 
