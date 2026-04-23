@@ -87,7 +87,13 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
           "tripType": "round-trip",
           "origin": "LHR",
           "destination": "JFK",
-          "departureDate": "2025-08-15"
+          "departureDate": "2025-08-15",
+          "passengers": {
+            "total":    1,
+            "adults":   1,
+            "children": 0,
+            "infants":  0
+          }
         }
       }
     }

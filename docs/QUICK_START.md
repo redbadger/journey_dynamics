@@ -148,7 +148,13 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
           "tripType":      "round-trip",
           "origin":        "LHR",
           "destination":   "JFK",
-          "departureDate": "2026-09-01"
+          "departureDate": "2026-09-01",
+          "passengers": {
+            "total":    1,
+            "adults":   1,
+            "children": 0,
+            "infants":  0
+          }
         }
       }
     }
@@ -246,7 +252,13 @@ You should see something like:
       "tripType":      "round-trip",
       "origin":        "LHR",
       "destination":   "JFK",
-      "departureDate": "2026-09-01"
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
     }
   },
   "current_step": "search"
@@ -369,7 +381,13 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
       "tripType":      "round-trip",
       "origin":        "LHR",
       "destination":   "JFK",
-      "departureDate": "2026-09-01"
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
     }
   },
   "current_step": "search"
@@ -473,7 +491,13 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
       "tripType":      "round-trip",
       "origin":        "LHR",
       "destination":   "JFK",
-      "departureDate": "2026-09-01"
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
     }
   },
   "current_step": "search"
@@ -551,9 +575,32 @@ curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID"
 A single journey can contain multiple data subjects — for example, all passengers in a
 flight booking.  Each subject is an independent slot; shredding one leaves all others intact.
 
+**bash / zsh**
+
 ```bash
 # Capture a second passenger in the same journey
 SUBJECT_ID_2=$(uuidgen | tr '[:upper:]' '[:lower:]')
+
+curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"CapturePerson\": {
+      \"person_ref\": \"passenger_1\",
+      \"subject_id\": \"$SUBJECT_ID_2\",
+      \"name\":       \"Bob Jones\",
+      \"email\":      \"bob@example.com\",
+      \"phone\":      null
+    }
+  }"
+
+# Shred only the second passenger — Alice's data and all shared_data survive
+curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID_2"
+```
+
+**fish**
+
+```fish
+set SUBJECT_ID_2 (uuidgen | tr '[:upper:]' '[:lower:]')
 
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
