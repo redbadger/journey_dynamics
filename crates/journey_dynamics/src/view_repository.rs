@@ -1,28 +1,10 @@
 use cqrs_es::{EventEnvelope, Query};
-use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Postgres, Row};
 use uuid::Uuid;
 
 use crate::domain::events::JourneyEvent;
 use crate::domain::journey::Journey;
-use crate::queries::{JourneyState, JourneyView, WorkflowDecisionView};
-
-/// Person data captured during a journey.
-/// One row per `(journey_id, person_ref)` in the `journey_person` table.
-#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
-pub struct PersonView {
-    pub journey_id: Uuid,
-    pub person_ref: String,
-    pub subject_id: Uuid,
-    /// Identity fields — nulled when the subject is forgotten.
-    pub name: Option<String>,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    /// Free-form PII details — cleared to `{}` when the subject is forgotten.
-    pub details: serde_json::Value,
-    /// `true` once a `SubjectForgotten` event has been applied for this subject.
-    pub forgotten: bool,
-}
+use crate::queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView};
 
 /// A structured database view repository for journeys.
 #[derive(Clone)]
@@ -82,12 +64,15 @@ impl StructuredJourneyViewRepository {
             suggested_actions: r.get("suggested_actions"),
         });
 
+        let persons = self.load_persons(journey_id).await?;
+
         Ok(Some(JourneyView {
             id,
             state,
             shared_data,
             current_step,
             latest_workflow_decision,
+            persons,
         }))
     }
 
@@ -461,6 +446,7 @@ impl Query<Journey> for StructuredJourneyViewRepository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use serde_json::json;
     use sqlx::postgres::PgPoolOptions;
 

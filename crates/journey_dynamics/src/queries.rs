@@ -8,6 +8,23 @@ use uuid::Uuid;
 use crate::domain::events::JourneyEvent;
 use crate::domain::journey::Journey;
 
+/// Person data for a single slot within a journey.
+/// One row per `(journey_id, person_ref)` in the `journey_person` table.
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct PersonView {
+    pub journey_id: Uuid,
+    pub person_ref: String,
+    pub subject_id: Uuid,
+    /// Identity fields — nulled when the subject is forgotten.
+    pub name: Option<String>,
+    pub email: Option<String>,
+    pub phone: Option<String>,
+    /// Free-form PII details — cleared to `{}` when the subject is forgotten.
+    pub details: serde_json::Value,
+    /// `true` once a `SubjectForgotten` event has been applied for this subject.
+    pub forgotten: bool,
+}
+
 // Our Journey query using PostgresViewRepository which will serialize and persist
 // our view after it is updated. It provides a `load` method to deserialize the view on request.
 pub type JourneyQuery =
@@ -16,7 +33,7 @@ pub type JourneyQuery =
 /// The view for a Journey query, designed to reflect the complete state
 /// of a journey as stored in the database. This view is updated as events
 /// are committed to the event store.
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct JourneyView {
     /// Unique identifier for the journey
     pub id: Uuid,
@@ -33,6 +50,25 @@ pub struct JourneyView {
 
     /// The latest workflow decision state including available actions
     pub latest_workflow_decision: Option<WorkflowDecisionView>,
+
+    /// All person slots associated with this journey.
+    /// Each slot holds identity fields and free-form PII details encrypted at rest.
+    /// Populated by `StructuredJourneyViewRepository::load`; empty in the in-memory view.
+    #[serde(default)]
+    pub persons: Vec<PersonView>,
+}
+
+impl Default for JourneyView {
+    fn default() -> Self {
+        Self {
+            id: Uuid::default(),
+            state: JourneyState::default(),
+            shared_data: json!({}),
+            current_step: None,
+            latest_workflow_decision: None,
+            persons: Vec::new(),
+        }
+    }
 }
 
 /// Represents the state of a journey in the view
@@ -69,6 +105,8 @@ impl View<Journey> for JourneyView {
 
             // Person events are projected to structured database tables by
             // StructuredJourneyViewRepository; no state change needed here.
+            // Person events are projected to journey_person by StructuredJourneyViewRepository.
+            // The persons field on JourneyView is populated by load(), not from events.
             JourneyEvent::PersonCaptured { .. }
             | JourneyEvent::PersonDetailsUpdated { .. }
             | JourneyEvent::SubjectForgotten { .. } => {}
@@ -119,6 +157,7 @@ mod tests {
         assert_eq!(view.shared_data, json!({}));
         assert!(view.current_step.is_none());
         assert!(view.latest_workflow_decision.is_none());
+        assert!(view.persons.is_empty());
     }
 
     #[test]
@@ -130,6 +169,7 @@ mod tests {
             shared_data: json!({}),
             current_step: None,
             latest_workflow_decision: None,
+            persons: vec![],
         };
 
         let envelope = EventEnvelope {
@@ -156,6 +196,7 @@ mod tests {
             shared_data: json!({"origin": "LHR"}),
             current_step: None,
             latest_workflow_decision: None,
+            persons: vec![],
         };
         let before = view.shared_data.clone();
 
@@ -188,6 +229,7 @@ mod tests {
             shared_data: json!({"origin": "LHR"}),
             current_step: None,
             latest_workflow_decision: None,
+            persons: vec![],
         };
         let before = view.shared_data.clone();
 
@@ -216,6 +258,7 @@ mod tests {
             shared_data: json!({}),
             current_step: None,
             latest_workflow_decision: None,
+            persons: vec![],
         };
 
         let envelope = EventEnvelope {
@@ -250,6 +293,7 @@ mod tests {
             shared_data: json!({}),
             current_step: Some("step1".to_string()),
             latest_workflow_decision: None,
+            persons: vec![],
         };
 
         let envelope = EventEnvelope {
@@ -276,6 +320,7 @@ mod tests {
             shared_data: json!({}),
             current_step: Some("final_step".to_string()),
             latest_workflow_decision: None,
+            persons: vec![],
         };
 
         let envelope = EventEnvelope {
@@ -299,6 +344,7 @@ mod tests {
             shared_data: json!({"origin": "LHR", "destination": "JFK"}),
             current_step: Some("confirmation".to_string()),
             latest_workflow_decision: None,
+            persons: vec![],
         };
         let before_data = view.shared_data.clone();
         let before_step = view.current_step.clone();

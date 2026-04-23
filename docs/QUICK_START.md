@@ -261,14 +261,33 @@ You should see something like:
       }
     }
   },
-  "current_step": "search"
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        "Alice Smith",
+      "email":       "alice@example.com",
+      "phone":       "+44-7700-900000",
+      "details": {
+        "dateOfBirth":    "1990-05-15",
+        "passportNumber": "GB12345678",
+        "nationality":    "GB",
+        "passengerType":  "adult"
+      },
+      "forgotten": false
+    }
+  ]
 }
 ```
 
-`shared_data` contains only the non-PII data from `Capture` commands.  The person's
-name/email/phone live in the `journey_person` table (projected there after decryption) and
-their passport/DoB/nationality are in `journey_person.details`.  Both are encrypted in the
-event store.
+`shared_data` contains only the non-PII data from `Capture` commands.  The `persons` array
+contains every person slot associated with the journey — identity fields from `CapturePerson`
+and free-form details from `CapturePersonDetails`, both decrypted on the read path.  The
+underlying event payloads in the event store are AES-256-GCM ciphertext; what you see here
+is the decrypted projection.
 
 ---
 
@@ -390,13 +409,28 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
       }
     }
   },
-  "current_step": "search"
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        null,
+      "email":       null,
+      "phone":       null,
+      "details":     {},
+      "forgotten":   true
+    }
+  ]
 }
 ```
 
 `shared_data` is completely intact — the search criteria survive because they were never
-encrypted.  The person's slot in `journey_person` is now a tombstone (`forgotten = true`,
-all PII fields null).
+encrypted.  The `persons` array still contains the slot, but it is now a tombstone:
+`forgotten` is `true` and all PII fields (`name`, `email`, `phone`, `details`) are null or
+empty.  The `subject_id` and `person_ref` are retained so the slot remains identifiable for
+audit purposes.
 
 ### 8.3 Verify the event store — ciphertext is still there, key is not
 
@@ -500,12 +534,25 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
       }
     }
   },
-  "current_step": "search"
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        null,
+      "email":       null,
+      "phone":       null,
+      "details":     {},
+      "forgotten":   true
+    }
+  ]
 }
 ```
 
-`state` is now `"Complete"` and `shared_data` is fully intact.  The sentinels applied during
-rehydration were:
+`state` is now `"Complete"`, `shared_data` is fully intact, and `persons` still shows the
+tombstone slot.  The sentinels applied during rehydration were:
 
 - `PersonCaptured` → `name: "[redacted]"`, `email: "[redacted]"`, `phone: null`
 - `PersonDetailsUpdated` → `data: {}`
