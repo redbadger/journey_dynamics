@@ -13,6 +13,46 @@ use crate::{
     command_extractor::CommandExtractor, domain::commands::JourneyCommand, state::ApplicationState,
 };
 
+// Handles GDPR right-to-erasure requests by crypto-shredding the subject's DEK,
+// which permanently renders all encrypted PII irrecoverable, then emits a
+// `SubjectForgotten` audit event on every affected journey.
+pub async fn shred_subject(
+    Path(subject_id): Path<Uuid>,
+    State(state): State<Arc<ApplicationState>>,
+) -> Response {
+    // 1. Find all journeys belonging to this subject before we destroy the key.
+    let journeys = match state.subject_mapping.get_journeys(&subject_id).await {
+        Ok(j) => j,
+        Err(err) => {
+            eprintln!("Error fetching journeys for subject {subject_id}: {err:#?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+    };
+
+    // 2. Crypto-shred: delete the DEK — all ciphertext is now permanently unreadable.
+    if let Err(err) = state.key_store.delete_key(&subject_id).await {
+        eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+
+    // 3. For each affected journey, emit a SubjectForgotten audit event via the
+    //    ForgetSubject command. The view-repository handler for SubjectForgotten
+    //    deletes the journey_person row and clears accumulated_data.
+    for aggregate_id in &journeys {
+        if let Err(err) = state
+            .cqrs
+            .execute(aggregate_id, JourneyCommand::ForgetSubject { subject_id })
+            .await
+        {
+            // The key is already gone so the shredding is complete. Log and continue
+            // so that we still attempt to clean up the remaining journeys.
+            eprintln!("Error emitting SubjectForgotten for journey {aggregate_id}: {err:#?}");
+        }
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
 // Serves as our query endpoint to respond with the materialized `JourneyView`
 // for the requested journey.
 pub async fn query_handler(

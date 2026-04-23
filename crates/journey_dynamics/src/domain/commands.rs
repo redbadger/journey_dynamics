@@ -12,9 +12,13 @@ pub enum JourneyCommand {
         data: Value,
     },
     CapturePerson {
+        subject_id: Uuid,
         name: String,
         email: String,
         phone: Option<String>,
     },
     Complete,
+    ForgetSubject {
+        subject_id: Uuid,
+    },
 }

@@ -2,7 +2,7 @@
 # Server auto-generates UUID when body is empty
 # Run: hurl 01-create-journey.hurl
 
-POST http://localhost:3030/journeys
+POST {{host}}/journeys
 
 HTTP 201
 [Captures]

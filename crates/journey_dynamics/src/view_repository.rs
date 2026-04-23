@@ -273,20 +273,26 @@ impl StructuredJourneyViewRepository {
                 .await?;
             }
 
-            JourneyEvent::PersonCaptured { name, email, phone } => {
+            JourneyEvent::PersonCaptured {
+                subject_id,
+                name,
+                email,
+                phone,
+            } => {
                 // Insert or update person data in journey_person table
                 sqlx::query(
                     r"
-                    INSERT INTO journey_person (journey_id, name, email, phone)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO journey_person (journey_id, name, email, phone, subject_id)
+                    VALUES ($1, $2, $3, $4, $5)
                     ON CONFLICT (journey_id) DO UPDATE
-                    SET name = $2, email = $3, phone = $4, updated_at = CURRENT_TIMESTAMP
+                    SET name = $2, email = $3, phone = $4, subject_id = $5, updated_at = CURRENT_TIMESTAMP
                     ",
                 )
                 .bind(journey_id)
                 .bind(name)
                 .bind(email)
                 .bind(phone)
+                .bind(subject_id)
                 .execute(&self.pool)
                 .await?;
 
@@ -295,6 +301,30 @@ impl StructuredJourneyViewRepository {
                     r"
                     UPDATE journey_view
                     SET version = $1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                    ",
+                )
+                .bind(event.sequence as i64)
+                .bind(journey_id)
+                .execute(&self.pool)
+                .await?;
+            }
+
+            JourneyEvent::SubjectForgotten { subject_id: _ } => {
+                // Delete PII from journey_person table (crypto-shredding / right to be forgotten).
+                sqlx::query("DELETE FROM journey_person WHERE journey_id = $1")
+                    .bind(journey_id)
+                    .execute(&self.pool)
+                    .await?;
+
+                // Clear accumulated_data in journey_view — the underlying Modified events are
+                // now irrecoverable, so the cached merge is stale and must be wiped.
+                sqlx::query(
+                    r"
+                    UPDATE journey_view
+                    SET accumulated_data = '{}',
+                        version          = $1,
+                        updated_at       = CURRENT_TIMESTAMP
                     WHERE id = $2
                     ",
                 )
@@ -366,11 +396,18 @@ mod tests {
             "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
         });
 
-        PgPoolOptions::new()
+        let pool = PgPoolOptions::new()
             .max_connections(5)
             .connect(&database_url)
             .await
-            .expect("Failed to connect to database")
+            .expect("Failed to connect to database");
+
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("Failed to run database migrations");
+
+        pool
     }
 
     async fn cleanup_test_journey(pool: &Pool<Postgres>, journey_id: &Uuid) {
@@ -381,7 +418,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_journey_started_event() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -407,7 +443,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_journey_full_lifecycle() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -425,7 +460,7 @@ mod tests {
                 sequence: 2,
                 payload: JourneyEvent::Modified {
                     step: "email".to_string(),
-                    data: json!("test@example.com"),
+                    data: json!({"email": "test@example.com"}),
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -471,7 +506,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_person_captured_event() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -488,6 +522,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: "john@example.com".to_string(),
                     phone: Some("+1234567890".to_string()),
@@ -516,12 +551,15 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_find_by_email() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
         let journey_id_1 = Uuid::new_v4();
         let journey_id_2 = Uuid::new_v4();
+
+        // Use a unique email per run so leftover rows from previous runs don't
+        // interfere with the count assertion below.
+        let unique_email = format!("john+{}@example.com", Uuid::new_v4());
 
         // Create first journey with person
         let events_1 = vec![
@@ -535,8 +573,9 @@ mod tests {
                 aggregate_id: journey_id_1.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
-                    email: "john@example.com".to_string(),
+                    email: unique_email.clone(),
                     phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
@@ -545,7 +584,7 @@ mod tests {
 
         repo.dispatch(&journey_id_1.to_string(), &events_1).await;
 
-        // Create second journey with same email
+        // Create second journey with the same unique email
         let events_2 = vec![
             EventEnvelope {
                 aggregate_id: journey_id_2.to_string(),
@@ -557,8 +596,9 @@ mod tests {
                 aggregate_id: journey_id_2.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
-                    email: "john@example.com".to_string(),
+                    email: unique_email.clone(),
                     phone: Some("+9876543210".to_string()),
                 },
                 metadata: std::collections::HashMap::default(),
@@ -567,8 +607,8 @@ mod tests {
 
         repo.dispatch(&journey_id_2.to_string(), &events_2).await;
 
-        // Find journeys by email
-        let journeys = repo.find_by_email("john@example.com").await.unwrap();
+        // Exactly two journeys should be found — no more, no less.
+        let journeys = repo.find_by_email(&unique_email).await.unwrap();
         assert_eq!(journeys.len(), 2);
 
         cleanup_test_journey(&pool, &journey_id_1).await;
@@ -576,7 +616,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "Only run with a real database"]
     async fn test_person_update() {
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
@@ -594,6 +633,7 @@ mod tests {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
                 payload: JourneyEvent::PersonCaptured {
+                    subject_id: Uuid::new_v4(),
                     name: "John Doe".to_string(),
                     email: "john@example.com".to_string(),
                     phone: None,
@@ -609,6 +649,7 @@ mod tests {
             aggregate_id: journey_id.to_string(),
             sequence: 3,
             payload: JourneyEvent::PersonCaptured {
+                subject_id: Uuid::new_v4(),
                 name: "Jane Smith".to_string(),
                 email: "jane@example.com".to_string(),
                 phone: Some("+1234567890".to_string()),

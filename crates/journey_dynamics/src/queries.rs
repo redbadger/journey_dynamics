@@ -67,9 +67,10 @@ impl View<Journey> for JourneyView {
                 json_patch::merge(&mut self.accumulated_data, data);
             }
 
-            JourneyEvent::PersonCaptured { .. } => {
-                // Person data is projected to structured database tables
-                // No need to update the view here
+            JourneyEvent::PersonCaptured { .. } | JourneyEvent::SubjectForgotten { .. } => {
+                // Person data is projected to structured database tables.
+                // SubjectForgotten is an audit event.
+                // Neither requires a view state change here.
             }
 
             JourneyEvent::WorkflowEvaluated { suggested_actions } => {

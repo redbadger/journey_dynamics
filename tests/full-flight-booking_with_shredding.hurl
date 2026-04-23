@@ -108,7 +108,26 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture passenger details
+# Step 6: Capture primary contact person
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+[Options]
+variable: subject_id={{newUuid}}
+{
+    "CapturePerson": {
+        "subject_id": "{{subject_id}}",
+        "name": "Alice Johnson",
+        "email": "alice.johnson@email.com",
+        "phone": "+1-555-123-4567"
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 7: Capture passenger details
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -141,23 +160,6 @@ Content-Type: application/json
                 ]
             }
         }
-    }
-}
-
-HTTP 204
-
-
-# ===========================================
-# Step 7: Capture primary contact person
-# ===========================================
-POST {{host}}/journeys/{{journey_id}}
-Content-Type: application/json
-{
-    "CapturePerson": {
-        "subject_id": "{{newUuid}}",
-        "name": "Alice Johnson",
-        "email": "alice.johnson@email.com",
-        "phone": "+1-555-123-4567"
     }
 }
 
@@ -264,3 +266,21 @@ jsonpath "$.accumulated_data.search.origin" == "JFK"
 jsonpath "$.accumulated_data.search.destination" == "LAX"
 jsonpath "$.accumulated_data.booking.pricing.totalPrice" == 759.98
 jsonpath "$.accumulated_data.booking.payment.transaction_id" == "txn_abc123xyz"
+
+# ===========================================
+# Step 13: Shred
+# ===========================================
+
+DELETE {{host}}/subjects/{{subject_id}}
+
+HTTP 204
+
+
+# ===========================================
+# Step 14: Verify journey is redacted
+# ===========================================
+GET {{host}}/journeys/{{journey_id}}
+
+HTTP 200
+[Asserts]
+jsonpath "$.accumulated_data" isEmpty
