@@ -9,7 +9,6 @@ use crate::SimpleLoggingQuery;
 use crate::crypto::cipher::PiiCipher;
 use crate::crypto::key_store::KeyStore;
 use crate::crypto::repository::CryptoShreddingEventRepository;
-use crate::crypto::subject_mapping::SubjectMapping;
 use crate::domain::journey::{Journey, JourneyServices};
 use crate::services::decision_engine::GoRulesDecisionEngine;
 use crate::view_repository::StructuredJourneyViewRepository;
@@ -25,8 +24,8 @@ pub type CryptoCqrs = CqrsFramework<
 
 /// Build the CQRS framework and the journey view repository.
 ///
-/// The caller is responsible for creating the [`PiiCipher`], [`KeyStore`], and
-/// [`SubjectMapping`] so that the same instances can also be held in
+/// The caller is responsible for creating the [`PiiCipher`] and [`KeyStore`] so that
+/// the same instances can also be held in
 /// [`ApplicationState`](crate::state::ApplicationState) for use by the shredding endpoint.
 ///
 /// # Panics
@@ -36,7 +35,6 @@ pub type CryptoCqrs = CqrsFramework<
 pub fn cqrs_framework(
     pool: Pool<Postgres>,
     key_store: Arc<dyn KeyStore>,
-    subject_mapping: Arc<dyn SubjectMapping>,
     cipher: PiiCipher,
 ) -> (Arc<CryptoCqrs>, Arc<StructuredJourneyViewRepository>) {
     let simple_query = SimpleLoggingQuery {};
@@ -61,8 +59,7 @@ pub fn cqrs_framework(
     let services = JourneyServices::new(decision_engine, schema_validator);
 
     let inner = PostgresEventRepository::new(pool);
-    let crypto_repo =
-        CryptoShreddingEventRepository::new(inner, key_store, subject_mapping, cipher);
+    let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher);
     let store = PersistedEventStore::new_event_store(crypto_repo);
 
     (

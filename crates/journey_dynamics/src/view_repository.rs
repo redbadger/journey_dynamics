@@ -176,6 +176,42 @@ impl StructuredJourneyViewRepository {
         .await
     }
 
+    /// Find all journey aggregate IDs that have referenced the given subject.
+    ///
+    /// Queries `PersonCaptured` and `PersonDetailsUpdated` events in the event store directly —
+    /// both carry `subject_id` in plaintext, so no decryption is needed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub async fn find_journeys_by_subject(
+        &self,
+        subject_id: &Uuid,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            r"
+            SELECT DISTINCT aggregate_id
+            FROM events
+            WHERE aggregate_type = 'Journey'
+              AND (
+                (event_type = 'PersonCaptured'
+                 AND payload::jsonb -> 'PersonCaptured' ->> 'subject_id' = $1)
+                OR
+                (event_type = 'PersonDetailsUpdated'
+                 AND payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
+              )
+            ",
+        )
+        .bind(subject_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<String, _>("aggregate_id"))
+            .collect())
+    }
+
     #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
     async fn update_view(
         &self,

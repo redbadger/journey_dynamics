@@ -1,19 +1,22 @@
 //! [`CryptoShreddingEventRepository`] — transparent PII encryption for persisted event streams.
 //!
 //! Wraps any [`PersistedEventRepository`] and intercepts:
-//! - **Write path** (`persist`): encrypts `PersonCaptured` PII fields and `Modified` data fields
-//!   for journeys that have an associated subject.
-//! - **Read path** (`get_events`, `get_last_events`, `stream_events`): decrypts, or redacts when
-//!   the DEK has been deleted (crypto-shredding).
+//! - **Write path** (`persist`): encrypts PII fields in `PersonCaptured` and
+//!   `PersonDetailsUpdated` events under the subject's Data Encryption Key (DEK).
+//! - **Read path** (`get_events`, `get_last_events`, `stream_events`): decrypts, or redacts
+//!   when the DEK has been deleted (crypto-shredding).
+//!
+//! `Modified` events carry only shared, non-PII data and are **never** encrypted.
+//! Each PII event carries its own `subject_id` in plaintext, so the crypto layer is
+//! entirely stateless with respect to journey–subject relationships — no mapping table
+//! is needed.
 //!
 //! # Event-type conventions
 //!
-//! | Variant | `event_type` string | Payload outer key |
-//! |---|---|---|
-//! | `JourneyEvent::PersonCaptured` | `"PersonCaptured"` | `"PersonCaptured"` |
-//! | `JourneyEvent::Modified` | `"JourneyModified"` | `"Modified"` |
-//!
-//! The payload outer key is the serde enum variant name (external tagging).
+//! | Variant                        | `event_type` string      | Payload outer key        |
+//! |--------------------------------|--------------------------|--------------------------|
+//! | `JourneyEvent::PersonCaptured` | `"PersonCaptured"`       | `"PersonCaptured"`       |
+//! | `JourneyEvent::PersonDetailsUpdated` | `"PersonDetailsUpdated"` | `"PersonDetailsUpdated"` |
 
 use std::sync::Arc;
 
@@ -27,17 +30,16 @@ use uuid::Uuid;
 
 use super::cipher::{EncryptedPayload, PiiCipher};
 use super::key_store::KeyStore;
-use super::subject_mapping::SubjectMapping;
 
 // ── Event-type strings (from DomainEvent::event_type()) ───────────────────
 
 const PERSON_CAPTURED: &str = "PersonCaptured";
-const JOURNEY_MODIFIED: &str = "JourneyModified";
+const PERSON_DETAILS_UPDATED: &str = "PersonDetailsUpdated";
 
 // ── Payload outer keys (serde external enum tagging) ──────────────────────
 
 const PC_KEY: &str = "PersonCaptured";
-const MOD_KEY: &str = "Modified";
+const PD_KEY: &str = "PersonDetailsUpdated";
 
 // ── Internal error type ────────────────────────────────────────────────────
 
@@ -55,8 +57,6 @@ enum RepoError {
     Crypto(#[from] super::cipher::CryptoError),
     #[error("Key store error: {0}")]
     KeyStore(#[from] super::key_store::KeyStoreError),
-    #[error("Subject mapping error: {0}")]
-    SubjectMapping(#[from] super::subject_mapping::MappingError),
 }
 
 impl From<RepoError> for PersistenceError {
@@ -179,38 +179,34 @@ impl PersistedEventRepository for InMemoryEventRepository {
 /// PII-bearing event payloads for GDPR crypto-shredding.
 ///
 /// # Write path
-/// - **`PersonCaptured`**: records the journey → subject mapping; encrypts `name`, `email`,
-///   and `phone` into a single `encrypted_pii` blob. `subject_id` is kept in plaintext.
-/// - **`JourneyModified`**: if the journey has an associated subject, encrypts the entire
-///   `data` field. Otherwise the event is stored in plaintext.
-/// - All other events: passed through unmodified.
+///
+/// - **`PersonCaptured`**: encrypts `name`, `email`, and `phone` into a single
+///   `encrypted_pii` blob using AES-256-GCM. `person_ref` and `subject_id` remain
+///   in plaintext so the correct DEK can be located on the read path without
+///   decrypting anything first.
+/// - **`PersonDetailsUpdated`**: encrypts the entire `data` field. `person_ref` and
+///   `subject_id` remain in plaintext.
+/// - All other events (including `Modified`): **passed through unmodified**. `Modified`
+///   events carry only shared, non-PII journey data.
 ///
 /// # Read path
-/// - **Encrypted `PersonCaptured`**: decrypted when the DEK is available; fields redacted
-///   to `"[redacted]"` / `null` when the key has been deleted (subject forgotten).
-/// - **Encrypted `JourneyModified`**: decrypted when the DEK is available; `data` set to `{}`
-///   after shredding.
-/// - Events without an `encrypted_pii` / `encrypted_data` sentinel (legacy plaintext events):
-///   returned unmodified.
+///
+/// - Encrypted events: decrypted when the DEK is present in the key store.
+/// - Encrypted events whose DEK has been deleted (subject forgotten): redacted — PII
+///   fields are replaced with `"[redacted]"` / `null` / `{}`.
+/// - Events without encryption sentinels (plaintext / legacy): returned unmodified.
 pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     pub(crate) inner: R,
     key_store: Arc<dyn KeyStore>,
-    subject_mapping: Arc<dyn SubjectMapping>,
     cipher: Arc<PiiCipher>,
 }
 
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     /// Create a new crypto-shredding repository wrapping `inner`.
-    pub fn new(
-        inner: R,
-        key_store: Arc<dyn KeyStore>,
-        subject_mapping: Arc<dyn SubjectMapping>,
-        cipher: PiiCipher,
-    ) -> Self {
+    pub fn new(inner: R, key_store: Arc<dyn KeyStore>, cipher: PiiCipher) -> Self {
         Self {
             inner,
             key_store,
-            subject_mapping,
             cipher: Arc::new(cipher),
         }
     }
@@ -226,19 +222,22 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             let event = event.clone();
             let event = match event.event_type.as_str() {
                 PERSON_CAPTURED => self.encrypt_person_captured(event).await?,
-                JOURNEY_MODIFIED => self.maybe_encrypt_modified(event).await?,
-                _ => event,
+                PERSON_DETAILS_UPDATED => self.encrypt_person_details_updated(event).await?,
+                _ => event, // Modified and all others are always stored in plaintext.
             };
             out.push(event);
         }
         Ok(out)
     }
 
-    /// Encrypts the PII fields of a `PersonCaptured` event and records the
-    /// journey → subject association.
+    /// Encrypts the PII identity fields (`name`, `email`, `phone`) of a `PersonCaptured`
+    /// event into a single authenticated blob.
     ///
-    /// If `subject_id` is absent from the payload (pre-Phase-3 legacy event),
-    /// the event is returned unmodified.
+    /// `person_ref` and `subject_id` are kept in plaintext so the read path can locate
+    /// the correct DEK without decrypting anything first.
+    ///
+    /// If `subject_id` is absent from the payload (legacy event without a subject), the
+    /// event is returned unmodified.
     async fn encrypt_person_captured(
         &self,
         mut event: SerializedEvent,
@@ -256,12 +255,6 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .as_str()
             .unwrap_or("")
             .to_string();
-
-        // Record the journey → subject mapping so Modified events can be encrypted.
-        self.subject_mapping
-            .associate(&event.aggregate_id, &subject_id)
-            .await
-            .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
         // Get or create the DEK for this subject.
         let dek = self
@@ -300,21 +293,27 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         Ok(event)
     }
 
-    /// Encrypts the `data` field of a `JourneyModified` event if the journey has an
-    /// associated subject. Events without a mapping are stored in plaintext.
-    async fn maybe_encrypt_modified(
+    /// Encrypts the `data` field of a `PersonDetailsUpdated` event.
+    ///
+    /// `person_ref` and `subject_id` are kept in plaintext. If `subject_id` is absent
+    /// (legacy event), the event is returned unmodified.
+    async fn encrypt_person_details_updated(
         &self,
         mut event: SerializedEvent,
     ) -> Result<SerializedEvent, PersistenceError> {
-        let subject_id = self
-            .subject_mapping
-            .get_subject(&event.aggregate_id)
-            .await
+        // subject_id must be present. If missing (legacy event), pass through unmodified.
+        let subject_id_str = match event.payload[PD_KEY]["subject_id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return Ok(event),
+        };
+        let subject_id = Uuid::parse_str(&subject_id_str)
             .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
-        let Some(subject_id) = subject_id else {
-            return Ok(event); // No subject yet — pass through.
-        };
+        // person_ref is not PII — keep in plaintext.
+        let person_ref_str = event.payload[PD_KEY]["person_ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
 
         let dek = self
             .key_store
@@ -322,20 +321,18 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .await
             .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
-        let step = event.payload[MOD_KEY]["step"].clone();
-        let data = event.payload[MOD_KEY]["data"].clone();
+        let data = event.payload[PD_KEY]["data"].clone();
 
         let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
         let plaintext = serde_json::to_vec(&data)?;
         let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
 
         event.payload = serde_json::json!({
-            "Modified": {
-                "step": step,
-                "data": {
-                    "encrypted_data": BASE64.encode(&encrypted.ciphertext),
-                    "nonce":          BASE64.encode(&encrypted.nonce),
-                }
+            "PersonDetailsUpdated": {
+                "person_ref":     person_ref_str,
+                "subject_id":     subject_id_str,
+                "encrypted_data": BASE64.encode(&encrypted.ciphertext),
+                "nonce":          BASE64.encode(&encrypted.nonce),
             }
         });
 
@@ -352,7 +349,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         for event in events {
             let event = match event.event_type.as_str() {
                 PERSON_CAPTURED => self.decrypt_person_captured(event).await?,
-                JOURNEY_MODIFIED => self.maybe_decrypt_modified(event).await?,
+                PERSON_DETAILS_UPDATED => self.decrypt_person_details_updated(event).await?,
                 _ => event,
             };
             out.push(event);
@@ -362,12 +359,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
     /// Decrypts a `PersonCaptured` event, or redacts it if the DEK has been deleted.
     ///
-    /// Events without an `encrypted_pii` sentinel (legacy plaintext) are returned as-is.
+    /// Events without an `encrypted_pii` sentinel (plaintext / legacy) are returned as-is.
     async fn decrypt_person_captured(
         &self,
         mut event: SerializedEvent,
     ) -> Result<SerializedEvent, PersistenceError> {
-        // No sentinel → legacy plaintext event, pass through.
+        // No sentinel → plaintext event, pass through.
         if event.payload[PC_KEY].get("encrypted_pii").is_none() {
             return Ok(event);
         }
@@ -443,54 +440,50 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         Ok(event)
     }
 
-    /// Decrypts the `data` field of a `JourneyModified` event, or sets `data` to `{}` if
-    /// the DEK has been deleted or no subject mapping exists.
+    /// Decrypts a `PersonDetailsUpdated` event, or redacts it if the DEK has been deleted.
     ///
-    /// Events without an `encrypted_data` sentinel in `data` are returned as-is.
-    async fn maybe_decrypt_modified(
+    /// Events without an `encrypted_data` sentinel (plaintext / legacy) are returned as-is.
+    async fn decrypt_person_details_updated(
         &self,
         mut event: SerializedEvent,
     ) -> Result<SerializedEvent, PersistenceError> {
         // No sentinel → plaintext event, pass through.
-        if event.payload[MOD_KEY]["data"]
-            .get("encrypted_data")
-            .is_none()
-        {
+        if event.payload[PD_KEY].get("encrypted_data").is_none() {
             return Ok(event);
         }
 
-        let step = event.payload[MOD_KEY]["step"].clone();
-
-        let subject_id = self
-            .subject_mapping
-            .get_subject(&event.aggregate_id)
-            .await
+        let subject_id_str = event.payload[PD_KEY]["subject_id"]
+            .as_str()
+            .ok_or_else(|| {
+                PersistenceError::from(RepoError::InvalidPayload(
+                    "encrypted PersonDetailsUpdated is missing subject_id",
+                ))
+            })?
+            .to_string();
+        let person_ref_str = event.payload[PD_KEY]["person_ref"]
+            .as_str()
+            .unwrap_or("")
+            .to_string();
+        let subject_id = Uuid::parse_str(&subject_id_str)
             .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
-        let dek = match subject_id {
-            Some(sid) => self
-                .key_store
-                .get_key(&sid)
-                .await
-                .map_err(|e| PersistenceError::from(RepoError::from(e)))?,
-            None => None,
-        };
+        let dek = self
+            .key_store
+            .get_key(&subject_id)
+            .await
+            .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
         match dek {
             Some(dek) => {
                 let ciphertext = BASE64
                     .decode(
-                        event.payload[MOD_KEY]["data"]["encrypted_data"]
+                        event.payload[PD_KEY]["encrypted_data"]
                             .as_str()
                             .unwrap_or_default(),
                     )
                     .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
                 let nonce = BASE64
-                    .decode(
-                        event.payload[MOD_KEY]["data"]["nonce"]
-                            .as_str()
-                            .unwrap_or_default(),
-                    )
+                    .decode(event.payload[PD_KEY]["nonce"].as_str().unwrap_or_default())
                     .map_err(|e| PersistenceError::from(RepoError::from(e)))?;
 
                 let encrypted = EncryptedPayload { ciphertext, nonce };
@@ -503,18 +496,20 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
                 let data: Value = serde_json::from_slice(&plaintext)?;
 
                 event.payload = serde_json::json!({
-                    "Modified": {
-                        "step": step,
-                        "data": data,
+                    "PersonDetailsUpdated": {
+                        "person_ref": person_ref_str,
+                        "subject_id": subject_id_str,
+                        "data":       data,
                     }
                 });
             }
             None => {
-                // Key deleted or no mapping — data is permanently gone.
+                // Key deleted — subject was forgotten. Redact.
                 event.payload = serde_json::json!({
-                    "Modified": {
-                        "step": step,
-                        "data": {},
+                    "PersonDetailsUpdated": {
+                        "person_ref": person_ref_str,
+                        "subject_id": subject_id_str,
+                        "data":       {},
                     }
                 });
             }
@@ -551,7 +546,7 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
         &self,
         aggregate_id: &str,
     ) -> Result<Option<SerializedSnapshot>, PersistenceError> {
-        // Snapshots are not encrypted in this phase (aggregate state contains no PII).
+        // Snapshots are not encrypted — the aggregate state contains no PII.
         self.inner.get_snapshot::<A>(aggregate_id).await
     }
 
@@ -580,9 +575,7 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
     async fn stream_all_events<A: Aggregate>(&self) -> Result<ReplayStream, PersistenceError> {
         // NOTE: This delegates to the inner without decryption. `stream_all_events` is used
         // only by `QueryReplay::replay_all`, which is not currently wired in this application.
-        // A production-ready implementation would need the inner store to expose raw
-        // `SerializedEvent` access so each event can be decrypted before being pushed to the
-        // returned stream.
+        // A production-ready implementation would need to decrypt each event before pushing.
         self.inner.stream_all_events::<A>().await
     }
 }
@@ -598,7 +591,6 @@ mod tests {
 
     use crate::crypto::cipher::PiiCipher;
     use crate::crypto::key_store::{InMemoryKeyStore, KeyStore};
-    use crate::crypto::subject_mapping::{InMemorySubjectMapping, SubjectMapping};
     use crate::domain::journey::Journey;
 
     use super::{CryptoShreddingEventRepository, InMemoryEventRepository};
@@ -606,35 +598,25 @@ mod tests {
     // ── Helpers ───────────────────────────────────────────────────────────
 
     /// Build a repo backed by in-memory test doubles.
-    /// Use [`make_repo_with_parts`] when you need handles to the key store or mapping.
     fn make_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
         let key_store: Arc<dyn KeyStore> = Arc::new(InMemoryKeyStore::new());
-        let subject_mapping: Arc<dyn SubjectMapping> = Arc::new(InMemorySubjectMapping::new());
         let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
-        CryptoShreddingEventRepository::new(
-            InMemoryEventRepository::default(),
-            key_store,
-            subject_mapping,
-            cipher,
-        )
+        CryptoShreddingEventRepository::new(InMemoryEventRepository::default(), key_store, cipher)
     }
 
-    /// Build a repo and return handles to the key store and subject mapping for inspection.
+    /// Build a repo and return a handle to the key store for inspection / shredding.
     fn make_repo_with_parts() -> (
         CryptoShreddingEventRepository<InMemoryEventRepository>,
         Arc<InMemoryKeyStore>,
-        Arc<InMemorySubjectMapping>,
     ) {
         let key_store = Arc::new(InMemoryKeyStore::new());
-        let subject_mapping = Arc::new(InMemorySubjectMapping::new());
         let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
         let repo = CryptoShreddingEventRepository::new(
             InMemoryEventRepository::default(),
             Arc::clone(&key_store) as Arc<dyn KeyStore>,
-            Arc::clone(&subject_mapping) as Arc<dyn SubjectMapping>,
             cipher,
         );
-        (repo, key_store, subject_mapping)
+        (repo, key_store)
     }
 
     fn person_captured_event(
@@ -655,6 +637,32 @@ mod tests {
                     "name":       "Alice Smith",
                     "email":      "alice@example.com",
                     "phone":      "+44-7700-900000"
+                }
+            }),
+            serde_json::json!({}),
+        )
+    }
+
+    fn person_details_updated_event(
+        aggregate_id: &str,
+        sequence: usize,
+        subject_id: Uuid,
+    ) -> SerializedEvent {
+        SerializedEvent::new(
+            aggregate_id.to_string(),
+            sequence,
+            "Journey".to_string(),
+            "PersonDetailsUpdated".to_string(),
+            "1.0".to_string(),
+            serde_json::json!({
+                "PersonDetailsUpdated": {
+                    "person_ref": "passenger_0",
+                    "subject_id": subject_id.to_string(),
+                    "data": {
+                        "passportNumber": "GB123456789",
+                        "dateOfBirth":    "1990-05-15",
+                        "nationality":    "GB"
+                    }
                 }
             }),
             serde_json::json!({}),
@@ -713,6 +721,37 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn test_modified_events_always_pass_through_unmodified() {
+        // Modified events carry only shared non-PII data and must never be encrypted,
+        // regardless of whether a subject has been captured for the journey.
+        let repo = make_repo();
+        let aggregate_id = "journey-modified-plain";
+        let subject_id = Uuid::new_v4();
+
+        // Capture a person first (DEK now exists in the key store).
+        repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
+            .await
+            .unwrap();
+
+        let mod_event = modified_event(aggregate_id, 2);
+        let original_payload = mod_event.payload.clone();
+
+        repo.persist::<Journey>(&[mod_event], None).await.unwrap();
+
+        let raw = repo.inner.all_events();
+        assert_eq!(
+            raw[1].payload, original_payload,
+            "Modified event must be stored in plaintext even after a subject is captured"
+        );
+        assert!(
+            raw[1].payload["Modified"]["data"]
+                .get("encrypted_data")
+                .is_none(),
+            "Modified data must never contain an encrypted_data sentinel"
+        );
+    }
+
     // ── PersonCaptured — write path ───────────────────────────────────────
 
     #[tokio::test]
@@ -741,16 +780,22 @@ mod tests {
         );
         assert!(pc.get("nonce").is_some(), "nonce must be present");
 
-        // subject_id remains in plaintext.
+        // Non-PII fields remain in plaintext.
         assert_eq!(
             pc["subject_id"].as_str().unwrap(),
             subject_id.to_string().as_str(),
+            "subject_id must remain in plaintext"
+        );
+        assert_eq!(
+            pc["person_ref"].as_str().unwrap(),
+            "passenger_0",
+            "person_ref must remain in plaintext"
         );
     }
 
     #[tokio::test]
     async fn test_person_captured_without_subject_id_passes_through_on_write() {
-        // A PersonCaptured that pre-dates Phase 3 (no subject_id field) must not be encrypted.
+        // A PersonCaptured without a subject_id field must be stored unmodified.
         let repo = make_repo();
         let aggregate_id = "journey-legacy-pc-write";
         let legacy_payload = serde_json::json!({
@@ -779,24 +824,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_person_captured_records_subject_mapping() {
-        let (repo, _ks, subject_mapping) = make_repo_with_parts();
-        let aggregate_id = "journey-mapping";
-        let subject_id = Uuid::new_v4();
-
-        repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
-            .await
-            .unwrap();
-
-        let mapped = subject_mapping.get_subject(aggregate_id).await.unwrap();
-        assert_eq!(
-            mapped,
-            Some(subject_id),
-            "journey → subject mapping must be recorded after PersonCaptured"
-        );
-    }
-
     // ── PersonCaptured — read path ────────────────────────────────────────
 
     #[tokio::test]
@@ -820,6 +847,7 @@ mod tests {
             pc["subject_id"].as_str().unwrap(),
             subject_id.to_string().as_str()
         );
+        assert_eq!(pc["person_ref"].as_str().unwrap(), "passenger_0");
         assert!(
             pc.get("encrypted_pii").is_none(),
             "encrypted_pii must not appear after decryption"
@@ -828,7 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_get_events_redacts_person_captured_when_key_deleted() {
-        let (repo, key_store, _sm) = make_repo_with_parts();
+        let (repo, key_store) = make_repo_with_parts();
         let aggregate_id = "journey-pc-redact";
         let subject_id = Uuid::new_v4();
 
@@ -849,6 +877,11 @@ mod tests {
             pc["subject_id"].as_str().unwrap(),
             subject_id.to_string().as_str(),
             "subject_id must remain readable for audit purposes"
+        );
+        assert_eq!(
+            pc["person_ref"].as_str().unwrap(),
+            "passenger_0",
+            "person_ref must remain readable after shredding"
         );
     }
 
@@ -889,137 +922,154 @@ mod tests {
         );
     }
 
-    // ── JourneyModified — write path ──────────────────────────────────────
+    // ── PersonDetailsUpdated — write path ─────────────────────────────────
 
     #[tokio::test]
-    async fn test_persist_encrypts_modified_when_subject_is_mapped() {
+    async fn test_persist_encrypts_person_details_updated() {
         let repo = make_repo();
-        let aggregate_id = "journey-mod-encrypt";
+        let aggregate_id = "journey-pd-encrypt";
         let subject_id = Uuid::new_v4();
 
-        // Establish mapping via PersonCaptured.
-        repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
-            .await
-            .unwrap();
-
-        repo.persist::<Journey>(&[modified_event(aggregate_id, 2)], None)
-            .await
-            .unwrap();
+        repo.persist::<Journey>(
+            &[person_details_updated_event(aggregate_id, 1, subject_id)],
+            None,
+        )
+        .await
+        .unwrap();
 
         let raw = repo.inner.all_events();
-        let data = &raw[1].payload["Modified"]["data"];
+        assert_eq!(raw.len(), 1);
+        let pd = &raw[0].payload["PersonDetailsUpdated"];
 
+        // PII must NOT be stored in plaintext.
         assert!(
-            data.get("encrypted_data").is_some(),
-            "data must be encrypted when a subject mapping exists"
+            pd.get("data")
+                .map_or(true, |d| d.get("passportNumber").is_none()),
+            "passportNumber must not appear in plaintext"
         );
-        assert!(data.get("nonce").is_some(), "nonce must be present");
+
+        // Encryption envelope must be present.
         assert!(
-            data.get("tripType").is_none(),
-            "tripType must not appear in plaintext"
+            pd.get("encrypted_data").is_some(),
+            "encrypted_data must be present"
         );
+        assert!(pd.get("nonce").is_some(), "nonce must be present");
+
+        // Non-PII fields remain in plaintext.
         assert_eq!(
-            raw[1].payload["Modified"]["step"].as_str().unwrap(),
-            "search",
-            "step must remain in plaintext"
+            pd["subject_id"].as_str().unwrap(),
+            subject_id.to_string().as_str()
         );
+        assert_eq!(pd["person_ref"].as_str().unwrap(), "passenger_0");
     }
 
     #[tokio::test]
-    async fn test_persist_does_not_encrypt_modified_without_subject() {
+    async fn test_person_details_updated_without_subject_id_passes_through() {
+        // A PersonDetailsUpdated without subject_id must be stored unmodified.
         let repo = make_repo();
-        let aggregate_id = "journey-mod-plain";
-
-        // No PersonCaptured first → no subject mapping.
-        let event = modified_event(aggregate_id, 1);
-        let original_data = event.payload["Modified"]["data"].clone();
+        let aggregate_id = "journey-pd-legacy-write";
+        let legacy_payload = serde_json::json!({
+            "PersonDetailsUpdated": {
+                "person_ref": "passenger_0",
+                "data": { "passportNumber": "XX999" }
+            }
+        });
+        let event = SerializedEvent::new(
+            aggregate_id.to_string(),
+            1,
+            "Journey".to_string(),
+            "PersonDetailsUpdated".to_string(),
+            "1.0".to_string(),
+            legacy_payload.clone(),
+            serde_json::json!({}),
+        );
 
         repo.persist::<Journey>(&[event], None).await.unwrap();
 
         let raw = repo.inner.all_events();
-        let data = &raw[0].payload["Modified"]["data"];
-
-        assert!(
-            data.get("encrypted_data").is_none(),
-            "data must NOT be encrypted when there is no subject mapping"
-        );
-        assert_eq!(*data, original_data, "data must be stored unmodified");
+        assert_eq!(raw[0].payload, legacy_payload);
     }
 
-    // ── JourneyModified — read path ───────────────────────────────────────
+    // ── PersonDetailsUpdated — read path ──────────────────────────────────
 
     #[tokio::test]
-    async fn test_get_events_decrypts_modified() {
+    async fn test_get_events_decrypts_person_details_updated() {
         let repo = make_repo();
-        let aggregate_id = "journey-mod-decrypt";
+        let aggregate_id = "journey-pd-decrypt";
         let subject_id = Uuid::new_v4();
 
-        repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
-            .await
-            .unwrap();
-        repo.persist::<Journey>(&[modified_event(aggregate_id, 2)], None)
-            .await
-            .unwrap();
+        repo.persist::<Journey>(
+            &[person_details_updated_event(aggregate_id, 1, subject_id)],
+            None,
+        )
+        .await
+        .unwrap();
 
         let events = repo.get_events::<Journey>(aggregate_id).await.unwrap();
-        let mod_event = events
-            .iter()
-            .find(|e| e.event_type == "JourneyModified")
-            .expect("JourneyModified must be present");
-        let data = &mod_event.payload["Modified"]["data"];
+        assert_eq!(events.len(), 1);
+        let pd = &events[0].payload["PersonDetailsUpdated"];
 
-        assert_eq!(data["tripType"].as_str().unwrap(), "round-trip");
-        assert_eq!(data["origin"].as_str().unwrap(), "LHR");
-        assert_eq!(data["destination"].as_str().unwrap(), "JFK");
+        assert_eq!(
+            pd["data"]["passportNumber"].as_str().unwrap(),
+            "GB123456789"
+        );
+        assert_eq!(pd["data"]["dateOfBirth"].as_str().unwrap(), "1990-05-15");
+        assert_eq!(pd["data"]["nationality"].as_str().unwrap(), "GB");
+        assert_eq!(
+            pd["subject_id"].as_str().unwrap(),
+            subject_id.to_string().as_str()
+        );
+        assert_eq!(pd["person_ref"].as_str().unwrap(), "passenger_0");
         assert!(
-            data.get("encrypted_data").is_none(),
+            pd.get("encrypted_data").is_none(),
             "encrypted_data must not appear after decryption"
         );
     }
 
     #[tokio::test]
-    async fn test_get_events_redacts_modified_when_key_deleted() {
-        let (repo, key_store, _sm) = make_repo_with_parts();
-        let aggregate_id = "journey-mod-redact";
+    async fn test_get_events_redacts_person_details_updated_when_key_deleted() {
+        let (repo, key_store) = make_repo_with_parts();
+        let aggregate_id = "journey-pd-redact";
         let subject_id = Uuid::new_v4();
 
-        repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
-            .await
-            .unwrap();
-        repo.persist::<Journey>(&[modified_event(aggregate_id, 2)], None)
-            .await
-            .unwrap();
+        repo.persist::<Journey>(
+            &[person_details_updated_event(aggregate_id, 1, subject_id)],
+            None,
+        )
+        .await
+        .unwrap();
 
         key_store.delete_key(&subject_id).await.unwrap();
 
         let events = repo.get_events::<Journey>(aggregate_id).await.unwrap();
-        let mod_event = events
-            .iter()
-            .find(|e| e.event_type == "JourneyModified")
-            .expect("JourneyModified must be present");
+        let pd = &events[0].payload["PersonDetailsUpdated"];
 
         assert_eq!(
-            mod_event.payload["Modified"]["data"],
+            pd["data"],
             serde_json::json!({}),
             "data must be empty after shredding"
         );
         assert_eq!(
-            mod_event.payload["Modified"]["step"].as_str().unwrap(),
-            "search",
-            "step must remain readable after shredding"
+            pd["subject_id"].as_str().unwrap(),
+            subject_id.to_string().as_str(),
+            "subject_id must remain readable for audit purposes"
+        );
+        assert_eq!(
+            pd["person_ref"].as_str().unwrap(),
+            "passenger_0",
+            "person_ref must remain readable after shredding"
         );
     }
 
     #[tokio::test]
-    async fn test_plaintext_modified_passes_through_on_read() {
-        // A Modified event stored before the crypto layer (no encrypted_data key) must pass
-        // through unmodified.
+    async fn test_plaintext_person_details_updated_passes_through_on_read() {
         let repo = make_repo();
-        let aggregate_id = "journey-mod-legacy-read";
-        let plain_payload = serde_json::json!({
-            "Modified": {
-                "step": "search",
-                "data": { "origin": "CDG" }
+        let aggregate_id = "journey-pd-legacy-read";
+        let plaintext_payload = serde_json::json!({
+            "PersonDetailsUpdated": {
+                "person_ref": "passenger_0",
+                "subject_id": Uuid::new_v4().to_string(),
+                "data": { "passportNumber": "GB000000001" }
             }
         });
 
@@ -1029,9 +1079,9 @@ mod tests {
                     aggregate_id.to_string(),
                     1,
                     "Journey".to_string(),
-                    "JourneyModified".to_string(),
+                    "PersonDetailsUpdated".to_string(),
                     "1.0".to_string(),
-                    plain_payload.clone(),
+                    plaintext_payload.clone(),
                     serde_json::json!({}),
                 )],
                 None,
@@ -1041,21 +1091,22 @@ mod tests {
 
         let events = repo.get_events::<Journey>(aggregate_id).await.unwrap();
         assert_eq!(
-            events[0].payload, plain_payload,
-            "legacy plaintext Modified must be returned unmodified"
+            events[0].payload, plaintext_payload,
+            "legacy plaintext PersonDetailsUpdated must be returned unmodified"
         );
     }
 
-    // ── Cross-journey shredding ───────────────────────────────────────────
+    // ── Multi-subject scenarios ───────────────────────────────────────────
 
     #[tokio::test]
     async fn test_single_key_deletion_shreds_all_journeys_for_subject() {
-        let (repo, key_store, _sm) = make_repo_with_parts();
+        // The same subject captured in two journeys: deleting the single DEK
+        // must make both journeys' PersonCaptured events unreadable.
+        let (repo, key_store) = make_repo_with_parts();
         let subject_id = Uuid::new_v4();
         let journey_a = "journey-xj-a";
         let journey_b = "journey-xj-b";
 
-        // Same subject captured in two different journeys.
         repo.persist::<Journey>(&[person_captured_event(journey_a, 1, subject_id)], None)
             .await
             .unwrap();
@@ -1063,7 +1114,6 @@ mod tests {
             .await
             .unwrap();
 
-        // Shred once.
         key_store.delete_key(&subject_id).await.unwrap();
 
         let events_a = repo.get_events::<Journey>(journey_a).await.unwrap();
@@ -1074,15 +1124,83 @@ mod tests {
                 .as_str()
                 .unwrap(),
             "[redacted]",
-            "journey A must be redacted after key deletion"
+            "journey A PersonCaptured must be redacted after key deletion"
         );
         assert_eq!(
             events_b[0].payload["PersonCaptured"]["name"]
                 .as_str()
                 .unwrap(),
             "[redacted]",
-            "journey B must be redacted after key deletion"
+            "journey B PersonCaptured must be redacted after key deletion"
         );
+    }
+
+    #[tokio::test]
+    async fn test_two_subjects_in_one_journey_shredded_independently() {
+        // Two subjects captured in the same journey: shredding subject A must leave
+        // subject B's events fully readable, and must not affect shared Modified events.
+        let (repo, key_store) = make_repo_with_parts();
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+        let aggregate_id = "journey-two-subjects";
+
+        let pc_a = person_captured_event(aggregate_id, 1, subject_a);
+        // Manually build a PersonCaptured for subject B with a different person_ref.
+        let pc_b = SerializedEvent::new(
+            aggregate_id.to_string(),
+            2,
+            "Journey".to_string(),
+            "PersonCaptured".to_string(),
+            "1.0".to_string(),
+            serde_json::json!({
+                "PersonCaptured": {
+                    "person_ref": "passenger_1",
+                    "subject_id": subject_b.to_string(),
+                    "name":       "Bob Jones",
+                    "email":      "bob@example.com",
+                    "phone":      null
+                }
+            }),
+            serde_json::json!({}),
+        );
+        let mod_ev = modified_event(aggregate_id, 3);
+        let original_mod_payload = mod_ev.payload.clone();
+
+        repo.persist::<Journey>(&[pc_a, pc_b, mod_ev], None)
+            .await
+            .unwrap();
+
+        // Shred only subject A.
+        key_store.delete_key(&subject_a).await.unwrap();
+
+        let events = repo.get_events::<Journey>(aggregate_id).await.unwrap();
+
+        // Subject A's PersonCaptured must be redacted.
+        let ev_a = events
+            .iter()
+            .find(|e| e.payload["PersonCaptured"]["person_ref"].as_str() == Some("passenger_0"))
+            .unwrap();
+        assert_eq!(
+            ev_a.payload["PersonCaptured"]["name"].as_str().unwrap(),
+            "[redacted]"
+        );
+
+        // Subject B's PersonCaptured must still be readable.
+        let ev_b = events
+            .iter()
+            .find(|e| e.payload["PersonCaptured"]["person_ref"].as_str() == Some("passenger_1"))
+            .unwrap();
+        assert_eq!(
+            ev_b.payload["PersonCaptured"]["name"].as_str().unwrap(),
+            "Bob Jones"
+        );
+
+        // The Modified event must be completely untouched.
+        let mod_event = events
+            .iter()
+            .find(|e| e.event_type == "JourneyModified")
+            .unwrap();
+        assert_eq!(mod_event.payload, original_mod_payload);
     }
 
     // ── get_last_events ───────────────────────────────────────────────────
@@ -1096,22 +1214,25 @@ mod tests {
         repo.persist::<Journey>(&[person_captured_event(aggregate_id, 1, subject_id)], None)
             .await
             .unwrap();
-        repo.persist::<Journey>(&[modified_event(aggregate_id, 2)], None)
-            .await
-            .unwrap();
+        repo.persist::<Journey>(
+            &[person_details_updated_event(aggregate_id, 2, subject_id)],
+            None,
+        )
+        .await
+        .unwrap();
 
-        // Fetch only the last event (the Modified).
+        // Fetch only the last event (the PersonDetailsUpdated).
         let events = repo
             .get_last_events::<Journey>(aggregate_id, 1)
             .await
             .unwrap();
         assert_eq!(events.len(), 1);
-        assert_eq!(events[0].event_type, "JourneyModified");
+        assert_eq!(events[0].event_type, "PersonDetailsUpdated");
         assert_eq!(
-            events[0].payload["Modified"]["data"]["origin"]
+            events[0].payload["PersonDetailsUpdated"]["data"]["passportNumber"]
                 .as_str()
                 .unwrap(),
-            "LHR"
+            "GB123456789"
         );
     }
 
@@ -1176,6 +1297,30 @@ mod tests {
         assert_ne!(
             ct1, ct2,
             "identical plaintext at different sequence numbers must produce different ciphertexts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aad_binds_person_details_ciphertext_to_event_position() {
+        let repo = make_repo();
+        let aggregate_id = "journey-aad-pd";
+        let subject_id = Uuid::new_v4();
+
+        let ev1 = person_details_updated_event(aggregate_id, 1, subject_id);
+        let ev2 = person_details_updated_event(aggregate_id, 2, subject_id);
+        repo.persist::<Journey>(&[ev1, ev2], None).await.unwrap();
+
+        let raw = repo.inner.all_events();
+        let ct1 = raw[0].payload["PersonDetailsUpdated"]["encrypted_data"]
+            .as_str()
+            .unwrap();
+        let ct2 = raw[1].payload["PersonDetailsUpdated"]["encrypted_data"]
+            .as_str()
+            .unwrap();
+
+        assert_ne!(
+            ct1, ct2,
+            "identical plaintext at different positions must produce different ciphertexts"
         );
     }
 }

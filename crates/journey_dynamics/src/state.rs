@@ -6,7 +6,6 @@ use postgres_es::default_postgress_pool;
 use crate::config::{CryptoCqrs, cqrs_framework};
 use crate::crypto::cipher::PiiCipher;
 use crate::crypto::key_store::{KeyStore, PostgresKeyStore};
-use crate::crypto::subject_mapping::{PostgresSubjectMapping, SubjectMapping};
 use crate::view_repository::StructuredJourneyViewRepository;
 
 #[derive(Clone)]
@@ -14,7 +13,6 @@ pub struct ApplicationState {
     pub cqrs: Arc<CryptoCqrs>,
     pub journey_query: Arc<StructuredJourneyViewRepository>,
     pub key_store: Arc<dyn KeyStore>,
-    pub subject_mapping: Arc<dyn SubjectMapping>,
 }
 
 /// # Panics
@@ -47,23 +45,14 @@ pub async fn new_application_state() -> ApplicationState {
         PiiCipher::new(kek.clone()).expect("JOURNEY_KEK must decode to exactly 32 bytes"),
     ));
 
-    let subject_mapping: Arc<dyn SubjectMapping> =
-        Arc::new(PostgresSubjectMapping::new(pool.clone()));
-
     // The CryptoShreddingEventRepository gets its own PiiCipher for field encryption.
     let cipher = PiiCipher::new(kek).expect("JOURNEY_KEK must decode to exactly 32 bytes");
 
-    let (cqrs, journey_query) = cqrs_framework(
-        pool,
-        Arc::clone(&key_store),
-        Arc::clone(&subject_mapping),
-        cipher,
-    );
+    let (cqrs, journey_query) = cqrs_framework(pool, Arc::clone(&key_store), cipher);
 
     ApplicationState {
         cqrs,
         journey_query,
         key_store,
-        subject_mapping,
     }
 }
