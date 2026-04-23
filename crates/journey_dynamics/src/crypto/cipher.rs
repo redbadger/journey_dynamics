@@ -7,12 +7,11 @@
 //! (KEK) using AES-256-KWP (RFC 5649).  Deleting the DEK from the key store constitutes
 //! "crypto-shredding": the PII becomes irrecoverable without touching individual events.
 
-use aes::Aes256;
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, AeadCore, OsRng, Payload},
 };
-use aes_kw::Kek;
+use aes_kw::{KeyInit as KwpKeyInit, KwpAes256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -145,10 +144,13 @@ impl PiiCipher {
     /// Cannot panic because the KEK length is validated in [`PiiCipher::new`].
     #[must_use]
     pub fn wrap_dek(&self, dek: &KeyMaterial) -> Vec<u8> {
-        let kek = Kek::<Aes256>::try_from(self.kek.as_slice())
+        let cipher: KwpAes256 = KwpKeyInit::new_from_slice(self.kek.as_slice())
             .expect("KEK is always 32 bytes — validated in PiiCipher::new");
-        kek.wrap_with_padding_vec(&dek.key)
-            .expect("AES-KWP wrapping cannot fail with a valid key and well-formed data")
+        let mut buf = vec![0u8; 40]; // 32-byte DEK wraps to 40 bytes with AES-KWP
+        cipher
+            .wrap_key(&dek.key, &mut buf)
+            .expect("AES-KWP wrapping cannot fail with a valid key and well-formed data");
+        buf
     }
 
     /// Unwrap (decrypt) a previously-wrapped DEK.
@@ -165,14 +167,15 @@ impl PiiCipher {
     ///
     /// Cannot panic because the KEK length is validated in [`PiiCipher::new`].
     pub fn unwrap_dek(&self, key_id: Uuid, wrapped_key: &[u8]) -> Result<KeyMaterial, CryptoError> {
-        let kek = Kek::<Aes256>::try_from(self.kek.as_slice())
+        let cipher: KwpAes256 = KwpKeyInit::new_from_slice(self.kek.as_slice())
             .expect("KEK is always 32 bytes — validated in PiiCipher::new");
-        let key_bytes = kek
-            .unwrap_with_padding_vec(wrapped_key)
+        let mut buf = vec![0u8; wrapped_key.len().saturating_sub(8)]; // strip the 8-byte IV block
+        cipher
+            .unwrap_key(wrapped_key, &mut buf)
             .map_err(|_| CryptoError::KeyUnwrapFailed)?;
         Ok(KeyMaterial {
             key_id,
-            key: Zeroizing::new(key_bytes),
+            key: Zeroizing::new(buf),
         })
     }
 }
