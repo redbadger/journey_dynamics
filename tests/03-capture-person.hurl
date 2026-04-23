@@ -5,6 +5,7 @@ POST http://localhost:3030/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "CapturePerson": {
+        "subject_id": "{{newUuid}}",
         "name": "Alice Johnson",
         "email": "alice@example.com",
         "phone": "+1-555-0123"

@@ -47,6 +47,7 @@ POST http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "CapturePerson": {
+        "subject_id": "{{newUuid}}",
         "name": "Test",
         "email": "test@example.com",
         "phone": null

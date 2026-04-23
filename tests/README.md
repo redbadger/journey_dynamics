@@ -71,7 +71,7 @@ hurl --test --report-html ./report full-flight-booking.hurl --variable journey_i
 |---------|-------------|-------|
 | Start | Empty body OR `{"Start": {"id": "UUID"}}` | Empty body auto-generates UUID |
 | Capture | `{"Capture": {"step": "name", "data": {...}}}` | |
-| CapturePerson | `{"CapturePerson": {"name": "...", "email": "...", "phone": "..."}}` | |
+| CapturePerson | `{"CapturePerson": {"subject_id": "UUID", "name": "...", "email": "...", "phone": "..."}}` | |
 | Complete | `{"Complete": null}` | |
 
 ## Response Codes

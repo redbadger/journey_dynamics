@@ -450,7 +450,7 @@ psql -h localhost -U postgres journey_dynamics -c \
  SubjectForgotten | {"SubjectForgotten": {"subject_id": "..."}}
 ```
 
-### 8.4 Aggregate rehydration after shredding
+### 8.4 Aggregate re-hydration after shredding
 
 To prove the aggregate still loads correctly after shredding, send a `Complete` command.
 The server must rehydrate the journey by replaying every event from the store — including
