@@ -1,14 +1,14 @@
 -- events table (managed by cqrs-es; structure must not change)
 CREATE TABLE events
 (
-    aggregate_type text                         NOT NULL,
-    aggregate_id   text                         NOT NULL,
-    sequence       bigint CHECK (sequence >= 0) NOT NULL,
-    event_type     text                         NOT NULL,
-    event_version  text                         NOT NULL,
-    payload        json                         NOT NULL,
-    metadata       json                         NOT NULL,
-    timestamp      timestamp with time zone     DEFAULT (CURRENT_TIMESTAMP),
+    aggregate_type TEXT                         NOT NULL,
+    aggregate_id   TEXT                         NOT NULL,
+    sequence       BIGINT CHECK (sequence >= 0) NOT NULL,
+    event_type     TEXT                         NOT NULL,
+    event_version  TEXT                         NOT NULL,
+    payload        JSONB                        NOT NULL,
+    metadata       JSONB                        NOT NULL,
+    timestamp      TIMESTAMP WITH TIME ZONE     DEFAULT (CURRENT_TIMESTAMP),
     PRIMARY KEY (aggregate_type, aggregate_id, sequence)
 );
 
@@ -89,9 +89,9 @@ CREATE INDEX idx_subject_keys_subject_id
 -- Event store: find all journeys that reference a given subject_id.
 -- Both indexes only cover rows of the relevant event type to stay narrow.
 CREATE INDEX idx_events_person_captured_subject
-    ON events ((payload::jsonb -> 'PersonCaptured' ->> 'subject_id'))
+    ON events ((payload -> 'PersonCaptured' ->> 'subject_id'))
     WHERE event_type = 'PersonCaptured';
 
 CREATE INDEX idx_events_person_details_updated_subject
-    ON events ((payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id'))
+    ON events ((payload -> 'PersonDetailsUpdated' ->> 'subject_id'))
     WHERE event_type = 'PersonDetailsUpdated';
