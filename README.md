@@ -170,6 +170,10 @@ Returns `204 No Content`. This:
 See [`docs/QUICK_START.md`](docs/QUICK_START.md) for a full walkthrough including a
 crypto-shredding demo.
 
+For guidance on how to mint or resolve `subject_id` values — including the additional-passenger
+case where no identity-system UUID is available — see
+[`docs/SUBJECT_ID_STRATEGIES.md`](docs/SUBJECT_ID_STRATEGIES.md).
+
 ---
 
 ## Tests
@@ -193,6 +197,7 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 | [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` and `CapturePersonDetails` command reference |
 | [`docs/IMPLEMENTATION_SUMMARY.md`](docs/IMPLEMENTATION_SUMMARY.md) | What was built and why |
 | [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) | Architecture Review Board (ARB) review document |
+| [`docs/SUBJECT_ID_STRATEGIES.md`](docs/SUBJECT_ID_STRATEGIES.md) | How to mint or resolve `subject_id` values (authenticated users, additional passengers, GDPR erasure by email) |
 
 ---
 
