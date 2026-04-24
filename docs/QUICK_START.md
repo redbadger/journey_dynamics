@@ -1,7 +1,8 @@
 # Quick Start & Crypto-Shredding Demo
 
-A complete walkthrough: start a journey, capture personally identifiable information (PII), verify it is encrypted at rest, then
-exercise the General Data Protection Regulation (GDPR) right-to-erasure endpoint and confirm the data is gone for good.
+A complete walkthrough: start a journey, capture non-PII shared data, capture PII via the
+dedicated person commands, verify encryption at rest, then exercise the GDPR right-to-erasure
+endpoint and confirm only the target subject's data is gone — shared journey data survives.
 
 ---
 
@@ -48,8 +49,7 @@ fish_add_path (brew --prefix postgresql@18)/bin
 ```
 
 Homebrew creates a superuser named after your macOS login user. Create a `postgres` role
-with a password to match the `DATABASE_URL` used throughout this guide. We connect to
-`template1` explicitly — it is guaranteed to exist on every PostgreSQL installation:
+with a password to match the `DATABASE_URL` used throughout this guide:
 
 ```bash
 psql -d template1 -c "CREATE ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'postgres';"
@@ -60,7 +60,6 @@ psql -d template1 -c "CREATE ROLE postgres WITH SUPERUSER LOGIN PASSWORD 'postgr
 ## 3. Environment
 
 Set the two required environment variables before running any of the following steps.
-Choose whichever approach suits your shell, or use a `.env` file.
 
 **bash / zsh**
 
@@ -79,22 +78,9 @@ echo "KEK: $JOURNEY_KEK"   # copy this somewhere for the demo
 
 ```fish
 set -x DATABASE_URL postgres://postgres:postgres@localhost:5432/journey_dynamics
-
-# Generate a random 256-bit Key Encryption Key (KEK).
 set -x JOURNEY_KEK (openssl rand -base64 32)
 
-echo "KEK: $JOURNEY_KEK"   # copy this somewhere for the demo
-```
-
-**.env file** (useful if you use a tool such as [`direnv`](https://direnv.net/) or load it
-explicitly with `set -a; source .env; set +a` in bash/zsh — or simply rely on the server
-reading it via the `dotenvy` crate)
-
-```ini
-DATABASE_URL=postgres://postgres:postgres@localhost:5432/journey_dynamics
-
-# Generate once with: openssl rand -base64 32
-JOURNEY_KEK=<paste your generated key here>
+echo "KEK: $JOURNEY_KEK"
 ```
 
 ---
@@ -115,9 +101,7 @@ cargo run -p journey_dynamics
 # Listening on 0.0.0.0:3030
 ```
 
-Open a second terminal for the curl commands below. If you used shell exports, re-export
-`DATABASE_URL` and `JOURNEY_KEK` in the new terminal. If you used a `.env` file, source it
-again or rely on `direnv` to pick it up automatically.
+Open a second terminal for the curl commands below.
 
 ---
 
@@ -147,10 +131,11 @@ set JOURNEY_ID (echo $JOURNEY_LOCATION | sed 's|/journeys/||')
 echo "Journey ID: $JOURNEY_ID"
 ```
 
-### 6.2 Capture a search step
+### 6.2 Capture shared (non-PII) data
 
-This step is captured **before** a person is associated with the journey, so its event data
-will be stored as **plaintext**.
+`Capture` is for data that is **not** personally identifiable — search criteria, flight
+selections, pricing, payment status, booking references, and so on.  This data is stored in
+plaintext and is **never encrypted**.  It survives GDPR shredding completely intact.
 
 ```bash
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
@@ -159,19 +144,33 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
     "Capture": {
       "step": "search",
       "data": {
-        "tripType": "round-trip",
-        "origin": "LHR",
-        "destination": "JFK",
-        "departureDate": "2026-09-01"
+        "search": {
+          "tripType":      "round-trip",
+          "origin":        "LHR",
+          "destination":   "JFK",
+          "departureDate": "2026-09-01",
+          "passengers": {
+            "total":    1,
+            "adults":   1,
+            "children": 0,
+            "infants":  0
+          }
+        }
       }
     }
   }'
 ```
 
-### 6.3 Capture person data (PII)
+### 6.3 Capture person identity (PII)
 
-Pick a stable `subject_id` for this person. In production this comes from your identity
-system; in the demo we generate one once and reuse it.
+`CapturePerson` registers a named person slot (`person_ref`) within the journey.
+`person_ref` is a journey-local slot name — it is not PII and is stored in plaintext.
+`subject_id` is a stable UUID from your identity system; reuse it for the same person across
+multiple journeys so a single erasure request covers all of them.
+
+Name, email, and phone are encrypted at rest using AES-256-GCM under a per-subject DEK.
+
+Pick a stable `subject_id` for this person:
 
 **bash / zsh**
 
@@ -183,6 +182,7 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
   -d "{
     \"CapturePerson\": {
+      \"person_ref\": \"lead_booker\",
       \"subject_id\": \"$SUBJECT_ID\",
       \"name\":       \"Alice Smith\",
       \"email\":      \"alice@example.com\",
@@ -195,12 +195,13 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
 
 ```fish
 set SUBJECT_ID (uuidgen | tr '[:upper:]' '[:lower:]')
-echo "Subject ID: $SUBJECT_ID"   # save this — you will need it for the erasure step
+echo "Subject ID: $SUBJECT_ID"
 
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
   -d "{
     \"CapturePerson\": {
+      \"person_ref\": \"lead_booker\",
       \"subject_id\": \"$SUBJECT_ID\",
       \"name\":       \"Alice Smith\",
       \"email\":      \"alice@example.com\",
@@ -209,29 +210,32 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   }"
 ```
 
-### 6.4 Capture a passenger details step
+### 6.4 Capture per-person PII details
 
-This step is captured **after** the person is associated, so its event data will be
-**encrypted at rest**.
+`CapturePersonDetails` captures free-form PII (passport, date of birth, nationality, …) for
+an existing person slot.  The `data` blob is encrypted under the same subject's DEK.
+`CapturePerson` must be called first for the same `person_ref`.
 
 ```bash
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "Capture": {
-      "step": "passenger_details",
+    "CapturePersonDetails": {
+      "person_ref": "lead_booker",
       "data": {
-        "firstName":      "Alice",
-        "lastName":       "Smith",
         "dateOfBirth":    "1990-05-15",
         "passportNumber": "GB12345678",
-        "nationality":    "GBR"
+        "nationality":    "GB",
+        "passengerType":  "adult"
       }
     }
   }'
 ```
 
-### 6.5 Query the journey — data is visible
+Multiple `CapturePersonDetails` calls for the same `person_ref` are merged (JSON
+merge-patch), so you can split the data across several requests if needed.
+
+### 6.5 Query the journey — shared data visible, PII in separate table
 
 ```bash
 curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
@@ -243,25 +247,47 @@ You should see something like:
 {
   "id": "...",
   "state": "InProgress",
-  "accumulated_data": {
-    "tripType": "round-trip",
-    "origin": "LHR",
-    "destination": "JFK",
-    "departureDate": "2026-09-01",
-    "firstName": "Alice",
-    "lastName": "Smith",
-    "dateOfBirth": "1990-05-15",
-    "passportNumber": "GB12345678",
-    "nationality": "GBR"
+  "shared_data": {
+    "search": {
+      "tripType":      "round-trip",
+      "origin":        "LHR",
+      "destination":   "JFK",
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
+    }
   },
-  "current_step": "passenger_details",
-  ...
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        "Alice Smith",
+      "email":       "alice@example.com",
+      "phone":       "+44-7700-900000",
+      "details": {
+        "dateOfBirth":    "1990-05-15",
+        "passportNumber": "GB12345678",
+        "nationality":    "GB",
+        "passengerType":  "adult"
+      },
+      "forgotten": false
+    }
+  ]
 }
 ```
 
-The person data lives in the `journey_person` table (not in the journey view), so it is not
-shown here — but it is in the database, and the name/email/phone in the event store are
-**encrypted at rest**.
+`shared_data` contains only the non-PII data from `Capture` commands.  The `persons` array
+contains every person slot associated with the journey — identity fields from `CapturePerson`
+and free-form details from `CapturePersonDetails`, both decrypted on the read path.  The
+underlying event payloads in the event store are AES-256-GCM ciphertext; what you see here
+is the decrypted projection.
 
 ---
 
@@ -271,8 +297,8 @@ Connect to the database directly and inspect the raw event payloads.
 
 ### 7.1 PersonCaptured — always encrypted
 
-The `PersonCaptured` event stores name/email/phone as AES-256-GCM ciphertext. Only
-`subject_id` remains readable:
+The `PersonCaptured` event stores name/email/phone as AES-256-GCM ciphertext.
+`person_ref` and `subject_id` remain in plaintext so the read path can find the right DEK:
 
 ```bash
 psql -h localhost -U postgres journey_dynamics -c \
@@ -281,69 +307,60 @@ psql -h localhost -U postgres journey_dynamics -c \
      AND event_type   = 'PersonCaptured';"
 ```
 
-Expected output (values abbreviated):
+Expected output:
 
 ```
-  event_type   |                          payload
----------------+----------------------------------------------------------
- PersonCaptured | {"PersonCaptured": {"subject_id": "...",
-                |   "encrypted_pii": "8f3aK...", "nonce": "mNq2..."}}
+  event_type    |                              payload
+----------------+--------------------------------------------------------------
+ PersonCaptured | {"PersonCaptured": {"person_ref": "lead_booker",
+                |   "subject_id": "...", "encrypted_pii": "8f3aK...",
+                |   "nonce": "mNq2..."}}
 ```
 
-### 7.2 Modified (pre-person) — plaintext
+### 7.2 PersonDetailsUpdated — always encrypted
 
-The search step was captured **before** `CapturePerson`, so no encryption key existed yet.
-Its payload is stored as plain JSON:
+The `PersonDetailsUpdated` event stores the entire `data` blob as ciphertext:
+
+```bash
+psql -h localhost -U postgres journey_dynamics -c \
+  "SELECT event_type, payload FROM events
+   WHERE aggregate_id = '$JOURNEY_ID'
+     AND event_type   = 'PersonDetailsUpdated';"
+```
+
+```
+     event_type       |                              payload
+----------------------+--------------------------------------------------------------
+ PersonDetailsUpdated | {"PersonDetailsUpdated": {"person_ref": "lead_booker",
+                      |   "subject_id": "...", "encrypted_data": "xT7pR...",
+                      |   "nonce": "..."}}
+```
+
+### 7.3 Modified — always plaintext
+
+`Modified` events carry only shared, non-PII journey data and are **never** encrypted,
+regardless of whether a person has been captured on the journey.
 
 ```bash
 psql -h localhost -U postgres journey_dynamics -c \
   "SELECT event_type, payload FROM events
    WHERE aggregate_id = '$JOURNEY_ID'
      AND event_type   = 'JourneyModified'
-   ORDER BY sequence
-   LIMIT 1;"
+   ORDER BY sequence;"
 ```
 
 ```
- event_type     |                          payload
-----------------+----------------------------------------------------------
+  event_type    |                              payload
+----------------+--------------------------------------------------------------
  JourneyModified | {"Modified": {"step": "search",
                  |   "data": {"search": {"tripType": "round-trip",
                  |     "origin": "LHR", "destination": "JFK",
                  |     "departureDate": "2026-09-01"}}}}
 ```
 
-This is expected and legal: before a subject is identified, the data is not linked to a
-natural person and is therefore not personal data under GDPR. See the
-[design doc](CRYPTO_SHREDDING_DESIGN.md) for the full rationale. For maximum safety, journey
-designs should call `CapturePerson` as early as possible — before any `Capture` commands that
-include sensitive form data.
-
-### 7.3 Modified (post-person) — encrypted
-
-The passenger details step was captured **after** `CapturePerson`, so it is encrypted with
-the subject's Data Encryption Key:
-
-```bash
-psql -h localhost -U postgres journey_dynamics -c \
-  "SELECT event_type, payload FROM events
-   WHERE aggregate_id = '$JOURNEY_ID'
-     AND event_type   = 'JourneyModified'
-   ORDER BY sequence
-   LIMIT 1
-   OFFSET 1;"
-```
-
-```
- event_type     |                          payload
-----------------+----------------------------------------------------------
- JourneyModified | {"Modified": {"step": "passenger_details",
-                 |   "data": {"encrypted_data": "xT7pR...", "nonce": "..."}}}
-```
-
 ---
 
-## 8. Crypto-shredding demo — General Data Protection Regulation (GDPR) right to erasure
+## 8. Crypto-shredding demo — GDPR right to erasure
 
 ### 8.1 Send the erasure request
 
@@ -359,15 +376,16 @@ HTTP/1.1 204 No Content
 
 This single call:
 
-1. **Deletes the Data Encryption Key** for this subject from `subject_encryption_keys`. The
-   Advanced Encryption Standard 256-bit Galois/Counter Mode (AES-256-GCM) ciphertext in the
-   event store is now permanently unreadable — no key, no data.
-2. **Emits a `SubjectForgotten` audit event** on every journey that belongs to this subject,
-   creating a tamper-evident record of the erasure without containing any PII.
-3. **Clears the read model**: the `journey_person` row is deleted and `accumulated_data` in
-   `journey_view` is reset to `{}`.
+1. **Deletes the DEK** for this subject from `subject_encryption_keys`.  The AES-256-GCM
+   ciphertext in the event store is now permanently unreadable — no key, no data.
+2. **Emits a `SubjectForgotten` audit event** on every journey that contains this subject,
+   creating a tamper-evident record without containing any PII.
+3. **Nulls the `journey_person` row** for this subject: `name`, `email`, `phone`, and
+   `details` are cleared; `forgotten` is set to `true`.
+4. **Leaves `shared_data` completely intact** — the search criteria, flight selections, and
+   any other non-PII journey data are untouched.
 
-### 8.2 Query the journey — data is gone
+### 8.2 Query the journey — shared data still visible
 
 ```bash
 curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
@@ -377,21 +395,50 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
 {
   "id": "...",
   "state": "InProgress",
-  "accumulated_data": {},
-  "current_step": "passenger_details",
-  ...
+  "shared_data": {
+    "search": {
+      "tripType":      "round-trip",
+      "origin":        "LHR",
+      "destination":   "JFK",
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
+    }
+  },
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        null,
+      "email":       null,
+      "phone":       null,
+      "details":     {},
+      "forgotten":   true
+    }
+  ]
 }
 ```
 
-`accumulated_data` is now `{}`. The trip details and passenger information are gone.
+`shared_data` is completely intact — the search criteria survive because they were never
+encrypted.  The `persons` array still contains the slot, but it is now a tombstone:
+`forgotten` is `true` and all PII fields (`name`, `email`, `phone`, `details`) are null or
+empty.  The `subject_id` and `person_ref` are retained so the slot remains identifiable for
+audit purposes.
 
 ### 8.3 Verify the event store — ciphertext is still there, key is not
 
 The raw event payloads have not been touched — the encrypted blobs are still in the `events`
-table exactly as they were written. What changed is that the key is gone:
+table exactly as they were written.  What changed is that the key is gone:
 
 ```bash
-# The PersonCaptured encrypted_pii blob still exists in the event store...
+# The PersonCaptured encrypted_pii blob still exists...
 psql -h localhost -U postgres journey_dynamics -c \
   "SELECT event_type, payload FROM events
    WHERE aggregate_id = '$JOURNEY_ID'
@@ -399,28 +446,27 @@ psql -h localhost -U postgres journey_dynamics -c \
 ```
 
 ```
-  event_type   |                          payload
----------------+----------------------------------------------------------
- PersonCaptured | {"PersonCaptured": {"subject_id": "...",
-                |   "encrypted_pii": "8f3aK...", "nonce": "mNq2..."}}
+  event_type    |                              payload
+----------------+--------------------------------------------------------------
+ PersonCaptured | {"PersonCaptured": {"person_ref": "lead_booker",
+                |   "subject_id": "...", "encrypted_pii": "8f3aK...",
+                |   "nonce": "mNq2..."}}
 ```
 
 ```bash
-# ...as does the encrypted passenger details blob...
+# ...as does the PersonDetailsUpdated encrypted_data blob...
 psql -h localhost -U postgres journey_dynamics -c \
   "SELECT event_type, payload FROM events
    WHERE aggregate_id = '$JOURNEY_ID'
-     AND event_type   = 'JourneyModified'
-   ORDER BY sequence
-   LIMIT 1
-   OFFSET 1;"
+     AND event_type   = 'PersonDetailsUpdated';"
 ```
 
 ```
- event_type     |                          payload
-----------------+----------------------------------------------------------
- JourneyModified | {"Modified": {"step": "passenger_details",
-                 |   "data": {"encrypted_data": "xT7pR...", "nonce": "..."}}}
+     event_type       |                              payload
+----------------------+--------------------------------------------------------------
+ PersonDetailsUpdated | {"PersonDetailsUpdated": {"person_ref": "lead_booker",
+                      |   "subject_id": "...", "encrypted_data": "xT7pR...",
+                      |   "nonce": "..."}}
 ```
 
 ```bash
@@ -454,8 +500,9 @@ psql -h localhost -U postgres journey_dynamics -c \
 
 To prove the aggregate still loads correctly after shredding, send a `Complete` command.
 The server must rehydrate the journey by replaying every event from the store — including
-the encrypted `PersonCaptured` and `Modified` events whose key is now gone. The crypto
-layer substitutes safe sentinels for the unreadable payloads and the command succeeds:
+the encrypted `PersonCaptured` and `PersonDetailsUpdated` events whose key is now gone.
+The crypto layer substitutes safe sentinels for the unreadable payloads and the command
+succeeds:
 
 ```bash
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
@@ -463,8 +510,7 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -d '"Complete"'
 ```
 
-No error response means the aggregate rehydrated and the command was accepted. Query the
-journey to confirm the state transition happened and the PII is still absent:
+Query the journey to confirm the state transition happened and shared data is preserved:
 
 ```bash
 curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
@@ -474,29 +520,54 @@ curl -s "http://localhost:3030/journeys/$JOURNEY_ID" | jq .
 {
   "id": "...",
   "state": "Complete",
-  "accumulated_data": {},
-  "current_step": "passenger_details",
-  ...
+  "shared_data": {
+    "search": {
+      "tripType":      "round-trip",
+      "origin":        "LHR",
+      "destination":   "JFK",
+      "departureDate": "2026-09-01",
+      "passengers": {
+        "total":    1,
+        "adults":   1,
+        "children": 0,
+        "infants":  0
+      }
+    }
+  },
+  "current_step": "search",
+  "latest_workflow_decision": null,
+  "persons": [
+    {
+      "journey_id":  "...",
+      "person_ref":  "lead_booker",
+      "subject_id":  "...",
+      "name":        null,
+      "email":       null,
+      "phone":       null,
+      "details":     {},
+      "forgotten":   true
+    }
+  ]
 }
 ```
 
-`state` is now `"Complete"`. The sentinels applied during rehydration were:
+`state` is now `"Complete"`, `shared_data` is fully intact, and `persons` still shows the
+tombstone slot.  The sentinels applied during rehydration were:
 
 - `PersonCaptured` → `name: "[redacted]"`, `email: "[redacted]"`, `phone: null`
-- `Modified` events captured **after** `CapturePerson` (e.g. passenger details) → `data: {}`
-- `Modified` events captured **before** `CapturePerson` (e.g. search) → data is unchanged;
-  it was never encrypted
+- `PersonDetailsUpdated` → `data: {}`
+- `Modified` events → **unchanged** (they were never encrypted)
 
 Structural history — which steps were taken, workflow decisions, completion status — is fully
-preserved. Only the personal data is gone.
+preserved.  Only the personal data is gone.
 
 ---
 
 ## 9. Multi-journey shredding
 
 The same `subject_id` can be used across many journeys (e.g. a returning customer who starts
-multiple bookings). A single erasure request shreds all of them at once because all DEKs for
-that subject share the same key:
+multiple bookings).  A single erasure request shreds all of them at once because a subject
+has exactly one DEK regardless of how many journeys they appear in:
 
 **bash / zsh**
 
@@ -510,6 +581,7 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID_2" \
   -H "Content-Type: application/json" \
   -d "{
     \"CapturePerson\": {
+      \"person_ref\": \"lead_booker\",
       \"subject_id\": \"$SUBJECT_ID\",
       \"name\":       \"Alice Smith\",
       \"email\":      \"alice@example.com\",
@@ -517,14 +589,13 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID_2" \
     }
   }"
 
-# One DELETE shreds both journeys
+# One DELETE shreds both journeys' PersonCaptured events for this subject
 curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID"
 ```
 
 **fish**
 
 ```fish
-# Start a second journey for the same subject
 set JOURNEY2_LOCATION (curl -si -X POST http://localhost:3030/journeys \
   | grep -i '^location:' | tr -d '\r' | awk '{print $2}')
 set JOURNEY_ID_2 (echo $JOURNEY2_LOCATION | sed 's|/journeys/||')
@@ -533,6 +604,7 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID_2" \
   -H "Content-Type: application/json" \
   -d "{
     \"CapturePerson\": {
+      \"person_ref\": \"lead_booker\",
       \"subject_id\": \"$SUBJECT_ID\",
       \"name\":       \"Alice Smith\",
       \"email\":      \"alice@example.com\",
@@ -540,32 +612,83 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID_2" \
     }
   }"
 
-# One DELETE shreds both journeys
 curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID"
 ```
 
 ---
 
-## 10. What is NOT shredded
+## 10. Multi-subject journeys
+
+A single journey can contain multiple data subjects — for example, all passengers in a
+flight booking.  Each subject is an independent slot; shredding one leaves all others intact.
+
+**bash / zsh**
+
+```bash
+# Capture a second passenger in the same journey
+SUBJECT_ID_2=$(uuidgen | tr '[:upper:]' '[:lower:]')
+
+curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"CapturePerson\": {
+      \"person_ref\": \"passenger_1\",
+      \"subject_id\": \"$SUBJECT_ID_2\",
+      \"name\":       \"Bob Jones\",
+      \"email\":      \"bob@example.com\",
+      \"phone\":      null
+    }
+  }"
+
+# Shred only the second passenger — Alice's data and all shared_data survive
+curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID_2"
+```
+
+**fish**
+
+```fish
+set SUBJECT_ID_2 (uuidgen | tr '[:upper:]' '[:lower:]')
+
+curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"CapturePerson\": {
+      \"person_ref\": \"passenger_1\",
+      \"subject_id\": \"$SUBJECT_ID_2\",
+      \"name\":       \"Bob Jones\",
+      \"email\":      \"bob@example.com\",
+      \"phone\":      null
+    }
+  }"
+
+# Shred only the second passenger — Alice's data and all shared_data survive
+curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID_2"
+```
+
+---
+
+## 11. What is NOT shredded
 
 | Data | Shredded? | Reason |
 |---|---|---|
 | `name`, `email`, `phone` in `PersonCaptured` | ✅ Yes (ciphertext, key deleted) | Direct PII |
-| `data` field in `Modified` events captured *after* `CapturePerson` | ✅ Yes (ciphertext, key deleted) | Personal data once subject is identified |
-| `journey_person` row | ✅ Yes (row deleted) | Read-model PII cache |
-| `journey_view.accumulated_data` | ✅ Yes (reset to `{}`) | Read-model PII cache |
+| `data` in `PersonDetailsUpdated` | ✅ Yes (ciphertext, key deleted) | Direct PII |
+| `journey_person` row for target subject | ✅ Yes (fields nulled, `forgotten = true`) | Read-model PII cache |
+| Other persons' `journey_person` rows | ❌ No | Different DEK — independent subject |
+| `journey_view.shared_data` | ❌ No | Never contained PII; never encrypted |
 | `Started`, `Completed` events | ❌ No | No personal data |
 | `StepProgressed`, `WorkflowEvaluated` events | ❌ No | Workflow metadata only |
+| `Modified` events | ❌ No | Non-PII data only; never encrypted |
 | `SubjectForgotten` event | ❌ No | Audit trail — contains only `subject_id`, not PII |
-| `Modified` events captured *before* `CapturePerson` | ❌ No | Not yet linked to a person; not personal data under GDPR |
-| `subject_id` in `PersonCaptured` payload | ❌ No | Opaque identifier — not PII |
+| `subject_id` in event payloads | ❌ No | Opaque identifier — not PII |
 
 ---
 
 ## Further reading
 
-- [`CRYPTO_SHREDDING_DESIGN.md`](CRYPTO_SHREDDING_DESIGN.md) — full design rationale,
-  encryption scheme details, and future considerations
-- [`PERSON_CAPTURE.md`](PERSON_CAPTURE.md) — `CapturePerson` command reference
-- [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) — what was built across the four
+- [`MULTI_SUBJECT_DESIGN.md`](MULTI_SUBJECT_DESIGN.md) — full multi-subject GDPR
+  crypto-shredding design (current)
+- [`PERSON_CAPTURE.md`](PERSON_CAPTURE.md) — `CapturePerson` and `CapturePersonDetails`
+  command reference
+- [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) — what was built across the
   implementation phases

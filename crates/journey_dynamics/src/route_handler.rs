@@ -20,8 +20,14 @@ pub async fn shred_subject(
     Path(subject_id): Path<Uuid>,
     State(state): State<Arc<ApplicationState>>,
 ) -> Response {
-    // 1. Find all journeys belonging to this subject before we destroy the key.
-    let journeys = match state.subject_mapping.get_journeys(&subject_id).await {
+    // 1. Find all journeys that reference this subject by scanning the event store.
+    //    PersonCaptured and PersonDetailsUpdated events both carry subject_id in plaintext,
+    //    so no separate mapping table is needed.
+    let journeys = match state
+        .journey_query
+        .find_journeys_by_subject(&subject_id)
+        .await
+    {
         Ok(j) => j,
         Err(err) => {
             eprintln!("Error fetching journeys for subject {subject_id}: {err:#?}");
@@ -36,8 +42,8 @@ pub async fn shred_subject(
     }
 
     // 3. For each affected journey, emit a SubjectForgotten audit event via the
-    //    ForgetSubject command. The view-repository handler for SubjectForgotten
-    //    deletes the journey_person row and clears accumulated_data.
+    //    ForgetSubject command. The view-repository handler for SubjectForgotten nulls
+    //    out the person slot and sets forgotten = TRUE.
     for aggregate_id in &journeys {
         if let Err(err) = state
             .cqrs

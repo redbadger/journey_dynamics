@@ -46,6 +46,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::CapturePerson {
+            person_ref: "lead_booker".to_string(),
             subject_id: Uuid::new_v4(),
             name: "Alice Johnson".to_string(),
             email: "alice.johnson@example.com".to_string(),
@@ -61,6 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::CapturePerson {
+            person_ref: "lead_booker".to_string(),
             subject_id: Uuid::new_v4(),
             name: "Bob Smith".to_string(),
             email: "bob.smith@example.com".to_string(),
@@ -84,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id_2.to_string(),
         JourneyCommand::CapturePerson {
+            person_ref: "lead_booker".to_string(),
             subject_id: Uuid::new_v4(),
             name: "Carol Williams".to_string(),
             email: "carol.williams@example.com".to_string(),

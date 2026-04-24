@@ -14,7 +14,7 @@ header "Location" matches "/journeys/[a-f0-9-]+"
 
 
 # ===========================================
-# Step 2: Capture search criteria
+# Step 2: Capture search criteria (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -51,12 +51,12 @@ HTTP 200
 [Asserts]
 jsonpath "$.state" == "InProgress"
 jsonpath "$.current_step" == "search_criteria"
-jsonpath "$.accumulated_data.search.origin" == "JFK"
-jsonpath "$.accumulated_data.search.destination" == "LAX"
+jsonpath "$.shared_data.search.origin" == "JFK"
+jsonpath "$.shared_data.search.destination" == "LAX"
 
 
 # ===========================================
-# Step 4: Select outbound flight
+# Step 4: Select outbound flight (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -82,7 +82,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 5: Select return flight
+# Step 5: Select return flight (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -108,52 +108,13 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture passenger details
-# ===========================================
-POST {{host}}/journeys/{{journey_id}}
-Content-Type: application/json
-{
-    "Capture": {
-        "step": "passenger_details",
-        "data": {
-            "booking": {
-                "passengerDetails": [
-                    {
-                        "passengerType": "adult",
-                        "firstName": "Alice",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "1985-06-15",
-                        "passportNumber": "AB123456"
-                    },
-                    {
-                        "passengerType": "adult",
-                        "firstName": "Bob",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "1983-09-22",
-                        "passportNumber": "CD789012"
-                    },
-                    {
-                        "passengerType": "child",
-                        "firstName": "Charlie",
-                        "lastName": "Johnson",
-                        "dateOfBirth": "2016-03-10"
-                    }
-                ]
-            }
-        }
-    }
-}
-
-HTTP 204
-
-
-# ===========================================
-# Step 7: Capture primary contact person
+# Step 6: Capture passenger 0 identity (PII — encrypted at rest)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "CapturePerson": {
+        "person_ref": "passenger_0",
         "subject_id": "{{newUuid}}",
         "name": "Alice Johnson",
         "email": "alice.johnson@email.com",
@@ -165,7 +126,126 @@ HTTP 204
 
 
 # ===========================================
-# Step 8: Select seats
+# Step 7: Capture passenger 0 PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_0",
+        "data": {
+            "firstName": "Alice",
+            "lastName": "Johnson",
+            "dateOfBirth": "1985-06-15",
+            "passportNumber": "AB123456",
+            "passengerType": "adult"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 8: Capture passenger 1 identity (PII — encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePerson": {
+        "person_ref": "passenger_1",
+        "subject_id": "{{newUuid}}",
+        "name": "Bob Johnson",
+        "email": "bob.johnson@email.com",
+        "phone": null
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 9: Capture passenger 1 PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_1",
+        "data": {
+            "firstName": "Bob",
+            "lastName": "Johnson",
+            "dateOfBirth": "1983-09-22",
+            "passportNumber": "CD789012",
+            "passengerType": "adult"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 10: Capture passenger 2 identity (PII — encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePerson": {
+        "person_ref": "passenger_2",
+        "subject_id": "{{newUuid}}",
+        "name": "Charlie Johnson",
+        "email": "charlie.johnson@email.com",
+        "phone": null
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 11: Capture passenger 2 PII details (encrypted at rest)
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "CapturePersonDetails": {
+        "person_ref": "passenger_2",
+        "data": {
+            "firstName": "Charlie",
+            "lastName": "Johnson",
+            "dateOfBirth": "2016-03-10",
+            "passengerType": "child"
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 12: Signal passengers ready (non-PII workflow signal)
+# The decision engine uses this to advance to seat selection.
+# The actual PII details live in encrypted person slots — never in shared_data.
+# ===========================================
+POST {{host}}/journeys/{{journey_id}}
+Content-Type: application/json
+{
+    "Capture": {
+        "step": "passenger_details",
+        "data": {
+            "booking": {
+                "passengersReady": 3
+            }
+        }
+    }
+}
+
+HTTP 204
+
+
+# ===========================================
+# Step 13: Select seats (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -188,7 +268,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 9: Add extras/ancillaries
+# Step 14: Add extras / ancillaries (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -211,7 +291,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 10: Payment
+# Step 15: Payment (non-PII shared data)
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -241,7 +321,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 11: Complete the journey
+# Step 16: Complete the journey
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
@@ -253,14 +333,16 @@ HTTP 204
 
 
 # ===========================================
-# Step 12: Verify final state
+# Step 17: Verify final state
+# shared_data contains all non-PII journey data.
+# PII lives in encrypted person slots (journey_person table) — not exposed here.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
 jsonpath "$.state" == "Complete"
-jsonpath "$.accumulated_data.search.origin" == "JFK"
-jsonpath "$.accumulated_data.search.destination" == "LAX"
-jsonpath "$.accumulated_data.booking.pricing.totalPrice" == 759.98
-jsonpath "$.accumulated_data.booking.payment.transaction_id" == "txn_abc123xyz"
+jsonpath "$.shared_data.search.origin" == "JFK"
+jsonpath "$.shared_data.search.destination" == "LAX"
+jsonpath "$.shared_data.booking.pricing.totalPrice" == 759.98
+jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"

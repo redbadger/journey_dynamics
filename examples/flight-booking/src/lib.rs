@@ -22,13 +22,24 @@ pub struct SearchCriteria {
     pub passengers: PassengerCounts,
 }
 
-// Booking data group - contains all booking-related information
+// Booking data group - contains all booking-related information.
+//
+// NOTE: per-passenger PII (names, dates of birth, passport numbers, nationality) is
+// intentionally absent from this struct.  That data flows through `CapturePersonDetails`
+// and is encrypted at rest under each passenger's Data Encryption Key.  Only non-PII
+// workflow signals belong here.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BookingData {
     pub selected_outbound_flight: Option<FlightSelection>,
     pub selected_return_flight: Option<FlightSelection>,
-    pub passenger_details: Option<Vec<PassengerDetail>>,
+    /// Number of passengers whose PII details have been submitted via `CapturePersonDetails`.
+    /// Set by the application after capturing each passenger's details; used by the decision
+    /// engine to determine when to advance to seat selection.
+    pub passengers_ready: Option<u32>,
+    /// Set to `true` by the application when any passenger is an unaccompanied minor.
+    /// Drives the decision engine to the unaccompanied-minor-services step.
+    pub has_unaccompanied_minors: Option<bool>,
     pub pricing: Option<Pricing>,
     pub insurance: Option<Insurance>,
     pub payment: Option<Payment>,

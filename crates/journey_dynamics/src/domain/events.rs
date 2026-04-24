@@ -13,10 +13,16 @@ pub enum JourneyEvent {
         data: Value,
     },
     PersonCaptured {
+        person_ref: String,
         subject_id: Uuid,
         name: String,
         email: String,
         phone: Option<String>,
+    },
+    PersonDetailsUpdated {
+        person_ref: String,
+        subject_id: Uuid,
+        data: Value,
     },
     WorkflowEvaluated {
         suggested_actions: Vec<String>,
@@ -37,6 +43,7 @@ impl DomainEvent for JourneyEvent {
             JourneyEvent::Started { .. } => "JourneyOpened",
             JourneyEvent::Modified { .. } => "JourneyModified",
             JourneyEvent::PersonCaptured { .. } => "PersonCaptured",
+            JourneyEvent::PersonDetailsUpdated { .. } => "PersonDetailsUpdated",
             JourneyEvent::WorkflowEvaluated { .. } => "WorkflowEvaluated",
             JourneyEvent::StepProgressed { .. } => "StepProgressed",
             JourneyEvent::Completed => "JourneyClosed",

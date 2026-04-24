@@ -70,7 +70,11 @@ Returns `201 Created` with a `Location: /journeys/{journey_id}` header.
 curl http://localhost:3030/journeys/{journey_id}
 ```
 
-#### Capture step data
+#### Capture shared step data (non-PII)
+
+`Capture` is for data that is **not** personally identifiable — search criteria, flight
+selections, pricing, payment status, booking references, and so on. This data is stored in
+plaintext and survives GDPR shredding intact.
 
 ```bash
 curl -X POST http://localhost:3030/journeys/{journey_id} \
@@ -79,24 +83,38 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
     "Capture": {
       "step": "search",
       "data": {
-        "tripType": "round-trip",
-        "origin": "LHR",
-        "destination": "JFK"
+        "search": {
+          "tripType": "round-trip",
+          "origin": "LHR",
+          "destination": "JFK",
+          "departureDate": "2025-08-15",
+          "passengers": {
+            "total":    1,
+            "adults":   1,
+            "children": 0,
+            "infants":  0
+          }
+        }
       }
     }
   }'
 ```
 
-#### Capture person data (PII)
+#### Capture person identity (PII)
 
-`subject_id` is an opaque identifier for the data subject. Use the same UUID for the same
-person across multiple journeys so that a single erasure request shreds all their data.
+`person_ref` is a journey-local slot name (e.g. `"lead_booker"`, `"passenger_0"`). It is not
+PII and is stored in plaintext. `subject_id` is a stable UUID from your identity system — reuse
+it for the same person across multiple journeys so a single erasure request covers all of them.
+
+Name, email, and phone are encrypted at rest using AES-256-GCM under a per-subject Data
+Encryption Key (DEK).
 
 ```bash
 curl -X POST http://localhost:3030/journeys/{journey_id} \
   -H "Content-Type: application/json" \
   -d '{
     "CapturePerson": {
+      "person_ref": "passenger_0",
       "subject_id": "'"$SUBJECT_ID"'",
       "name": "Alice Smith",
       "email": "alice@example.com",
@@ -105,8 +123,27 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
   }'
 ```
 
-Name, email, and phone are encrypted at rest using Advanced Encryption Standard 256-bit Galois/Counter Mode (AES-256-GCM). The `subject_id` is stored
-in plaintext so the correct key can be found on the read path without decrypting anything first.
+#### Capture per-person PII details
+
+Free-form PII details (passport number, date of birth, nationality, …) for an existing person
+slot. `CapturePerson` must be called first for the same `person_ref`. The `data` blob is
+encrypted under the same subject's DEK. Multiple calls for the same `person_ref` are merged.
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "CapturePersonDetails": {
+      "person_ref": "passenger_0",
+      "data": {
+        "dateOfBirth":    "1990-05-15",
+        "passportNumber": "GB123456789",
+        "nationality":    "GB",
+        "passengerType":  "adult"
+      }
+    }
+  }'
+```
 
 #### Complete a journey
 
@@ -124,11 +161,11 @@ curl -i -X DELETE http://localhost:3030/subjects/{subject_id}
 
 Returns `204 No Content`. This:
 
-1. Permanently deletes the subject's Data Encryption Key — all ciphertext in the event store
-   becomes irrecoverable.
+1. Permanently deletes the subject's Data Encryption Key — all ciphertext belonging to that
+   subject in the event store becomes irrecoverable.
 2. Emits a `SubjectForgotten` audit event on every affected journey's event stream.
-3. Deletes the `journey_person` row and clears `accumulated_data` for every affected journey
-   in the read model.
+3. Nulls out the subject's `journey_person` row(s) and sets `forgotten = true`.
+4. Leaves all other persons' data and the journey's shared (non-PII) data completely intact.
 
 See [`docs/QUICK_START.md`](docs/QUICK_START.md) for a full walkthrough including a
 crypto-shredding demo.
@@ -152,8 +189,8 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 | Document | Description |
 |---|---|
 | [`docs/QUICK_START.md`](docs/QUICK_START.md) | Step-by-step walkthrough and crypto-shredding demo |
-| [`docs/CRYPTO_SHREDDING_DESIGN.md`](docs/CRYPTO_SHREDDING_DESIGN.md) | Full GDPR crypto-shredding design |
-| [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` command reference |
+| [`docs/MULTI_SUBJECT_DESIGN.md`](docs/MULTI_SUBJECT_DESIGN.md) | Multi-subject GDPR crypto-shredding design (current) |
+| [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` and `CapturePersonDetails` command reference |
 | [`docs/IMPLEMENTATION_SUMMARY.md`](docs/IMPLEMENTATION_SUMMARY.md) | What was built and why |
 | [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) | Architecture Review Board (ARB) review document |
 
@@ -164,4 +201,3 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 ```bash
 # Must be run from the examples/flight-booking directory
 cargo run -p flight-booking --bin generate_schema
-```
