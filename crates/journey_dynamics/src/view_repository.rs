@@ -180,10 +180,10 @@ impl StructuredJourneyViewRepository {
             WHERE aggregate_type = 'Journey'
               AND (
                 (event_type = 'PersonCaptured'
-                 AND payload::jsonb -> 'PersonCaptured' ->> 'subject_id' = $1)
+                 AND payload -> 'PersonCaptured' ->> 'subject_id' = $1)
                 OR
                 (event_type = 'PersonDetailsUpdated'
-                 AND payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
+                 AND payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
               )
             ",
         )
@@ -298,7 +298,7 @@ impl StructuredJourneyViewRepository {
                 sqlx::query(
                     r"
                     UPDATE journey_person
-                    SET details    = details || $3::jsonb,
+                    SET details    = details || $3,
                         updated_at = CURRENT_TIMESTAMP
                     WHERE journey_id = $1 AND person_ref = $2
                     ",

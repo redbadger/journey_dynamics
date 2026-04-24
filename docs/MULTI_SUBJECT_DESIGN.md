@@ -543,8 +543,8 @@ SELECT DISTINCT aggregate_id
 FROM events
 WHERE aggregate_type = 'Journey'
   AND event_type IN ('PersonCaptured', 'PersonDetailsUpdated')
-  AND payload::jsonb -> 'PersonCaptured' ->> 'subject_id' = $1::text
-   OR payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id' = $1::text;
+  AND payload -> 'PersonCaptured' ->> 'subject_id' = $1::text
+   OR payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1::text;
 ```
 
 This query scans `subject_id` fields that are always stored in plaintext (never encrypted).
@@ -552,11 +552,11 @@ An index on the JSON path can be added if performance matters:
 
 ```sql
 CREATE INDEX idx_events_person_captured_subject
-    ON events ((payload::jsonb -> 'PersonCaptured' ->> 'subject_id'))
+    ON events ((payload -> 'PersonCaptured' ->> 'subject_id'))
     WHERE event_type = 'PersonCaptured';
 
 CREATE INDEX idx_events_person_details_subject
-    ON events ((payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id'))
+    ON events ((payload -> 'PersonDetailsUpdated' ->> 'subject_id'))
     WHERE event_type = 'PersonDetailsUpdated';
 ```
 
@@ -644,10 +644,10 @@ CREATE INDEX idx_subject_keys_subject_id ON subject_encryption_keys(subject_id);
 
 -- Event store indexes for subject lookup during shredding
 CREATE INDEX idx_events_person_captured_subject
-    ON events ((payload::jsonb -> 'PersonCaptured' ->> 'subject_id'))
+    ON events ((payload -> 'PersonCaptured' ->> 'subject_id'))
     WHERE event_type = 'PersonCaptured';
 CREATE INDEX idx_events_person_details_subject
-    ON events ((payload::jsonb -> 'PersonDetailsUpdated' ->> 'subject_id'))
+    ON events ((payload -> 'PersonDetailsUpdated' ->> 'subject_id'))
     WHERE event_type = 'PersonDetailsUpdated';
 ```
 
