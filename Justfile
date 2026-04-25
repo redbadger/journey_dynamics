@@ -22,6 +22,7 @@ test-hurl:
     hurl --variable host=http://localhost:3030 --test \
         tests/error-cases.hurl \
         tests/full-flight-booking.hurl \
-        tests/full-flight-booking_with_shredding.hurl
+        tests/full-flight-booking_with_shredding.hurl \
+        tests/full-flight-booking_with_shredding_by_email.hurl
 
 ci: lint build test test-hurl

@@ -6,12 +6,18 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
     command_extractor::CommandExtractor, domain::commands::JourneyCommand, state::ApplicationState,
 };
+
+/// Request body for `DELETE /subjects/by-email`.
+#[derive(Debug, Deserialize)]
+pub struct EraseByEmailBody {
+    pub email: String,
+}
 
 // Handles GDPR right-to-erasure requests by crypto-shredding the subject's DEK,
 // which permanently renders all encrypted PII irrecoverable, then emits a
@@ -53,6 +59,76 @@ pub async fn shred_subject(
             // The key is already gone so the shredding is complete. Log and continue
             // so that we still attempt to clean up the remaining journeys.
             eprintln!("Error emitting SubjectForgotten for journey {aggregate_id}: {err:#?}");
+        }
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+// Handles GDPR right-to-erasure requests by email address. Resolves every
+// non-forgotten subject_id stored against the supplied email (case-insensitively),
+// then runs the same crypto-shredding flow as `shred_subject` for each one.
+// This is robust to the caller's subject-ID derivation scheme and works even
+// after an email address has changed, provided the original address was stored
+// in `journey_person` at booking time.
+pub async fn shred_subjects_by_email(
+    State(state): State<Arc<ApplicationState>>,
+    Json(body): Json<EraseByEmailBody>,
+) -> Response {
+    // 1. Resolve all non-forgotten subject_ids linked to this email.
+    //    The query uses lower() on both sides for case-insensitive matching.
+    let subject_ids = match state
+        .journey_query
+        .find_subjects_by_email(&body.email)
+        .await
+    {
+        Ok(ids) => ids,
+        Err(err) => {
+            eprintln!(
+                "Error looking up subjects for email {}: {err:#?}",
+                body.email
+            );
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+    };
+
+    // 2. For each resolved subject_id, run the existing shredding flow.
+    for subject_id in &subject_ids {
+        // 2a. Find all journeys that reference this subject.
+        let journeys = match state
+            .journey_query
+            .find_journeys_by_subject(subject_id)
+            .await
+        {
+            Ok(j) => j,
+            Err(err) => {
+                eprintln!("Error fetching journeys for subject {subject_id}: {err:#?}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            }
+        };
+
+        // 2b. Crypto-shred: delete the DEK — all ciphertext is now permanently unreadable.
+        if let Err(err) = state.key_store.delete_key(subject_id).await {
+            eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+
+        // 2c. Emit a SubjectForgotten audit event on every affected journey.
+        for aggregate_id in &journeys {
+            if let Err(err) = state
+                .cqrs
+                .execute(
+                    aggregate_id,
+                    JourneyCommand::ForgetSubject {
+                        subject_id: *subject_id,
+                    },
+                )
+                .await
+            {
+                // The key is already gone so the shredding is complete. Log and
+                // continue so we still attempt to clean up the remaining journeys.
+                eprintln!("Error emitting SubjectForgotten for journey {aggregate_id}: {err:#?}");
+            }
         }
     }
 

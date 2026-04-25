@@ -5,7 +5,7 @@ use axum::{
     routing::{delete, get, post},
 };
 use journey_dynamics::{
-    route_handler::{command_handler, query_handler, shred_subject},
+    route_handler::{command_handler, query_handler, shred_subject, shred_subjects_by_email},
     state::new_application_state,
 };
 
@@ -19,6 +19,7 @@ async fn main() {
             "/journeys/{journey_id}",
             get(query_handler).post(command_handler),
         )
+        .route("/subjects/by-email", delete(shred_subjects_by_email))
         .route("/subjects/{subject_id}", delete(shred_subject))
         .with_state(state);
 
