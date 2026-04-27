@@ -284,20 +284,20 @@ pub fn parse_pii_variants(
 
 #[cfg(test)]
 mod tests {
-    use zyn::syn::parse_quote;
+    use zyn::syn::{Data, DeriveInput, parse_quote};
 
     use super::*;
 
-    fn variants_from(input: zyn::syn::DeriveInput) -> Punctuated<Variant, Comma> {
+    fn variants_from(input: DeriveInput) -> Punctuated<Variant, Comma> {
         match input.data {
-            zyn::syn::Data::Enum(e) => e.variants,
+            Data::Enum(e) => e.variants,
             _ => panic!("expected enum"),
         }
     }
 
     #[test]
     fn skips_unannotated_variants() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 Started { id: uuid::Uuid },
                 Completed,
@@ -309,7 +309,7 @@ mod tests {
 
     #[test]
     fn parses_single_pii_variant() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "PersonCaptured")]
                 PersonCaptured {
@@ -333,7 +333,7 @@ mod tests {
 
     #[test]
     fn parses_custom_sentinel() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "PersonDetailsUpdated", sentinel = "encrypted_data")]
                 PersonDetailsUpdated {
@@ -353,7 +353,7 @@ mod tests {
 
     #[test]
     fn parses_mixed_pii_and_non_pii_variants() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 Started { id: uuid::Uuid },
                 #[pii(event_type = "Pii")]
@@ -376,7 +376,7 @@ mod tests {
 
     #[test]
     fn errors_on_missing_event_type() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(sentinel = "x")]
                 Bad {
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn errors_on_unannotated_field() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "Bad")]
                 Bad {
@@ -412,7 +412,7 @@ mod tests {
 
     #[test]
     fn errors_on_missing_subject() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "Bad")]
                 Bad {
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn errors_on_missing_secret() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "Bad")]
                 Bad {
@@ -448,7 +448,7 @@ mod tests {
 
     #[test]
     fn errors_on_unit_variant() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "Bad")]
                 Bad
@@ -463,7 +463,7 @@ mod tests {
 
     #[test]
     fn errors_on_multiple_subject_fields() {
-        let input: zyn::syn::DeriveInput = parse_quote! {
+        let input: DeriveInput = parse_quote! {
             enum E {
                 #[pii(event_type = "Bad")]
                 Bad {
