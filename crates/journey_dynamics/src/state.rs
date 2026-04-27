@@ -24,7 +24,12 @@ pub struct ApplicationState {
 /// - Database migrations fail
 #[allow(clippy::missing_panics_doc)]
 pub async fn new_application_state() -> ApplicationState {
-    let pool = default_postgress_pool(std::env::var("DATABASE_URL").unwrap().as_str()).await;
+    let pool = default_postgress_pool(
+        std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL environment variable must be set")
+            .as_str(),
+    )
+    .await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)

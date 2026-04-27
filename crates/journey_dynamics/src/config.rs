@@ -53,7 +53,7 @@ pub fn cqrs_framework(
         crate::services::schema_validator::JsonSchemaValidator::from_json_str(include_str!(
             "../../../examples/flight-booking/schemas/flight-booking-schema.json"
         ))
-        .unwrap(),
+        .expect("flight-booking JSON schema is invalid — this is a compile-time programming error"),
     );
 
     let services = JourneyServices::new(decision_engine, schema_validator);
