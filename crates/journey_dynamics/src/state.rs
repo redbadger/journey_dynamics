@@ -3,10 +3,14 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use postgres_es::default_postgress_pool;
 
-use crate::config::{CryptoCqrs, cqrs_framework};
-use crate::crypto::cipher::PiiCipher;
-use crate::crypto::key_store::{KeyStore, PostgresKeyStore};
-use crate::view_repository::StructuredJourneyViewRepository;
+use crate::{
+    config::{CryptoCqrs, cqrs_framework},
+    crypto::{
+        cipher::PiiCipher,
+        key_store::{KeyStore, PostgresKeyStore},
+    },
+    view_repository::StructuredJourneyViewRepository,
+};
 
 #[derive(Clone)]
 pub struct ApplicationState {
@@ -24,7 +28,12 @@ pub struct ApplicationState {
 /// - Database migrations fail
 #[allow(clippy::missing_panics_doc)]
 pub async fn new_application_state() -> ApplicationState {
-    let pool = default_postgress_pool(std::env::var("DATABASE_URL").unwrap().as_str()).await;
+    let pool = default_postgress_pool(
+        std::env::var("DATABASE_URL")
+            .expect("DATABASE_URL environment variable must be set")
+            .as_str(),
+    )
+    .await;
 
     sqlx::migrate!("../../migrations")
         .run(&pool)

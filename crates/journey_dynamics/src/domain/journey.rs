@@ -1,15 +1,15 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::domain::events::JourneyEvent;
-use crate::services::schema_validator::SchemaValidator;
-use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
-use cqrs_es::Aggregate;
-use cqrs_es::event_sink::EventSink;
+use cqrs_es::{Aggregate, event_sink::EventSink};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::{
+    domain::{commands::JourneyCommand, events::JourneyEvent},
+    services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Journey {
@@ -47,7 +47,7 @@ pub struct WorkflowDecisionState {
     pub suggested_actions: Vec<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JourneyState {
     #[default]
     InProgress,
@@ -288,7 +288,7 @@ impl Aggregate for Journey {
     }
 }
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum JourneyError {
     #[error("Journey not found")]
     NotFound,
@@ -335,32 +335,32 @@ impl JourneyServices {
 
 impl Journey {
     #[must_use]
-    pub fn id(&self) -> Uuid {
+    pub const fn id(&self) -> Uuid {
         self.id
     }
 
     #[must_use]
-    pub fn state(&self) -> JourneyState {
+    pub const fn state(&self) -> JourneyState {
         self.state
     }
 
     #[must_use]
-    pub fn shared_data(&self) -> &Value {
+    pub const fn shared_data(&self) -> &Value {
         &self.shared_data
     }
 
     #[must_use]
-    pub fn current_step(&self) -> Option<&String> {
+    pub const fn current_step(&self) -> Option<&String> {
         self.current_step.as_ref()
     }
 
     #[must_use]
-    pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
+    pub const fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
     }
 
     #[must_use]
-    pub fn persons(&self) -> &BTreeMap<String, PersonSlot> {
+    pub const fn persons(&self) -> &BTreeMap<String, PersonSlot> {
         &self.persons
     }
 }

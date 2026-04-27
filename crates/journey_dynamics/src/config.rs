@@ -1,17 +1,16 @@
 use std::sync::Arc;
 
-use cqrs_es::persist::PersistedEventStore;
-use cqrs_es::{CqrsFramework, Query};
+use cqrs_es::{CqrsFramework, Query, persist::PersistedEventStore};
 use postgres_es::PostgresEventRepository;
 use sqlx::{Pool, Postgres};
 
 use crate::SimpleLoggingQuery;
-use crate::crypto::cipher::PiiCipher;
-use crate::crypto::key_store::KeyStore;
-use crate::crypto::repository::CryptoShreddingEventRepository;
-use crate::domain::journey::{Journey, JourneyServices};
-use crate::services::decision_engine::GoRulesDecisionEngine;
-use crate::view_repository::StructuredJourneyViewRepository;
+use crate::{
+    crypto::{cipher::PiiCipher, key_store::KeyStore, repository::CryptoShreddingEventRepository},
+    domain::journey::{Journey, JourneyServices},
+    services::decision_engine::GoRulesDecisionEngine,
+    view_repository::StructuredJourneyViewRepository,
+};
 
 /// The CQRS framework type used throughout the application.
 ///
@@ -53,7 +52,7 @@ pub fn cqrs_framework(
         crate::services::schema_validator::JsonSchemaValidator::from_json_str(include_str!(
             "../../../examples/flight-booking/schemas/flight-booking-schema.json"
         ))
-        .unwrap(),
+        .expect("flight-booking JSON schema is invalid — this is a compile-time programming error"),
     );
 
     let services = JourneyServices::new(decision_engine, schema_validator);

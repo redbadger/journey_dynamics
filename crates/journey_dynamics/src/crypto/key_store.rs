@@ -7,8 +7,10 @@
 //! subject is a single hard-delete of that row: without the DEK, all ciphertext in the
 //! event store is permanently unreadable.
 
-use std::collections::HashMap;
-use std::sync::Mutex;
+use std::{
+    collections::HashMap,
+    sync::{Mutex, PoisonError},
+};
 
 use async_trait::async_trait;
 use thiserror::Error;
@@ -27,6 +29,14 @@ pub enum KeyStoreError {
     Crypto(#[from] CryptoError),
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Key store lock poisoned — another thread panicked while holding the lock")]
+    LockPoisoned,
+}
+
+impl<T> From<PoisonError<T>> for KeyStoreError {
+    fn from(_: PoisonError<T>) -> Self {
+        Self::LockPoisoned
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -85,24 +95,28 @@ impl Default for InMemoryKeyStore {
 #[async_trait]
 impl KeyStore for InMemoryKeyStore {
     async fn get_or_create_key(&self, subject_id: &Uuid) -> Result<KeyMaterial, KeyStoreError> {
-        let mut store = self.store.lock().unwrap();
+        let dek = {
+            let mut store = self.store.lock()?;
 
-        if let Some((key_id, key)) = store.get(subject_id) {
-            // Key already exists — return a copy.
-            return Ok(KeyMaterial {
-                key_id: *key_id,
-                key: Zeroizing::new(key.to_vec()),
-            });
-        }
+            if let Some((key_id, key)) = store.get(subject_id) {
+                // Key already exists — return a copy.
+                return Ok(KeyMaterial {
+                    key_id: *key_id,
+                    key: Zeroizing::new(key.to_vec()),
+                });
+            }
 
-        // Generate a fresh DEK, stash a copy, and return the original.
-        let dek = PiiCipher::generate_dek();
-        store.insert(*subject_id, (dek.key_id, Zeroizing::new(dek.key.to_vec())));
+            // Generate a fresh DEK, stash a copy, and return the original.
+            let dek = PiiCipher::generate_dek();
+            store.insert(*subject_id, (dek.key_id, Zeroizing::new(dek.key.to_vec())));
+            dek
+        };
+
         Ok(dek)
     }
 
     async fn get_key(&self, subject_id: &Uuid) -> Result<Option<KeyMaterial>, KeyStoreError> {
-        let store = self.store.lock().unwrap();
+        let store = self.store.lock()?;
         Ok(store.get(subject_id).map(|(key_id, key)| KeyMaterial {
             key_id: *key_id,
             key: Zeroizing::new(key.to_vec()),
@@ -110,8 +124,8 @@ impl KeyStore for InMemoryKeyStore {
     }
 
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError> {
-        let mut store = self.store.lock().unwrap();
-        store.remove(subject_id);
+        self.store.lock()?.remove(subject_id);
+
         Ok(())
     }
 }
@@ -132,7 +146,7 @@ pub struct PostgresKeyStore {
 
 impl PostgresKeyStore {
     #[must_use]
-    pub fn new(pool: sqlx::Pool<sqlx::Postgres>, cipher: PiiCipher) -> Self {
+    pub const fn new(pool: sqlx::Pool<sqlx::Postgres>, cipher: PiiCipher) -> Self {
         Self { pool, cipher }
     }
 }

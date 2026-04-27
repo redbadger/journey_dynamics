@@ -21,15 +21,20 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use cqrs_es::Aggregate;
-use cqrs_es::persist::{
-    PersistedEventRepository, PersistenceError, ReplayStream, SerializedEvent, SerializedSnapshot,
+use cqrs_es::{
+    Aggregate,
+    persist::{
+        PersistedEventRepository, PersistenceError, ReplayStream, SerializedEvent,
+        SerializedSnapshot,
+    },
 };
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::cipher::{EncryptedPayload, PiiCipher};
-use super::key_store::KeyStore;
+use super::{
+    cipher::{EncryptedPayload, PiiCipher},
+    key_store::KeyStore,
+};
 
 // ── Event-type strings (from DomainEvent::event_type()) ───────────────────
 
@@ -57,11 +62,19 @@ enum RepoError {
     Crypto(#[from] super::cipher::CryptoError),
     #[error("Key store error: {0}")]
     KeyStore(#[from] super::key_store::KeyStoreError),
+    #[error("Event repository lock poisoned — another thread panicked while holding the lock")]
+    LockPoisoned,
+}
+
+impl<T> From<std::sync::PoisonError<T>> for RepoError {
+    fn from(_: std::sync::PoisonError<T>) -> Self {
+        Self::LockPoisoned
+    }
 }
 
 impl From<RepoError> for PersistenceError {
     fn from(e: RepoError) -> Self {
-        PersistenceError::UnknownError(Box::new(e))
+        Self::UnknownError(Box::new(e))
     }
 }
 
@@ -89,7 +102,17 @@ impl InMemoryEventRepository {
     ///
     /// Panics if the internal mutex is poisoned.
     pub fn all_events(&self) -> Vec<SerializedEvent> {
-        self.events.lock().unwrap().clone()
+        self.events
+            .lock()
+            .expect("InMemoryEventRepository mutex poisoned")
+            .clone()
+    }
+
+    /// Acquires the mutex, mapping a [`PoisonError`] to a [`PersistenceError`].
+    fn locked(&self) -> Result<std::sync::MutexGuard<'_, Vec<SerializedEvent>>, PersistenceError> {
+        self.events
+            .lock()
+            .map_err(|e| PersistenceError::from(RepoError::from(e)))
     }
 }
 
@@ -99,9 +122,7 @@ impl PersistedEventRepository for InMemoryEventRepository {
         aggregate_id: &str,
     ) -> Result<Vec<SerializedEvent>, PersistenceError> {
         Ok(self
-            .events
-            .lock()
-            .unwrap()
+            .locked()?
             .iter()
             .filter(|e| e.aggregate_id == aggregate_id)
             .cloned()
@@ -113,12 +134,14 @@ impl PersistedEventRepository for InMemoryEventRepository {
         aggregate_id: &str,
         last_sequence: usize,
     ) -> Result<Vec<SerializedEvent>, PersistenceError> {
-        let events = self.events.lock().unwrap();
-        let filtered: Vec<SerializedEvent> = events
-            .iter()
-            .filter(|e| e.aggregate_id == aggregate_id)
-            .cloned()
-            .collect();
+        let filtered: Vec<SerializedEvent> = {
+            let events = self.locked()?;
+            events
+                .iter()
+                .filter(|e| e.aggregate_id == aggregate_id)
+                .cloned()
+                .collect()
+        };
         let len = filtered.len();
         Ok(filtered
             .into_iter()
@@ -138,8 +161,7 @@ impl PersistedEventRepository for InMemoryEventRepository {
         events: &[SerializedEvent],
         _snapshot_update: Option<(String, Value, usize)>,
     ) -> Result<(), PersistenceError> {
-        let mut stored = self.events.lock().unwrap();
-        stored.extend_from_slice(events);
+        self.locked()?.extend_from_slice(events);
         Ok(())
     }
 
@@ -148,9 +170,7 @@ impl PersistedEventRepository for InMemoryEventRepository {
         aggregate_id: &str,
     ) -> Result<ReplayStream, PersistenceError> {
         let events: Vec<SerializedEvent> = self
-            .events
-            .lock()
-            .unwrap()
+            .locked()?
             .iter()
             .filter(|e| e.aggregate_id == aggregate_id)
             .cloned()
@@ -164,7 +184,7 @@ impl PersistedEventRepository for InMemoryEventRepository {
     }
 
     async fn stream_all_events<A: Aggregate>(&self) -> Result<ReplayStream, PersistenceError> {
-        let events: Vec<SerializedEvent> = self.events.lock().unwrap().clone();
+        let events: Vec<SerializedEvent> = self.locked()?.clone();
         let (mut feed, stream) = ReplayStream::new(events.len().max(1));
         for event in events {
             feed.push(Ok(event)).await?;
@@ -944,7 +964,7 @@ mod tests {
         // PII must NOT be stored in plaintext.
         assert!(
             pd.get("data")
-                .map_or(true, |d| d.get("passportNumber").is_none()),
+                .is_none_or(|d| d.get("passportNumber").is_none()),
             "passportNumber must not appear in plaintext"
         );
 

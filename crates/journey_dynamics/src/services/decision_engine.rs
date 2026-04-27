@@ -1,9 +1,11 @@
-use crate::domain::journey::{Journey, JourneyState};
 use async_trait::async_trait;
 use serde_json::{Map, Value};
 use tokio::runtime::Handle;
-use zen_engine::model::DecisionContent;
-use zen_engine::{DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions};
+use zen_engine::{
+    DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions, model::DecisionContent,
+};
+
+use crate::domain::journey::{Journey, JourneyState};
 
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
@@ -73,7 +75,7 @@ impl GoRulesDecisionEngine {
     #[must_use]
     pub fn new(json: &str) -> Self {
         let decision_content: DecisionContent = serde_json::from_str(json).unwrap();
-        GoRulesDecisionEngine { decision_content }
+        Self { decision_content }
     }
 }
 
