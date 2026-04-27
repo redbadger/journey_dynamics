@@ -1672,14 +1672,12 @@ dependencies = [
 name = "journey_dynamics"
 version = "0.1.0"
 dependencies = [
- "aes 0.9.0",
- "aes-gcm",
- "aes-kw",
  "async-trait",
  "axum",
  "base64",
  "chrono",
  "cqrs-es",
+ "cqrs-es-crypto",
  "dotenv",
  "json-patch",
  "jsonschema 0.46.2",
@@ -1691,7 +1689,6 @@ dependencies = [
  "tokio",
  "uuid",
  "zen-engine",
- "zeroize",
 ]
 
 [[package]]

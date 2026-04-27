@@ -4,11 +4,9 @@ version = "0.1.0"
 edition.workspace = true
 
 [dependencies]
-aes = "0.9"
-aes-gcm = "0.10"
-aes-kw = { version = "0.3" }
 async-trait = "0.1"
 base64 = "0.22"
+cqrs-es-crypto = { path = "../cqrs-es-crypto" }
 axum = "0.8.9"
 chrono = "0.4.44"
 cqrs-es = "0.5.0"
@@ -29,4 +27,6 @@ thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
 zen-engine = "0.55.0"
-zeroize = "1"
+
+[dev-dependencies]
+cqrs-es-crypto = { path = "../cqrs-es-crypto", features = ["testing"] }

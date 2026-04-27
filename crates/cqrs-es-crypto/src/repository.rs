@@ -171,6 +171,14 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         }
     }
 
+    /// Returns a reference to the inner [`PersistedEventRepository`].
+    ///
+    /// Primarily useful in tests to inspect or inject raw (unencrypted) events,
+    /// bypassing the crypto layer.
+    pub fn inner(&self) -> &R {
+        &self.inner
+    }
+
     // ── Write helpers ─────────────────────────────────────────────────────────
 
     async fn encrypt_events(
