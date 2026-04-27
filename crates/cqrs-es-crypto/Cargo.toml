@@ -5,8 +5,10 @@ edition.workspace = true
 
 [features]
 testing = []
+derive  = ["dep:cqrs-es-crypto-derive"]
 
 [dependencies]
+cqrs-es-crypto-derive = { path = "../cqrs-es-crypto-derive", optional = true }
 aes-gcm      = "0.10"
 aes-kw       = "0.3"
 async-trait  = "0.1"

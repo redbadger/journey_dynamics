@@ -1,0 +1,10 @@
+[package]
+name = "cqrs-es-crypto-derive"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+zyn = { version = "0.5", features = ["derive"] }
