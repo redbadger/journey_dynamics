@@ -70,9 +70,6 @@ pub struct PiiFieldModel {
 /// A fully-parsed and validated `#[pii(...)]`-annotated enum variant.
 #[derive(Debug, Clone)]
 pub struct PiiVariantModel {
-    /// The variant identifier (e.g. `PersonCaptured`).
-    pub ident: Ident,
-
     /// The `event_type` string from `#[pii(event_type = "...")]`.
     ///
     /// This is the value returned by `DomainEvent::event_type()` for this

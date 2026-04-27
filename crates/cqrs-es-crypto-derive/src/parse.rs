@@ -248,7 +248,6 @@ fn parse_pii_variant(variant: &Variant, raw: RawVariantAttr) -> syn::Result<PiiV
     }
 
     Ok(PiiVariantModel {
-        ident: variant.ident.clone(),
         event_type: raw.event_type,
         sentinel: raw.sentinel,
         fields,

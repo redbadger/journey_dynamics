@@ -4,8 +4,14 @@
 |---|---|
 | **Crate** | `cqrs-es-crypto` |
 | **Feature** | Derive `PiiEventCodec` from annotated event enums |
-| **Status** | Proposed |
+| **Status** | Implemented |
 | **Depends on** | [CRYPTO_CRATE_EXTRACTION.md](./CRYPTO_CRATE_EXTRACTION.md) (Implemented) |
+
+> **Implementation note:** All six phases are complete.  The derive macro
+> (`cqrs-es-crypto-derive`) generates a full `PiiEventCodec` implementation from
+> annotated event enums.  `JourneyEvent` in `journey_dynamics` now uses
+> `#[derive(PiiCodec)]`; the hand-written `JourneyPiiCodec` has been replaced by
+> a one-line re-export of the generated `JourneyEventPiiCodec`.
 
 ---
 
@@ -766,21 +772,24 @@ straightforward.
 16. Test each diagnostic with `zyn::assert_diagnostic_error!`.
 17. Add `trybuild` tests for end-to-end compile-fail cases.
 
-### Phase 5 — Wire into `journey_dynamics`
+### Phase 5 — Wire into `journey_dynamics` ✅
 
-18. Replace the hand-written `JourneyPiiCodec` with `#[derive(PiiCodec)]` on
-    `JourneyEvent`.
-19. Delete `pii_codec.rs` (or reduce it to `pub use` the generated codec).
-20. Verify all existing `pii_codec::tests` still pass.
-21. `cargo test --workspace` — all green.
-22. Run hurl end-to-end tests — no behavioural drift.
+18. ✅ `JourneyEvent` in `src/domain/events.rs` annotated with `#[derive(PiiCodec)]`
+    and per-field `#[pii(...)]` attributes.
+19. ✅ `pii_codec.rs` reduced to a single `pub use` re-export of
+    `JourneyEventPiiCodec as JourneyPiiCodec` — 250 lines of hand-written code
+    deleted.
+20. ✅ All 18 existing `pii_codec::tests` pass unchanged against the generated
+    code.
+21. ✅ `cargo nextest run --all-features` — 174/174 tests pass.
+22. ✅ Hurl end-to-end suite — 54/54 requests pass with zero behavioural drift.
 
-### Phase 6 — Clean up
+### Phase 6 — Clean up ✅
 
-23. Add documentation and examples to `cqrs-es-crypto-derive`.
-24. Update `crates/cqrs-es-crypto/README.md` with derive usage.
-25. Update `docs/CRYPTO_CRATE_EXTRACTION.md` to mark this future-work item as
-    implemented.
+23. ✅ `cqrs-es-crypto-derive` documented: element-level doc comments, crate-level
+    usage example in `lib.rs`.
+24. ✅ `crates/cqrs-es-crypto/README.md` updated with derive usage section.
+25. ✅ This document updated (status → Implemented, phase notes added).
 
 ---
 

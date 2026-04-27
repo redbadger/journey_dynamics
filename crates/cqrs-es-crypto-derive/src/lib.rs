@@ -53,7 +53,7 @@ fn plaintext_field_data(
         .collect()
 }
 
-/// Convert a [`model::RedactValue`] into the proc_macro2 tokens that represent
+/// Convert a [`model::RedactValue`] into the `proc_macro2` tokens that represent
 /// the JSON literal to emit for that value (e.g. `"[redacted]"`, `null`, `{}`).
 ///
 /// These tokens are inserted directly into the body of a `serde_json::json!`
@@ -62,7 +62,7 @@ fn redact_value_to_tokens(
     rv: &model::RedactValue,
     span: zyn::proc_macro2::Span,
 ) -> zyn::proc_macro2::TokenStream {
-    use zyn::proc_macro2::*;
+    use zyn::proc_macro2::{Delimiter, Group, Ident, Literal, TokenStream, TokenTree};
     match rv {
         model::RedactValue::Literal(s) => {
             std::iter::once(TokenTree::Literal(Literal::string(s))).collect()
@@ -123,7 +123,7 @@ fn classify_arm(variant: model::PiiVariantModel) -> zyn::TokenStream {
     let sentinel = zyn::syn::LitStr::new(&variant.sentinel, span);
     let subject_str = zyn::syn::LitStr::new(&variant.subject_field().ident.to_string(), span);
 
-    let plaintext = plaintext_field_data(&variant, span);
+    let plaintext = plaintext_field_data(variant, span);
 
     // Secret field JSON keys — used for multi-secret bundling.
     let secret_strs: Vec<zyn::syn::LitStr> = variant
@@ -249,7 +249,7 @@ fn reconstruct_arm(variant: model::PiiVariantModel) -> zyn::TokenStream {
 
     let event_type = zyn::syn::LitStr::new(&variant.event_type, span);
     let subject_str = zyn::syn::LitStr::new(&variant.subject_field().ident.to_string(), span);
-    let plaintext = plaintext_field_data(&variant, span);
+    let plaintext = plaintext_field_data(variant, span);
 
     let secret_strs: Vec<zyn::syn::LitStr> = variant
         .secret_fields()
@@ -307,8 +307,8 @@ fn redact_arm(variant: model::PiiVariantModel) -> zyn::TokenStream {
 
     let event_type = zyn::syn::LitStr::new(&variant.event_type, span);
     let subject_str = zyn::syn::LitStr::new(&variant.subject_field().ident.to_string(), span);
-    let plaintext = plaintext_field_data(&variant, span);
-    let secrets = secret_field_data(&variant, span);
+    let plaintext = plaintext_field_data(variant, span);
+    let secrets = secret_field_data(variant, span);
 
     zyn::zyn! {
         {{ event_type }} => {
@@ -453,11 +453,10 @@ mod tests {
         }
     }
 
-    /// Multi-secret variant: person_ref (plaintext), subject_id (subject),
-    /// name/email/phone (secret) — mirrors PersonCaptured.
+    /// Multi-secret variant: `person_ref` (plaintext), `subject_id` (subject),
+    /// name/email/phone (secret) — mirrors `PersonCaptured`.
     fn multi_secret_variant() -> model::PiiVariantModel {
         model::PiiVariantModel {
-            ident: zyn::format_ident!("PersonCaptured"),
             event_type: "PersonCaptured".to_string(),
             sentinel: "encrypted_pii".to_string(),
             fields: vec![
@@ -470,11 +469,10 @@ mod tests {
         }
     }
 
-    /// Single-secret variant: person_ref (plaintext), subject_id (subject),
-    /// data (secret, Value type) with a custom sentinel — mirrors PersonDetailsUpdated.
+    /// Single-secret variant: `person_ref` (plaintext)`subject_id`id (subject),
+    /// data (secret, Value type) with a custom sentinel — mirrors `PersonDetailsUpdated`.
     fn single_secret_variant() -> model::PiiVariantModel {
         model::PiiVariantModel {
-            ident: zyn::format_ident!("PersonDetailsUpdated"),
             event_type: "PersonDetailsUpdated".to_string(),
             sentinel: "encrypted_data".to_string(),
             fields: vec![

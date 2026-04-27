@@ -242,6 +242,74 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
 }
 ```
 
+## Deriving `PiiEventCodec` with `#[derive(PiiCodec)]`
+
+Instead of implementing `PiiEventCodec` by hand, enable the `derive` feature and
+annotate your event enum directly:
+
+```toml
+cqrs-es-crypto = { version = "...", features = ["derive"] }
+```
+
+```rust
+use cqrs_es_crypto::PiiCodec;
+use uuid::Uuid;
+use serde_json::Value;
+
+#[derive(PiiCodec)]
+enum MyEvent {
+    // Non-PII variants need no annotation — they pass through unchanged.
+    Started { id: Uuid },
+
+    // Annotate PII-bearing variants with #[pii(event_type = "...")].
+    // sentinel defaults to "encrypted_pii"; override with sentinel = "...".
+    #[pii(event_type = "PersonCaptured")]
+    PersonCaptured {
+        #[pii(plaintext)]          // kept in the clear; preserved after shredding
+        person_ref: String,
+        #[pii(subject)]            // the data-subject UUID; used to look up the DEK
+        subject_id: Uuid,
+        #[pii(secret)]             // encrypted on write; redacted as "[redacted]" (String)
+        name: String,
+        #[pii(secret)]             // redacted as "[redacted]" (String)
+        email: String,
+        #[pii(secret)]             // redacted as null (Option<_>)
+        phone: Option<String>,
+    },
+
+    #[pii(event_type = "PersonDetailsUpdated", sentinel = "encrypted_data")]
+    PersonDetailsUpdated {
+        #[pii(plaintext)]
+        person_ref: String,
+        #[pii(subject)]
+        subject_id: Uuid,
+        #[pii(secret)]             // redacted as {} (serde_json::Value)
+        data: Value,
+    },
+}
+// Generates: pub struct MyEventPiiCodec;
+//            impl PiiEventCodec for MyEventPiiCodec { ... }
+```
+
+The generated struct is named `{EnumName}PiiCodec`. Pass it to
+`CryptoShreddingEventRepository::new` like any hand-written codec:
+
+```rust
+let codec = Arc::new(MyEventPiiCodec);
+let repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec);
+```
+
+### Redaction defaults
+
+The macro infers a redaction value from each `#[pii(secret)]` field's type:
+
+| Type | Redacted as |
+|------|------------|
+| `String` | `"[redacted]"` |
+| `Option<T>` | `null` |
+| `serde_json::Value` | `{}` |
+| Anything else | compile error — annotate with `#[pii(secret, redact = "...")]` |
+
 ## Crate structure
 
 | Module | Contents |
