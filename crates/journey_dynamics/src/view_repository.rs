@@ -197,6 +197,33 @@ impl StructuredJourneyViewRepository {
             .collect())
     }
 
+    /// Find all non-forgotten subject IDs associated with the given email address.
+    ///
+    /// The comparison is case-insensitive. Subjects that have already been forgotten
+    /// are excluded, so a duplicate erasure request is a safe no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub async fn find_subjects_by_email(&self, email: &str) -> Result<Vec<Uuid>, sqlx::Error> {
+        let rows = sqlx::query(
+            r"
+            SELECT DISTINCT subject_id
+            FROM journey_person
+            WHERE lower(email) = lower($1)
+              AND NOT forgotten
+            ",
+        )
+        .bind(email)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| r.get::<Uuid, _>("subject_id"))
+            .collect())
+    }
+
     #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
     async fn update_view(
         &self,
@@ -978,6 +1005,150 @@ mod tests {
         assert!(
             journeys.is_empty(),
             "forgotten subject must not appear in email search results"
+        );
+
+        cleanup_test_journey(&pool, &journey_id).await;
+    }
+
+    // ── find_subjects_by_email ───────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_find_subjects_by_email_case_insensitive() {
+        // Email stored in mixed case; query with lowercase — must still match.
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let journey_id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        // Use a unique suffix to avoid collisions with other test rows.
+        let stored_email = format!("Alice+{}@Example.COM", Uuid::new_v4());
+
+        repo.dispatch(
+            &journey_id.to_string(),
+            &[
+                EventEnvelope {
+                    aggregate_id: journey_id.to_string(),
+                    sequence: 1,
+                    payload: JourneyEvent::Started { id: journey_id },
+                    metadata: std::collections::HashMap::default(),
+                },
+                EventEnvelope {
+                    aggregate_id: journey_id.to_string(),
+                    sequence: 2,
+                    payload: JourneyEvent::PersonCaptured {
+                        person_ref: "passenger_0".to_string(),
+                        subject_id,
+                        name: "Alice Smith".to_string(),
+                        email: stored_email.clone(),
+                        phone: None,
+                    },
+                    metadata: std::collections::HashMap::default(),
+                },
+            ],
+        )
+        .await;
+
+        let subjects = repo
+            .find_subjects_by_email(&stored_email.to_lowercase())
+            .await
+            .unwrap();
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0], subject_id);
+
+        cleanup_test_journey(&pool, &journey_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_find_subjects_by_email_deduplicates_across_journeys() {
+        // Same subject appears in two journeys — must be returned only once.
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let journey_id_1 = Uuid::new_v4();
+        let journey_id_2 = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let unique_email = format!("repeat+{}@example.com", Uuid::new_v4());
+
+        for journey_id in [journey_id_1, journey_id_2] {
+            repo.dispatch(
+                &journey_id.to_string(),
+                &[
+                    EventEnvelope {
+                        aggregate_id: journey_id.to_string(),
+                        sequence: 1,
+                        payload: JourneyEvent::Started { id: journey_id },
+                        metadata: std::collections::HashMap::default(),
+                    },
+                    EventEnvelope {
+                        aggregate_id: journey_id.to_string(),
+                        sequence: 2,
+                        payload: JourneyEvent::PersonCaptured {
+                            person_ref: "passenger_0".to_string(),
+                            subject_id,
+                            name: "Alice Smith".to_string(),
+                            email: unique_email.clone(),
+                            phone: None,
+                        },
+                        metadata: std::collections::HashMap::default(),
+                    },
+                ],
+            )
+            .await;
+        }
+
+        let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
+        assert_eq!(
+            subjects.len(),
+            1,
+            "same subject across two journeys must be deduplicated"
+        );
+        assert_eq!(subjects[0], subject_id);
+
+        cleanup_test_journey(&pool, &journey_id_1).await;
+        cleanup_test_journey(&pool, &journey_id_2).await;
+    }
+
+    #[tokio::test]
+    async fn test_find_subjects_by_email_excludes_forgotten() {
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let journey_id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let unique_email = format!("gone+{}@example.com", Uuid::new_v4());
+
+        repo.dispatch(
+            &journey_id.to_string(),
+            &[
+                EventEnvelope {
+                    aggregate_id: journey_id.to_string(),
+                    sequence: 1,
+                    payload: JourneyEvent::Started { id: journey_id },
+                    metadata: std::collections::HashMap::default(),
+                },
+                EventEnvelope {
+                    aggregate_id: journey_id.to_string(),
+                    sequence: 2,
+                    payload: JourneyEvent::PersonCaptured {
+                        person_ref: "passenger_0".to_string(),
+                        subject_id,
+                        name: "Alice Smith".to_string(),
+                        email: unique_email.clone(),
+                        phone: None,
+                    },
+                    metadata: std::collections::HashMap::default(),
+                },
+                EventEnvelope {
+                    aggregate_id: journey_id.to_string(),
+                    sequence: 3,
+                    payload: JourneyEvent::SubjectForgotten { subject_id },
+                    metadata: std::collections::HashMap::default(),
+                },
+            ],
+        )
+        .await;
+
+        let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
+        assert!(
+            subjects.is_empty(),
+            "forgotten subject must not be returned by email lookup"
         );
 
         cleanup_test_journey(&pool, &journey_id).await;
