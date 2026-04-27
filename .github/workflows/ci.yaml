@@ -94,8 +94,9 @@ jobs:
           export JOURNEY_KEK=$(openssl rand -base64 32)
           ./target/debug/journey_dynamics &
           SERVER_PID=$!
-          printf 'GET http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000\nHTTP 404' | hurl --retry 30 --retry-interval 1000 > /dev/null
-          hurl --test --report-html target/hurl-report \
+          printf 'GET http://localhost:3030/journeys/00000000-0000-0000-0000-000000000000\nHTTP 404' \
+            | hurl --retry 30 --retry-interval 1000 > /dev/null
+          hurl --test --variable host=http://localhost:3030 --report-html target/hurl-report \
             tests/error-cases.hurl \
             tests/full-flight-booking.hurl \
             tests/full-flight-booking_with_shredding.hurl
