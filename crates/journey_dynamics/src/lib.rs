@@ -1,7 +1,7 @@
 pub mod command_extractor;
 pub mod config;
-pub mod crypto;
 pub mod domain;
+pub mod pii_codec;
 pub mod queries;
 pub mod route_handler;
 pub mod services;

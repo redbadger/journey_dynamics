@@ -17,7 +17,7 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::cipher::{CryptoError, KeyMaterial, PiiCipher};
+use crate::cipher::{CryptoError, KeyMaterial, PiiCipher};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error

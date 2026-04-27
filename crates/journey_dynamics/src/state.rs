@@ -3,12 +3,10 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use postgres_es::default_postgress_pool;
 
+use cqrs_es_crypto::{KeyStore, PiiCipher, PostgresKeyStore};
+
 use crate::{
     config::{CryptoCqrs, cqrs_framework},
-    crypto::{
-        cipher::PiiCipher,
-        key_store::{KeyStore, PostgresKeyStore},
-    },
     view_repository::StructuredJourneyViewRepository,
 };
 

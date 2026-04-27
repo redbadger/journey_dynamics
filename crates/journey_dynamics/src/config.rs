@@ -1,13 +1,14 @@
 use std::sync::Arc;
 
 use cqrs_es::{CqrsFramework, Query, persist::PersistedEventStore};
+use cqrs_es_crypto::{CryptoShreddingEventRepository, KeyStore, PiiCipher};
 use postgres_es::PostgresEventRepository;
 use sqlx::{Pool, Postgres};
 
 use crate::SimpleLoggingQuery;
 use crate::{
-    crypto::{cipher::PiiCipher, key_store::KeyStore, repository::CryptoShreddingEventRepository},
     domain::journey::{Journey, JourneyServices},
+    pii_codec::JourneyPiiCodec,
     services::decision_engine::GoRulesDecisionEngine,
     view_repository::StructuredJourneyViewRepository,
 };
@@ -58,7 +59,8 @@ pub fn cqrs_framework(
     let services = JourneyServices::new(decision_engine, schema_validator);
 
     let inner = PostgresEventRepository::new(pool);
-    let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher);
+    let codec = Arc::new(JourneyPiiCodec);
+    let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec);
     let store = PersistedEventStore::new_event_store(crypto_repo);
 
     (

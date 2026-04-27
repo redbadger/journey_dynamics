@@ -72,12 +72,14 @@ graph TB
         AX[Axum HTTP Layer]
 
         subgraph Write["Write Side (Commands)"]
-            CH[Command Handler]
-            AGG["Journey Aggregate"]
-            DE["GoRules ZEN<br/>Decision Engine"]
-            SV["JSON Schema<br/>Validator"]
-            ES[(Event Store<br/>PostgreSQL)]
-        end
+                CH[Command Handler]
+                AGG["Journey Aggregate"]
+                DE["GoRules ZEN<br/>Decision Engine"]
+                SV["JSON Schema<br/>Validator"]
+                CR["cqrs-es-crypto<br/>Crypto Layer"]
+                KS[(subject_encryption_keys<br/>PostgreSQL)]
+                ES[(Event Store<br/>PostgreSQL)]
+            end
 
         subgraph Read["Read Side (Queries)"]
             QH[Query Handler]
@@ -97,7 +99,9 @@ graph TB
     CH --> AGG
     AGG --> SV
     AGG --> DE
-    AGG -- "append events" --> ES
+    AGG -- "append events" --> CR
+    CR -- "encrypt PII" --> KS
+    CR -- "store encrypted events" --> ES
     ES -- "dispatch events" --> VP
 
     VP --> JV
@@ -169,7 +173,7 @@ The events in this system are:
 
 #### How it is implemented
 
-The service uses the [`cqrs-es`](https://crates.io/crates/cqrs-es) and [`postgres-es`](https://crates.io/crates/postgres-es) crates, which provide a `PostgresCqrs` framework. Events are stored in a standard table:
+The service uses the [`cqrs-es`](https://crates.io/crates/cqrs-es) and [`postgres-es`](https://crates.io/crates/postgres-es) crates, which provide a `PostgresCqrs` framework. The [`cqrs-es-crypto`](../crates/cqrs-es-crypto) workspace crate wraps the `PostgresEventRepository` with transparent AES-256-GCM PII encryption and GDPR crypto-shredding before events reach the store (see [Crypto-Shredding Design](./MULTI_SUBJECT_DESIGN.md)). Events are stored in a standard table:
 
 ```sql
 CREATE TABLE events (
@@ -228,7 +232,7 @@ graph LR
 
 #### How it is implemented
 
-The `Journey` aggregate handles commands and applies events to its in-memory state:
+The `Journey` aggregate handles commands and applies events to its in-memory state. Before events are written to Postgres they pass through `CryptoShreddingEventRepository` (from the `cqrs-es-crypto` crate), which encrypts PII fields and manages per-subject Data Encryption Keys. On the read path the same layer transparently decrypts — or redacts, if the subject has been forgotten:
 
 ```mermaid
 stateDiagram-v2
@@ -542,18 +546,18 @@ graph TD
 
 | Dependency | Version | Purpose |
 |---|---|---|
-| `cqrs-es` | 0.4.12 | CQRS + Event Sourcing framework |
-| `postgres-es` | 0.4.12 | PostgreSQL-backed event store and view repositories |
-| `zen-engine` | 0.52.2 | GoRules ZEN decision engine (embedded) |
-| `axum` | 0.8.8 | Async HTTP framework |
+| `cqrs-es` | 0.5.0 | CQRS + Event Sourcing framework |
+| `postgres-es` | 0.5.0 | PostgreSQL-backed event store and view repositories |
+| `cqrs-es-crypto` | 0.1.0 | Workspace crate — transparent PII encryption and GDPR crypto-shredding for `cqrs-es` |
+| `zen-engine` | 0.55.0 | GoRules ZEN decision engine (embedded) |
+| `axum` | 0.8.9 | Async HTTP framework |
 | `sqlx` | 0.8.6 | Async PostgreSQL driver with compile-time query checking |
 | `serde` / `serde_json` | 1.0 | Serialisation framework |
-| `jsonschema` | 0.37 | JSON Schema validation (Draft 2020-12) |
-| `schemars` | 1.1.0 | JSON Schema generation from Rust types |
+| `jsonschema` | 0.46 | JSON Schema validation (Draft 2020-12) |
 | `json-patch` | 4.1.0 | RFC 7386 JSON Merge Patch for accumulating data |
-| `uuid` | 1.19.0 | Journey identity |
+| `uuid` | 1.23.1 | Journey identity |
 | `tokio` | 1.x | Async runtime |
-| `chrono` | 0.4.42 | Timestamp handling in metadata |
+| `chrono` | 0.4.44 | Timestamp handling in metadata |
 
 ---
 
