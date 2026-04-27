@@ -4,7 +4,7 @@
 |---|---|
 | **Service** | Journey Dynamics |
 | **Feature** | Extract crypto-shredding layer into a standalone `cqrs-es-crypto` crate |
-| **Status** | Proposed |
+| **Status** | Implemented |
 
 ---
 

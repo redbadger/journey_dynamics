@@ -123,6 +123,11 @@ pub trait PiiEventCodec: Send + Sync {
     /// plaintext fields such as `person_ref` or `subject_id`).
     /// `plaintext_pii` is the JSON value that was originally supplied as
     /// [`PiiFields::plaintext_pii`] during encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the payload cannot be reassembled from the decrypted
+    /// PII (e.g. a required field is missing or malformed).
     fn reconstruct(
         &self,
         event: &SerializedEvent,
@@ -135,6 +140,10 @@ pub trait PiiEventCodec: Send + Sync {
     /// The PII is permanently irrecoverable; the implementation should return a
     /// payload that clearly signals redaction (e.g. `"[redacted]"` strings or
     /// `null` / empty-object values) while preserving non-PII plaintext fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the redacted payload cannot be constructed.
     fn redact(
         &self,
         event: &SerializedEvent,
@@ -175,7 +184,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     ///
     /// Primarily useful in tests to inspect or inject raw (unencrypted) events,
     /// bypassing the crypto layer.
-    pub fn inner(&self) -> &R {
+    pub const fn inner(&self) -> &R {
         &self.inner
     }
 
@@ -244,12 +253,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
                         let plaintext_pii: Value = serde_json::from_slice(&plaintext_bytes)?;
                         self.codec
                             .reconstruct(&event, &plaintext_pii)
-                            .map_err(|e| PersistenceError::UnknownError(e))?
+                            .map_err(PersistenceError::UnknownError)?
                     }
                     None => self
                         .codec
                         .redact(&event)
-                        .map_err(|e| PersistenceError::UnknownError(e))?,
+                        .map_err(PersistenceError::UnknownError)?,
                 };
             }
             out.push(event);
@@ -1010,7 +1019,7 @@ mod tests {
                     "decrypted secret must round-trip through stream"
                 );
             }
-            other => panic!("unexpected event variant: {other:?}"),
+            other @ TestEvent::TestPlain { .. } => panic!("unexpected event variant: {other:?}"),
         }
     }
 
