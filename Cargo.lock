@@ -654,6 +654,13 @@ dependencies = [
 name = "cqrs-es-crypto-derive"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "cqrs-es",
+ "cqrs-es-crypto",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
  "zyn",
 ]
 

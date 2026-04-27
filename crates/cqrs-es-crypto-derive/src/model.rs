@@ -31,6 +31,24 @@ pub enum PiiFieldRole {
     Secret,
 }
 
+// ── Redact value ──────────────────────────────────────────────────────────────
+
+/// The placeholder value to emit for a [`PiiFieldRole::Secret`] field when the
+/// subject's DEK has been deleted (crypto-shredding / GDPR erasure).
+///
+/// The variant is inferred from the field's Rust type by
+/// [`parse_field`](crate::parse) and stored here so the code-generation layer
+/// can emit the correct JSON literal without re-examining the type.
+#[derive(Debug, Clone)]
+pub enum RedactValue {
+    /// `String` fields → emit `"[redacted]"` in the JSON.
+    Literal(String),
+    /// `Option<_>` fields → emit `null` in the JSON.
+    Null,
+    /// `Value` / `serde_json::Value` fields → emit `{}` in the JSON.
+    EmptyObject,
+}
+
 // ── Field model ───────────────────────────────────────────────────────────────
 
 /// A single named field within a `#[pii]`-annotated variant, after parsing and
@@ -41,6 +59,10 @@ pub struct PiiFieldModel {
     pub ident: Ident,
     /// The field's classified role.
     pub role: PiiFieldRole,
+    /// Redaction value to emit when the DEK is deleted.
+    ///
+    /// `Some` only for [`PiiFieldRole::Secret`] fields; `None` for all others.
+    pub redact: Option<RedactValue>,
 }
 
 // ── Variant model ─────────────────────────────────────────────────────────────

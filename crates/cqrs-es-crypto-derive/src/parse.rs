@@ -14,7 +14,7 @@ use zyn::syn::{
     self as syn, Attribute, Fields, Ident, LitStr, Variant, punctuated::Punctuated, token::Comma,
 };
 
-use crate::model::{PiiFieldModel, PiiFieldRole, PiiVariantModel};
+use crate::model::{PiiFieldModel, PiiFieldRole, PiiVariantModel, RedactValue};
 
 // ── Raw (unparsed) attribute data ─────────────────────────────────────────────
 
@@ -107,7 +107,29 @@ fn parse_field_pii_attr(attr: &Attribute) -> syn::Result<RawFieldAttr> {
     Ok(result)
 }
 
-// ── Field parsing ─────────────────────────────────────────────────────────────
+// ── Field parsing ────────────────────────────────────────────────────────────
+
+/// Infer the [`RedactValue`] for a secret field by inspecting the last path
+/// segment of its type.
+///
+/// Returns an error for types that cannot be mapped automatically.
+fn infer_redact(ty: &syn::Type) -> syn::Result<RedactValue> {
+    let last_ident = match ty {
+        syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
+        _ => None,
+    };
+
+    match last_ident.as_deref() {
+        Some("String") => Ok(RedactValue::Literal("[redacted]".to_string())),
+        Some("Option") => Ok(RedactValue::Null),
+        Some("Value") => Ok(RedactValue::EmptyObject),
+        _ => Err(syn::Error::new_spanned(
+            ty,
+            "cannot infer redaction value for this type; annotate the variant with \
+             `#[pii(secret, redact = \"...\")]` (not yet supported)",
+        )),
+    }
+}
 
 /// Convert a single named `syn::Field` into a [`PiiFieldModel`].
 ///
@@ -155,9 +177,16 @@ fn parse_field(field: &syn::Field, variant_ident: &Ident) -> syn::Result<PiiFiel
         PiiFieldRole::Secret
     };
 
+    let redact = if matches!(role, PiiFieldRole::Secret) {
+        Some(infer_redact(&field.ty)?)
+    } else {
+        None
+    };
+
     Ok(PiiFieldModel {
         ident: field_ident.clone(),
         role,
+        redact,
     })
 }
 
