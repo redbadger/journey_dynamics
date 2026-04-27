@@ -67,7 +67,8 @@ pub use key_store::{InMemoryKeyStore, KeyStore, KeyStoreError, PostgresKeyStore}
 // ── Repository ────────────────────────────────────────────────────────────────
 
 pub use repository::{
-    CryptoShreddingEventRepository, EncryptedPiiSentinel, PiiEventCodec, PiiFields,
+    CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel, PiiEventCodec,
+    PiiFields,
 };
 
 // ── Testing helpers (opt-in via the `testing` feature) ───────────────────────
