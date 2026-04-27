@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JourneyEvent {
     Started {
         id: Uuid,
@@ -40,14 +40,14 @@ pub enum JourneyEvent {
 impl DomainEvent for JourneyEvent {
     fn event_type(&self) -> String {
         let event_type: &str = match self {
-            JourneyEvent::Started { .. } => "JourneyOpened",
-            JourneyEvent::Modified { .. } => "JourneyModified",
-            JourneyEvent::PersonCaptured { .. } => "PersonCaptured",
-            JourneyEvent::PersonDetailsUpdated { .. } => "PersonDetailsUpdated",
-            JourneyEvent::WorkflowEvaluated { .. } => "WorkflowEvaluated",
-            JourneyEvent::StepProgressed { .. } => "StepProgressed",
-            JourneyEvent::Completed => "JourneyClosed",
-            JourneyEvent::SubjectForgotten { .. } => "SubjectForgotten",
+            Self::Started { .. } => "JourneyOpened",
+            Self::Modified { .. } => "JourneyModified",
+            Self::PersonCaptured { .. } => "PersonCaptured",
+            Self::PersonDetailsUpdated { .. } => "PersonDetailsUpdated",
+            Self::WorkflowEvaluated { .. } => "WorkflowEvaluated",
+            Self::StepProgressed { .. } => "StepProgressed",
+            Self::Completed => "JourneyClosed",
+            Self::SubjectForgotten { .. } => "SubjectForgotten",
         };
         event_type.to_string()
     }

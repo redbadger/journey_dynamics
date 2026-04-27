@@ -959,7 +959,7 @@ mod tests {
         // PII must NOT be stored in plaintext.
         assert!(
             pd.get("data")
-                .map_or(true, |d| d.get("passportNumber").is_none()),
+                .is_none_or(|d| d.get("passportNumber").is_none()),
             "passportNumber must not appear in plaintext"
         );
 

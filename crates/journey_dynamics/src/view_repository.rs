@@ -14,7 +14,7 @@ pub struct StructuredJourneyViewRepository {
 
 impl StructuredJourneyViewRepository {
     #[must_use]
-    pub fn new(pool: Pool<Postgres>) -> Self {
+    pub const fn new(pool: Pool<Postgres>) -> Self {
         Self { pool }
     }
 

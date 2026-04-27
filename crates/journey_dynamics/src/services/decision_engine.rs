@@ -73,7 +73,7 @@ impl GoRulesDecisionEngine {
     #[must_use]
     pub fn new(json: &str) -> Self {
         let decision_content: DecisionContent = serde_json::from_str(json).unwrap();
-        GoRulesDecisionEngine { decision_content }
+        Self { decision_content }
     }
 }
 

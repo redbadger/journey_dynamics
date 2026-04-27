@@ -853,7 +853,7 @@ fn flight_booking_modify_search_criteria() {
 // ── Schema validation ─────────────────────────────────────────────────────────
 
 /// Shared booking data with an invalid type is rejected by schema validation.
-/// Note: PII (passenger names, DoB, passport numbers) is NOT validated here because
+/// Note: PII (passenger names, date of birth, passport numbers) is NOT validated here because
 /// it no longer flows through `Capture` — it goes through `CapturePersonDetails`.
 #[test]
 fn test_invalid_booking_data_rejected_with_schema_validation() {

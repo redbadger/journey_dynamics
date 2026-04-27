@@ -72,7 +72,7 @@ impl Default for JourneyView {
 }
 
 /// Represents the state of a journey in the view
-#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 pub enum JourneyState {
     #[default]
     InProgress,

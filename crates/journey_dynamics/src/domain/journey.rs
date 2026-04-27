@@ -47,7 +47,7 @@ pub struct WorkflowDecisionState {
     pub suggested_actions: Vec<String>,
 }
 
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum JourneyState {
     #[default]
     InProgress,
@@ -288,7 +288,7 @@ impl Aggregate for Journey {
     }
 }
 
-#[derive(Error, Debug, PartialEq)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum JourneyError {
     #[error("Journey not found")]
     NotFound,
@@ -335,32 +335,32 @@ impl JourneyServices {
 
 impl Journey {
     #[must_use]
-    pub fn id(&self) -> Uuid {
+    pub const fn id(&self) -> Uuid {
         self.id
     }
 
     #[must_use]
-    pub fn state(&self) -> JourneyState {
+    pub const fn state(&self) -> JourneyState {
         self.state
     }
 
     #[must_use]
-    pub fn shared_data(&self) -> &Value {
+    pub const fn shared_data(&self) -> &Value {
         &self.shared_data
     }
 
     #[must_use]
-    pub fn current_step(&self) -> Option<&String> {
+    pub const fn current_step(&self) -> Option<&String> {
         self.current_step.as_ref()
     }
 
     #[must_use]
-    pub fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
+    pub const fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
     }
 
     #[must_use]
-    pub fn persons(&self) -> &BTreeMap<String, PersonSlot> {
+    pub const fn persons(&self) -> &BTreeMap<String, PersonSlot> {
         &self.persons
     }
 }
