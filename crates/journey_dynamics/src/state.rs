@@ -3,10 +3,14 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use postgres_es::default_postgress_pool;
 
-use crate::config::{CryptoCqrs, cqrs_framework};
-use crate::crypto::cipher::PiiCipher;
-use crate::crypto::key_store::{KeyStore, PostgresKeyStore};
-use crate::view_repository::StructuredJourneyViewRepository;
+use crate::{
+    config::{CryptoCqrs, cqrs_framework},
+    crypto::{
+        cipher::PiiCipher,
+        key_store::{KeyStore, PostgresKeyStore},
+    },
+    view_repository::StructuredJourneyViewRepository,
+};
 
 #[derive(Clone)]
 pub struct ApplicationState {

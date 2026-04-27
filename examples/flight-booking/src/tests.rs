@@ -1,6 +1,5 @@
 #![allow(clippy::too_many_lines)]
 use cqrs_es::test::TestFramework;
-
 use serde_json::json;
 use std::sync::Arc;
 use uuid::Uuid;

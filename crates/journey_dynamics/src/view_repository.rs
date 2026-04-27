@@ -2,9 +2,10 @@ use cqrs_es::{EventEnvelope, Query};
 use sqlx::{Pool, Postgres, Row};
 use uuid::Uuid;
 
-use crate::domain::events::JourneyEvent;
-use crate::domain::journey::Journey;
-use crate::queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView};
+use crate::{
+    domain::{events::JourneyEvent, journey::Journey},
+    queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
+};
 
 /// A structured database view repository for journeys.
 #[derive(Clone)]

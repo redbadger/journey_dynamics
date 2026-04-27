@@ -7,8 +7,10 @@
 //! subject is a single hard-delete of that row: without the DEK, all ciphertext in the
 //! event store is permanently unreadable.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, PoisonError};
+use std::{
+    collections::HashMap,
+    sync::{Mutex, PoisonError},
+};
 
 use async_trait::async_trait;
 use thiserror::Error;

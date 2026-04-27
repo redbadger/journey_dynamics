@@ -1,9 +1,12 @@
-use crate::domain::commands::JourneyCommand;
-use axum::body::{Body, Bytes};
-use axum::extract::FromRequest;
-use axum::http::{Request, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::{
+    body::{Body, Bytes},
+    extract::FromRequest,
+    http::{Request, StatusCode},
+    response::{IntoResponse, Response},
+};
 use std::collections::HashMap;
+
+use crate::domain::commands::JourneyCommand;
 
 // This is a custom Axum extension that builds metadata from the inbound request
 // and parses and deserializes the body as the command payload.

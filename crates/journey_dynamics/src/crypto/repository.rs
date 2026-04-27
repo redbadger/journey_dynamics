@@ -21,15 +21,20 @@
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use cqrs_es::Aggregate;
-use cqrs_es::persist::{
-    PersistedEventRepository, PersistenceError, ReplayStream, SerializedEvent, SerializedSnapshot,
+use cqrs_es::{
+    Aggregate,
+    persist::{
+        PersistedEventRepository, PersistenceError, ReplayStream, SerializedEvent,
+        SerializedSnapshot,
+    },
 };
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::cipher::{EncryptedPayload, PiiCipher};
-use super::key_store::KeyStore;
+use super::{
+    cipher::{EncryptedPayload, PiiCipher},
+    key_store::KeyStore,
+};
 
 // ── Event-type strings (from DomainEvent::event_type()) ───────────────────
 

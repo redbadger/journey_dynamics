@@ -1,12 +1,10 @@
-use cqrs_es::persist::GenericQuery;
-use cqrs_es::{EventEnvelope, View};
+use cqrs_es::{EventEnvelope, View, persist::GenericQuery};
 use postgres_es::PostgresViewRepository;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::domain::events::JourneyEvent;
-use crate::domain::journey::Journey;
+use crate::domain::{events::JourneyEvent, journey::Journey};
 
 /// Person data for a single slot within a journey.
 /// One row per `(journey_id, person_ref)` in the `journey_person` table.

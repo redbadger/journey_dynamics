@@ -1,15 +1,15 @@
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::domain::events::JourneyEvent;
-use crate::services::schema_validator::SchemaValidator;
-use crate::{domain::commands::JourneyCommand, services::decision_engine::DecisionEngine};
-use cqrs_es::Aggregate;
-use cqrs_es::event_sink::EventSink;
+use cqrs_es::{Aggregate, event_sink::EventSink};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 use uuid::Uuid;
+
+use crate::{
+    domain::{commands::JourneyCommand, events::JourneyEvent},
+    services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Journey {
