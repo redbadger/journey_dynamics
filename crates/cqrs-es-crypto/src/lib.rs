@@ -75,3 +75,8 @@ pub use repository::{
 
 #[cfg(any(test, feature = "testing"))]
 pub use repository::InMemoryEventRepository;
+
+// ── Derive macro (opt-in via the `derive` feature) ───────────────────────────
+
+#[cfg(feature = "derive")]
+pub use cqrs_es_crypto_derive::PiiCodec;

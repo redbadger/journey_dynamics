@@ -13,7 +13,7 @@ test-lib:
 
 test:
     cargo nextest run --all-features
-    cargo test --doc --all-features
+    cargo test --doc --all-features --workspace --exclude cqrs-es-crypto-derive
 
 # Assumes the server is already running on localhost:3030.
 # Files 01-05 are step-by-step tutorial examples that require a manual

@@ -1,9 +1,10 @@
 use cqrs_es::DomainEvent;
+use cqrs_es_crypto::PiiCodec;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, PiiCodec)]
 pub enum JourneyEvent {
     Started {
         id: Uuid,
@@ -12,16 +13,26 @@ pub enum JourneyEvent {
         step: String,
         data: Value,
     },
+    #[pii(event_type = "PersonCaptured")]
     PersonCaptured {
+        #[pii(plaintext)]
         person_ref: String,
+        #[pii(subject)]
         subject_id: Uuid,
+        #[pii(secret)]
         name: String,
+        #[pii(secret)]
         email: String,
+        #[pii(secret)]
         phone: Option<String>,
     },
+    #[pii(event_type = "PersonDetailsUpdated", sentinel = "encrypted_data")]
     PersonDetailsUpdated {
+        #[pii(plaintext)]
         person_ref: String,
+        #[pii(subject)]
         subject_id: Uuid,
+        #[pii(secret)]
         data: Value,
     },
     WorkflowEvaluated {
