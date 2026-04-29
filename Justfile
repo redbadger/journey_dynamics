@@ -30,8 +30,11 @@ ci: lint build test test-hurl
 # Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io.
 #
 # Publishing order matters: the derive crate must go first because the main
-# crate optionally depends on it. cargo publish waits for each crate to be
-# available in the index before returning, so no sleep is needed.
+# crate optionally depends on it. The derive crate's dev-dependency on
+# cqrs-es-crypto is path-only (no version), so cargo excludes it from the
+# published manifest — avoiding a chicken-and-egg resolution failure.
+# cargo publish waits for each crate to be available in the index before
+# returning, so no sleep is needed between steps.
 #
 # Requires `cargo login` to have been run with a valid crates.io token.
 publish:
