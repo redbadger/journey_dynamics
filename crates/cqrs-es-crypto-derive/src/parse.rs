@@ -125,8 +125,9 @@ fn infer_redact(ty: &syn::Type) -> syn::Result<RedactValue> {
         Some("Value") => Ok(RedactValue::EmptyObject),
         _ => Err(syn::Error::new_spanned(
             ty,
-            "cannot infer redaction value for this type; annotate the variant with \
-             `#[pii(secret, redact = \"...\")]` (not yet supported)",
+            "cannot infer redaction value for this type; \
+             only `String`, `Option<_>`, and `serde_json::Value` fields are supported \
+             by `#[pii(secret)]`",
         )),
     }
 }

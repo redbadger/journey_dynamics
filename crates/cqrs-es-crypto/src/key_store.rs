@@ -23,6 +23,7 @@ use crate::cipher::{CryptoError, KeyMaterial, PiiCipher};
 // Error
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Errors returned by [`KeyStore`] operations.
 #[derive(Debug, Error)]
 pub enum KeyStoreError {
     #[error("Crypto error: {0}")]
@@ -43,6 +44,11 @@ impl<T> From<PoisonError<T>> for KeyStoreError {
 // Trait
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Manages per-subject Data Encryption Keys (DEKs) for GDPR crypto-shredding.
+///
+/// Each data subject gets a unique DEK. Deleting a subject's DEK is the shredding
+/// operation: any PII encrypted under that DEK becomes permanently irrecoverable
+/// without touching individual events.
 #[async_trait]
 pub trait KeyStore: Send + Sync {
     /// Return the DEK for `subject_id`, creating and persisting a fresh one if none exists.

@@ -292,7 +292,11 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
         &self,
         aggregate_id: &str,
     ) -> Result<Option<SerializedSnapshot>, PersistenceError> {
-        // Snapshots are not encrypted — the aggregate state contains no PII.
+        // Snapshots are forwarded without encryption or decryption.
+        //
+        // Known limitation: if your aggregate state contains PII, snapshots will
+        // store it in plaintext and crypto-shredding a subject will NOT redact PII
+        // embedded in snapshots — only PII in individual events is managed here.
         self.inner.get_snapshot::<A>(aggregate_id).await
     }
 
@@ -319,11 +323,17 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
     }
 
     async fn stream_all_events<A: Aggregate>(&self) -> Result<ReplayStream, PersistenceError> {
-        // NOTE: delegates to the inner repository without decryption.
-        // `stream_all_events` is used only for full-store replay, which is not
-        // yet wired in this application.  A production implementation would need
-        // to decrypt each event before pushing it to the stream.
-        self.inner.stream_all_events::<A>().await
+        // `ReplayStream` only exposes a typed consumer (`next::<A>()`) that
+        // immediately deserialises `SerializedEvent` into `EventEnvelope<A>`.
+        // Because encrypted payloads would fail deserialisation, there is no
+        // point at which this wrapper can intercept and decrypt them.
+        //
+        // Use `get_events` or `stream_events` per aggregate for decrypted access.
+        Err(PersistenceError::UnknownError(
+            "`CryptoShreddingEventRepository` does not support `stream_all_events` — \
+             use `get_events` or `stream_events` per aggregate instead."
+                .into(),
+        ))
     }
 }
 
