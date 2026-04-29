@@ -25,6 +25,7 @@ sqlx = { version = "0.8.6", features = [
 ] }
 thiserror = "2.0.18"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
 zen-engine = "0.55.0"
 
