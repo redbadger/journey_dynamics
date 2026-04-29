@@ -19,18 +19,29 @@ use zeroize::Zeroizing;
 // Types
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// A 256-bit AES key used to encrypt PII fields in events.
+/// A 256-bit AES Data Encryption Key (DEK) used to encrypt PII fields in events.
 pub struct KeyMaterial {
+    /// Unique identifier for this key, stored alongside the wrapped bytes in the
+    /// key store so the correct DEK can be retrieved on the read path.
     pub key_id: Uuid,
-    pub key: Zeroizing<Vec<u8>>, // always 32 bytes
+    /// Raw 256-bit key bytes. Always exactly 32 bytes.
+    ///
+    /// Zeroed in memory on drop via [`zeroize`].
+    pub key: Zeroizing<Vec<u8>>,
 }
 
-/// The output of an encryption operation.
+/// The output of an AES-256-GCM encryption operation.
 pub struct EncryptedPayload {
+    /// AES-256-GCM ciphertext, including the appended 16-byte authentication tag.
     pub ciphertext: Vec<u8>,
-    pub nonce: Vec<u8>, // 12 bytes (96-bit AES-GCM nonce)
+    /// 96-bit (12-byte) nonce used during encryption.
+    ///
+    /// Must be stored alongside the ciphertext and supplied verbatim to
+    /// [`PiiCipher::decrypt`].
+    pub nonce: Vec<u8>,
 }
 
+/// Errors returned by [`PiiCipher`] operations.
 #[derive(Debug, thiserror::Error)]
 pub enum CryptoError {
     #[error("Decryption failed: authentication tag mismatch or corrupt data")]

@@ -26,3 +26,14 @@ test-hurl:
         tests/full-flight-booking_with_shredding_by_email.hurl
 
 ci: lint build test test-hurl
+
+# Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io.
+#
+# Publishing order matters: the derive crate must go first because the main
+# crate optionally depends on it. cargo publish waits for each crate to be
+# available in the index before returning, so no sleep is needed.
+#
+# Requires `cargo login` to have been run with a valid crates.io token.
+publish:
+    cargo publish -p cqrs-es-crypto-derive
+    cargo publish -p cqrs-es-crypto
