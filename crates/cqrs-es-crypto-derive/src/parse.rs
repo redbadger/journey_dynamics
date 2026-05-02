@@ -131,10 +131,7 @@ fn has_fixed_default(ty: &syn::Type) -> bool {
         syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
         _ => None,
     };
-    matches!(
-        last.as_deref(),
-        Some("String") | Some("Option") | Some("Value")
-    )
+    matches!(last.as_deref(), Some("String" | "Option" | "Value"))
 }
 
 /// Infer the [`RedactValue`] for a secret field by inspecting the last path
