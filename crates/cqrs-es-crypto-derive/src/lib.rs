@@ -21,6 +21,36 @@
 //! // Generates: pub struct MyEventPiiCodec;
 //! // + impl PiiEventCodec for MyEventPiiCodec { ... }
 //! ```
+//!
+//! # Field types and redaction
+//!
+//! `#[pii(secret)]` fields are redacted to a per-type default when the
+//! subject's DEK has been deleted. The defaults are:
+//!
+//! | Field type            | Redaction value | Notes                                       |
+//! |-----------------------|-----------------|---------------------------------------------|
+//! | `String`              | `"[redacted]"`  | fixed; not user-overridable                 |
+//! | `Option<_>`           | `null`          | fixed; not user-overridable                 |
+//! | `serde_json::Value`   | `{}`            | fixed; not user-overridable                 |
+//! | `chrono::NaiveDate`   | `"0000-01-01"`  | requires the `chrono` feature; overridable  |
+//!
+//! For types that don't have an inferred default (or to override one that
+//! does support overrides) supply an explicit redaction value:
+//!
+//! ```rust,ignore
+//! #[derive(PiiCodec)]
+//! enum MyEvent {
+//!     #[pii(event_type = "PersonCaptured")]
+//!     PersonCaptured {
+//!         #[pii(subject)]                       subject_id: uuid::Uuid,
+//!         #[pii(secret)]                        name: String,
+//!         // Default `"0000-01-01"` (requires the `chrono` feature):
+//!         #[pii(secret)]                        dob: chrono::NaiveDate,
+//!         // Custom override:
+//!         #[pii(secret, redact = "1900-01-01")] dod: chrono::NaiveDate,
+//!     },
+//! }
+//! ```
 
 mod model;
 mod parse;
