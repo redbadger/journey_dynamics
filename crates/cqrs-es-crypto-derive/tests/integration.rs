@@ -117,6 +117,25 @@ enum TestEvent {
         dob: chrono::NaiveDate,
     },
 
+    /// Non-string plaintext fields. Exercises classify's preservation of the
+    /// original JSON type for `#[pii(plaintext)]` fields whose Rust type is
+    /// not `String` (e.g. integers, optional strings). A previous
+    /// implementation coerced every plaintext field through
+    /// `as_str().unwrap_or("")`, silently corrupting non-string fields to
+    /// the empty string in the persisted payload and breaking deserialization
+    /// on read-back.
+    #[pii(event_type = "TypedPlaintext")]
+    TypedPlaintext {
+        #[pii(plaintext)]
+        count: i32,
+        #[pii(plaintext)]
+        label: Option<String>,
+        #[pii(subject)]
+        subject_id: Uuid,
+        #[pii(secret)]
+        secret_value: String,
+    },
+
     /// Non-PII variant — must pass through the repository completely unchanged.
     Plain,
 }
@@ -218,6 +237,31 @@ fn dated_secret_override_event(
                 "tag":        "some-tag",
                 "subject_id": subject_id.to_string(),
                 "dob":        "1990-05-15",
+            }
+        }),
+        serde_json::json!({}),
+    )
+}
+
+fn typed_plaintext_event(
+    aggregate_id: &str,
+    sequence: usize,
+    subject_id: Uuid,
+    count: i64,
+    label: Option<&str>,
+) -> SerializedEvent {
+    SerializedEvent::new(
+        aggregate_id.to_string(),
+        sequence,
+        "Test".to_string(),
+        "TypedPlaintext".to_string(),
+        "1.0".to_string(),
+        serde_json::json!({
+            "TypedPlaintext": {
+                "count":        count,
+                "label":        label,
+                "subject_id":   subject_id.to_string(),
+                "secret_value": "the-secret",
             }
         }),
         serde_json::json!({}),
@@ -616,6 +660,118 @@ async fn naive_date_override_redacts_to_custom_sentinel_when_key_deleted() {
     );
 
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
+    );
+}
+
+// ── Non-string plaintext fields ──────────────────────────────────────────────
+
+/// Persist an event whose plaintext fields include an `i32` and an
+/// `Option<String>`, then inspect the raw stored payload. The numeric and
+/// optional fields must retain their original JSON types — not be coerced
+/// to the empty string.
+#[tokio::test]
+async fn typed_plaintext_preserves_numeric_and_optional_fields_on_persist() {
+    let repo = make_repo();
+    let aggregate_id = "tp-persist";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(
+        &[typed_plaintext_event(
+            aggregate_id,
+            1,
+            subject_id,
+            7,
+            Some("hi"),
+        )],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let raw = repo.inner().all_events();
+    let inner = &raw[0].payload["TypedPlaintext"];
+
+    assert_eq!(
+        inner["count"].as_i64(),
+        Some(7),
+        "numeric plaintext field must remain a JSON number after persist, got {:?}",
+        inner["count"]
+    );
+    assert_eq!(
+        inner["label"].as_str(),
+        Some("hi"),
+        "Some(_) plaintext field must remain a JSON string after persist, got {:?}",
+        inner["label"]
+    );
+}
+
+/// `Option<String>::None` plaintext fields must remain JSON `null` in the
+/// persisted payload, not be coerced to an empty string.
+#[tokio::test]
+async fn typed_plaintext_preserves_null_optional_field_on_persist() {
+    let repo = make_repo();
+    let aggregate_id = "tp-persist-null";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(
+        &[typed_plaintext_event(aggregate_id, 1, subject_id, 0, None)],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let raw = repo.inner().all_events();
+    let inner = &raw[0].payload["TypedPlaintext"];
+
+    assert!(
+        inner["label"].is_null(),
+        "None plaintext field must remain JSON null after persist, got {:?}",
+        inner["label"]
+    );
+    assert_eq!(
+        inner["count"].as_i64(),
+        Some(0),
+        "the integer 0 must remain a JSON number after persist, got {:?}",
+        inner["count"]
+    );
+}
+
+/// Full classify → persist → reconstruct round-trip for non-string plaintext
+/// fields. The reconstructed payload must preserve the original JSON types
+/// for both `i32` and `Option<String>` plaintext fields.
+#[tokio::test]
+async fn typed_plaintext_round_trips_non_string_fields() {
+    let repo = make_repo();
+    let aggregate_id = "tp-roundtrip";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(
+        &[typed_plaintext_event(
+            aggregate_id,
+            1,
+            subject_id,
+            -42,
+            Some("kept"),
+        )],
+        None,
+    )
+    .await
+    .unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["TypedPlaintext"];
+
+    assert_eq!(inner["count"].as_i64(), Some(-42));
+    assert_eq!(inner["label"].as_str(), Some("kept"));
+    assert_eq!(inner["secret_value"].as_str().unwrap(), "the-secret");
     assert_eq!(
         inner["subject_id"].as_str().unwrap(),
         subject_id.to_string().as_str()

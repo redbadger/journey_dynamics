@@ -174,9 +174,11 @@ fn classify_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 
             // Extract each plaintext field into a named local variable so it
             // can be moved into the build_encrypted_payload closure below.
+            // Clone the JSON value as-is so non-string plaintext fields
+            // (numbers, nulls, bools) survive the round-trip; coercing via
+            // `as_str().unwrap_or("")` would corrupt them to the empty string.
             @for (pt in plaintext.iter()) {
-                let {{ pt.binding }} = event.payload[__key][{{ pt.name_str }}]
-                    .as_str().unwrap_or("").to_string();
+                let {{ pt.binding }} = event.payload[__key][{{ pt.name_str }}].clone();
             }
 
             // Build the plaintext PII blob.
@@ -535,6 +537,26 @@ mod tests {
         // plaintext field "person_ref" → binding "person_ref_str"
         zyn::assert_tokens_contain!(output, "person_ref_str");
         zyn::assert_tokens_contain!(output, "\"person_ref\"");
+    }
+
+    #[test]
+    fn classify_arm_clones_plaintext_fields_to_preserve_json_type() {
+        // Plaintext extraction must clone the JSON value to preserve its
+        // type. The previous implementation coerced through
+        // `as_str().unwrap_or("")`, silently corrupting non-string plaintext
+        // fields (numbers, nulls, bools) to the empty string and breaking
+        // deserialization on read-back.
+        //
+        // The single-secret variant is used because its generated body has
+        // no other call site for `unwrap_or` — the multi-secret bundling
+        // path legitimately uses `unwrap_or(Value::Null)`.
+        let input = dummy_input();
+        let output = zyn::zyn!(@classify_arm(variant = single_secret_variant()));
+        let raw = output.to_string();
+        assert!(
+            !raw.contains("unwrap_or"),
+            "classify_arm must not coerce plaintext fields via `unwrap_or`, got: {raw}"
+        );
     }
 
     #[test]
