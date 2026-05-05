@@ -655,6 +655,7 @@ name = "cqrs-es-crypto-derive"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "chrono",
  "cqrs-es",
  "cqrs-es-crypto",
  "serde",

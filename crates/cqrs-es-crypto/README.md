@@ -74,12 +74,23 @@ enum MyEvent {
 
 The macro infers a redaction value from each `#[pii(secret)]` field's type:
 
-| Type | Redacted as |
-|------|-------------|
-| `String` | `"[redacted]"` |
-| `Option<T>` | `null` |
-| `serde_json::Value` | `{}` |
-| Anything else | compile error — use `#[pii(secret, redact = "...")]` |
+| Type | Redacted as | Overridable? |
+|------|-------------|--------------|
+| `String` | `"[redacted]"` | no |
+| `Option<T>` | `null` | no |
+| `serde_json::Value` | `{}` | no |
+| `chrono::NaiveDate` | `"0000-01-01"` (requires the `chrono` feature) | yes |
+| Anything else | compile error — use `#[pii(secret, redact = "...")]` | n/a |
+
+The override syntax accepts a string literal:
+
+```rust
+#[pii(secret, redact = "1900-01-01")] dob: chrono::NaiveDate,
+```
+
+It is only allowed on types whose default is not part of the crate's
+contract — so `String`, `Option<_>`, and `serde_json::Value` cannot be
+overridden.
 
 ### 3. Wire it into your repository
 
@@ -337,6 +348,7 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
 | Feature | Default | Description |
 |---------|---------|-------------|
 | `derive` | | Enables `#[derive(PiiCodec)]` via the `cqrs-es-crypto-derive` proc-macro crate |
+| `chrono` | | Implies `derive`; teaches the derive macro to redact `chrono::NaiveDate` secret fields. Default sentinel is `"0000-01-01"`; override per-field with `#[pii(secret, redact = "...")]` |
 | `testing` | | Exposes `InMemoryEventRepository` for use in tests |
 
 ---

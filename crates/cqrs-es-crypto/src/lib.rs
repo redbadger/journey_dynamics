@@ -61,6 +61,15 @@
 //! let codec = Arc::new(MyCodec);
 //! let repo = CryptoShreddingEventRepository::new(inner_repo, key_store, cipher, codec);
 //! ```
+//!
+//! # Cargo features
+//!
+//! - `derive`: enables `#[derive(PiiCodec)]` from `cqrs-es-crypto-derive`.
+//! - `chrono`: implies `derive`; teaches the derive macro to redact
+//!   `chrono::NaiveDate` secret fields to `"0000-01-01"` by default.
+//!   Per-field overrides are available via
+//!   `#[pii(secret, redact = "...")]`. See the derive crate's docs.
+//! - `testing`: exposes [`InMemoryEventRepository`] for downstream tests.
 
 pub mod cipher;
 pub mod key_store;

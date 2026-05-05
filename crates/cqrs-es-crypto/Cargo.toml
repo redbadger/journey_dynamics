@@ -14,6 +14,7 @@ categories   = ["cryptography", "database"]
 [features]
 testing = []
 derive  = ["dep:cqrs-es-crypto-derive"]
+chrono  = ["derive", "cqrs-es-crypto-derive/chrono"]
 
 [dependencies]
 cqrs-es-crypto-derive = { version = "0.1.0", path = "../cqrs-es-crypto-derive", optional = true }

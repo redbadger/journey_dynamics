@@ -27,11 +27,13 @@ struct RawVariantAttr {
 }
 
 /// Raw flags parsed from `#[pii(subject)]` / `#[pii(plaintext)]` /
-/// `#[pii(secret)]` on a field.
+/// `#[pii(secret)]` on a field, plus an optional explicit redaction
+/// override `#[pii(secret, redact = "...")]`.
 struct RawFieldAttr {
     subject: bool,
     plaintext: bool,
     secret: bool,
+    redact: Option<String>,
 }
 
 // ── Attribute helpers ─────────────────────────────────────────────────────────
@@ -74,17 +76,17 @@ fn parse_variant_pii_attr(attr: &Attribute) -> syn::Result<RawVariantAttr> {
     })
 }
 
-/// Parse the flag contents of a field-level `#[pii(...)]` attribute.
+/// Parse the contents of a field-level `#[pii(...)]` attribute.
 ///
-/// Accepted flags (bare identifiers, not key-value):
-/// - `subject`
-/// - `plaintext`
-/// - `secret`
+/// Accepted forms:
+/// - bare flags: `subject`, `plaintext`, `secret`
+/// - key-value: `redact = "<string>"` (only meaningful alongside `secret`)
 fn parse_field_pii_attr(attr: &Attribute) -> syn::Result<RawFieldAttr> {
     let mut result = RawFieldAttr {
         subject: false,
         plaintext: false,
         secret: false,
+        redact: None,
     };
 
     attr.parse_nested_meta(|meta| {
@@ -97,9 +99,13 @@ fn parse_field_pii_attr(attr: &Attribute) -> syn::Result<RawFieldAttr> {
         } else if meta.path.is_ident("secret") {
             result.secret = true;
             Ok(())
+        } else if meta.path.is_ident("redact") {
+            let value: LitStr = meta.value()?.parse()?;
+            result.redact = Some(value.value());
+            Ok(())
         } else {
             Err(meta.error(
-                "unknown `#[pii]` option on field; expected `subject`, `plaintext`, or `secret`",
+                "unknown `#[pii]` option on field; expected `subject`, `plaintext`, `secret`, or `redact = \"...\"`",
             ))
         }
     })?;
@@ -109,10 +115,33 @@ fn parse_field_pii_attr(attr: &Attribute) -> syn::Result<RawFieldAttr> {
 
 // ── Field parsing ────────────────────────────────────────────────────────────
 
+/// Returns `true` if the type's inferred redaction value is part of the
+/// crate's contract and may not be overridden by `#[pii(secret, redact = "...")]`.
+///
+/// Currently: `String`, `Option<_>`, and `serde_json::Value`.
+///
+/// **Maintenance contract:** this list is hand-maintained alongside
+/// [`infer_redact`]. If you add a new arm to `infer_redact` whose
+/// redaction value is intended to be fixed (i.e. callers must not
+/// override it), you must also add the type to this function. Types
+/// that are intended to be overridable (e.g. `NaiveDate` under the
+/// `chrono` feature) do **not** belong here.
+fn has_fixed_default(ty: &syn::Type) -> bool {
+    let last = match ty {
+        syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
+        _ => None,
+    };
+    matches!(last.as_deref(), Some("String" | "Option" | "Value"))
+}
+
 /// Infer the [`RedactValue`] for a secret field by inspecting the last path
 /// segment of its type.
 ///
 /// Returns an error for types that cannot be mapped automatically.
+///
+/// With the `chrono` feature enabled, `NaiveDate` is also recognized and
+/// redacts to the default sentinel `"0000-01-01"`. Callers can still
+/// override the sentinel per-field via `#[pii(secret, redact = "...")]`.
 fn infer_redact(ty: &syn::Type) -> syn::Result<RedactValue> {
     let last_ident = match ty {
         syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
@@ -123,11 +152,14 @@ fn infer_redact(ty: &syn::Type) -> syn::Result<RedactValue> {
         Some("String") => Ok(RedactValue::Literal("[redacted]".to_string())),
         Some("Option") => Ok(RedactValue::Null),
         Some("Value") => Ok(RedactValue::EmptyObject),
+        #[cfg(feature = "chrono")]
+        Some("NaiveDate") => Ok(RedactValue::Literal("0000-01-01".to_string())),
         _ => Err(syn::Error::new_spanned(
             ty,
             "cannot infer redaction value for this type; \
-             only `String`, `Option<_>`, and `serde_json::Value` fields are supported \
-             by `#[pii(secret)]`",
+             only `String`, `Option<_>`, and `serde_json::Value` are supported \
+             out of the box. Enable the `chrono` feature for `NaiveDate`, \
+             or specify `#[pii(secret, redact = \"...\")]` explicitly.",
         )),
     }
 }
@@ -179,8 +211,29 @@ fn parse_field(field: &syn::Field, variant_ident: &Ident) -> syn::Result<PiiFiel
     };
 
     let redact = if matches!(role, PiiFieldRole::Secret) {
-        Some(infer_redact(&field.ty)?)
+        match raw.redact {
+            Some(override_val) => {
+                if has_fixed_default(&field.ty) {
+                    return Err(syn::Error::new_spanned(
+                        field_ident,
+                        "redact override is not allowed on `String`, `Option<_>`, \
+                         or `serde_json::Value` fields — their redaction values \
+                         are part of the crate's contract. Remove the \
+                         `redact = \"...\"` argument, or wrap the field in a \
+                         newtype if you need a different sentinel.",
+                    ));
+                }
+                Some(RedactValue::Literal(override_val))
+            }
+            None => Some(infer_redact(&field.ty)?),
+        }
     } else {
+        if raw.redact.is_some() {
+            return Err(syn::Error::new_spanned(
+                field_ident,
+                "`redact` only applies to `#[pii(secret)]` fields",
+            ));
+        }
         None
     };
 
@@ -479,5 +532,143 @@ mod tests {
             err.to_string().contains("subject"),
             "error should mention duplicate subject, got: {err}"
         );
+    }
+
+    #[test]
+    fn parses_redact_override_on_unknown_secret_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret, redact = "fallback-value")] dob: MyDate,
+                }
+            }
+        };
+        let result = parse_pii_variants(&variants_from(input)).unwrap();
+        let dob = result[0]
+            .fields
+            .iter()
+            .find(|f| f.ident.to_string() == "dob")
+            .expect("dob field must be present");
+        match &dob.redact {
+            Some(RedactValue::Literal(s)) => assert_eq!(s, "fallback-value"),
+            other => panic!("expected RedactValue::Literal(\"fallback-value\"), got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_string_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret, redact = "x")] name: String,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("redact override"),
+            "error should mention redact override, got: {err}"
+        );
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_option_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret, redact = "x")] maybe: Option<String>,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("redact override"),
+            "error should mention redact override, got: {err}"
+        );
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_value_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret, redact = "x")] data: serde_json::Value,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("redact override"),
+            "error should mention redact override, got: {err}"
+        );
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_subject_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject, redact = "x")] subject_id: uuid::Uuid,
+                    #[pii(secret)] name: String,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("only applies to"),
+            "error should explain redact only applies to secret fields, got: {err}"
+        );
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_plaintext_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(plaintext, redact = "x")] tag: String,
+                    #[pii(secret)] name: String,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("only applies to"),
+            "error should explain redact only applies to secret fields, got: {err}"
+        );
+    }
+
+    #[cfg(feature = "chrono")]
+    #[test]
+    fn parses_naive_date_with_default_redact() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret)]  dob: chrono::NaiveDate,
+                }
+            }
+        };
+        let result = parse_pii_variants(&variants_from(input)).unwrap();
+        let dob = result[0]
+            .fields
+            .iter()
+            .find(|f| f.ident.to_string() == "dob")
+            .expect("dob field must be present");
+        match &dob.redact {
+            Some(RedactValue::Literal(s)) => assert_eq!(s, "0000-01-01"),
+            other => panic!("expected RedactValue::Literal(\"0000-01-01\"), got: {other:?}"),
+        }
     }
 }

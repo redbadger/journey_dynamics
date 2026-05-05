@@ -91,6 +91,32 @@ enum TestEvent {
         data: serde_json::Value,
     },
 
+    /// Single-secret variant whose secret field is `chrono::NaiveDate`.
+    /// Exercises the `chrono` feature's default redaction sentinel.
+    #[cfg(feature = "chrono")]
+    #[pii(event_type = "DatedSecret")]
+    DatedSecret {
+        #[pii(plaintext)]
+        tag: String,
+        #[pii(subject)]
+        subject_id: Uuid,
+        #[pii(secret)]
+        dob: chrono::NaiveDate,
+    },
+
+    /// Single-secret variant whose secret field is `chrono::NaiveDate`
+    /// with a custom redaction sentinel.
+    #[cfg(feature = "chrono")]
+    #[pii(event_type = "DatedSecretOverride")]
+    DatedSecretOverride {
+        #[pii(plaintext)]
+        tag: String,
+        #[pii(subject)]
+        subject_id: Uuid,
+        #[pii(secret, redact = "1900-01-01")]
+        dob: chrono::NaiveDate,
+    },
+
     /// Non-PII variant — must pass through the repository completely unchanged.
     Plain,
 }
@@ -150,6 +176,48 @@ fn single_secret_event(aggregate_id: &str, sequence: usize, subject_id: Uuid) ->
                 "tag":        "some-tag",
                 "subject_id": subject_id.to_string(),
                 "data":       { "passport": "GB123456" },
+            }
+        }),
+        serde_json::json!({}),
+    )
+}
+
+#[cfg(feature = "chrono")]
+fn dated_secret_event(aggregate_id: &str, sequence: usize, subject_id: Uuid) -> SerializedEvent {
+    SerializedEvent::new(
+        aggregate_id.to_string(),
+        sequence,
+        "Test".to_string(),
+        "DatedSecret".to_string(),
+        "1.0".to_string(),
+        serde_json::json!({
+            "DatedSecret": {
+                "tag":        "some-tag",
+                "subject_id": subject_id.to_string(),
+                "dob":        "1990-05-15",
+            }
+        }),
+        serde_json::json!({}),
+    )
+}
+
+#[cfg(feature = "chrono")]
+fn dated_secret_override_event(
+    aggregate_id: &str,
+    sequence: usize,
+    subject_id: Uuid,
+) -> SerializedEvent {
+    SerializedEvent::new(
+        aggregate_id.to_string(),
+        sequence,
+        "Test".to_string(),
+        "DatedSecretOverride".to_string(),
+        "1.0".to_string(),
+        serde_json::json!({
+            "DatedSecretOverride": {
+                "tag":        "some-tag",
+                "subject_id": subject_id.to_string(),
+                "dob":        "1990-05-15",
             }
         }),
         serde_json::json!({}),
@@ -466,6 +534,87 @@ async fn single_secret_redacts_value_field_with_empty_object_when_key_deleted() 
     );
 
     // Non-PII fields must still be readable.
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
+    );
+}
+
+// ── Read path: chrono NaiveDate redaction ────────────────────────────────────
+
+/// Persist an event whose secret field is `NaiveDate`, delete the DEK,
+/// then read back and verify the field has been replaced with the default
+/// sentinel `"0000-01-01"`.
+#[cfg(feature = "chrono")]
+#[tokio::test]
+async fn naive_date_redacts_to_default_sentinel_when_key_deleted() {
+    let (repo, key_store) = make_repo_with_key_store();
+    let aggregate_id = "nd-redact-default";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[dated_secret_event(aggregate_id, 1, subject_id)], None)
+        .await
+        .unwrap();
+
+    // Shred: delete the DEK so decryption is impossible.
+    key_store.delete_key(&subject_id).await.unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["DatedSecret"];
+
+    assert_eq!(
+        inner["dob"].as_str().unwrap(),
+        "0000-01-01",
+        "dob must be the default chrono sentinel after key deletion"
+    );
+
+    // Non-PII fields must still be readable.
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
+    );
+}
+
+/// Persist an event whose secret field is `NaiveDate` with an explicit
+/// `redact = "1900-01-01"` override, delete the DEK, then read back and
+/// verify the field equals the override value, not the default sentinel.
+#[cfg(feature = "chrono")]
+#[tokio::test]
+async fn naive_date_override_redacts_to_custom_sentinel_when_key_deleted() {
+    let (repo, key_store) = make_repo_with_key_store();
+    let aggregate_id = "nd-redact-override";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(
+        &[dated_secret_override_event(aggregate_id, 1, subject_id)],
+        None,
+    )
+    .await
+    .unwrap();
+
+    key_store.delete_key(&subject_id).await.unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["DatedSecretOverride"];
+
+    assert_eq!(
+        inner["dob"].as_str().unwrap(),
+        "1900-01-01",
+        "dob must be the override sentinel after key deletion, not the default"
+    );
+
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
     assert_eq!(
         inner["subject_id"].as_str().unwrap(),
