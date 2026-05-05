@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-02
+
+### Added
+
+- `chrono` Cargo feature — implies `derive`; enables `chrono::NaiveDate` support
+  in the `#[derive(PiiCodec)]` macro (see `cqrs-es-crypto-derive` 0.1.1).
+- Documented all Cargo features (`derive`, `chrono`, `testing`) in the crate-level
+  rustdoc.
+
 ## [0.1.0] - 2026-04-29
 
 ### Added
@@ -37,5 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aggregate snapshots are not encrypted. If your aggregate state contains PII it
   will be stored in plaintext, and crypto-shredding a subject will not redact it.
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.0...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.1...HEAD
+[0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.0...cqrs-es-crypto-v0.1.1
 [0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/cqrs-es-crypto-v0.1.0

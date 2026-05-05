@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-02
+
+### Added
+
+- `chrono` Cargo feature — enables automatic redaction of `chrono::NaiveDate`
+  secret fields to the sentinel `"0000-01-01"` when a subject's DEK has been
+  deleted.
+- `#[pii(secret, redact = "...")]` attribute — allows an explicit per-field
+  redaction sentinel override for types whose default is not fixed by the
+  crate's contract (e.g. `NaiveDate` and custom newtypes). Attempting to
+  override `String`, `Option<_>`, or `serde_json::Value` fields is a
+  compile error.
+
 ## [0.1.0] - 2026-04-29
 
 ### Added
@@ -29,5 +42,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.0...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.1...HEAD
+[0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.0...cqrs-es-crypto-derive-v0.1.1
 [0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/cqrs-es-crypto-derive-v0.1.0
