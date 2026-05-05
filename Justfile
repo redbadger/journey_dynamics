@@ -1,3 +1,5 @@
+version := `grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/'`
+
 build: generate
     cargo build
 
@@ -38,12 +40,8 @@ ci: lint build test test-hurl
 #
 # Requires `cargo login` to have been run with a valid crates.io token.
 publish:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    derive_ver=$(grep -m1 '^version' crates/cqrs-es-crypto-derive/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
-    main_ver=$(grep -m1 '^version' crates/cqrs-es-crypto/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
     cargo publish -p cqrs-es-crypto-derive
     cargo publish -p cqrs-es-crypto
-    git tag "cqrs-es-crypto-derive-v${derive_ver}"
-    git tag "cqrs-es-crypto-v${main_ver}"
-    git push origin "cqrs-es-crypto-derive-v${derive_ver}" "cqrs-es-crypto-v${main_ver}"
+    git tag "cqrs-es-crypto-derive-v{{ version }}"
+    git tag "cqrs-es-crypto-v{{ version }}"
+    git push origin "cqrs-es-crypto-derive-v{{ version }}" "cqrs-es-crypto-v{{ version }}"
