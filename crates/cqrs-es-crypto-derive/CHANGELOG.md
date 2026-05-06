@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-05-06
+
+### Fixed
+
+- `#[pii(plaintext)]` field values are now preserved verbatim in the
+  persisted payload regardless of their JSON type. The previous
+  implementation coerced every plaintext field through
+  `as_str().unwrap_or("")` when building the encrypted-form event,
+  silently corrupting non-string fields (integers, `Option<String>::None`,
+  booleans, etc.) to the empty string and breaking deserialization on
+  read-back. Plaintext fields are now cloned as-is, matching the
+  behaviour already present in the `reconstruct` and `redact` arms.
+
 ## [0.1.1] - 2026-05-02
 
 ### Added
@@ -42,6 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.1...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.2...HEAD
+[0.1.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.1...cqrs-es-crypto-derive-v0.1.2
 [0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.0...cqrs-es-crypto-derive-v0.1.1
 [0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/cqrs-es-crypto-derive-v0.1.0
