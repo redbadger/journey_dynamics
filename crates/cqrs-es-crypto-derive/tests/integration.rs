@@ -828,12 +828,9 @@ async fn custom_subject_field_name_is_preserved_on_persist() {
     let aggregate_id = "cs-encrypt";
     let customer_ref = Uuid::new_v4();
 
-    repo.persist::<TestAggregate>(
-        &[custom_subject_event(aggregate_id, 1, customer_ref)],
-        None,
-    )
-    .await
-    .unwrap();
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
 
     let raw = repo.inner().all_events();
     assert_eq!(raw.len(), 1);
@@ -875,12 +872,9 @@ async fn custom_subject_round_trip_decrypts_pii_fields() {
     let aggregate_id = "cs-roundtrip";
     let customer_ref = Uuid::new_v4();
 
-    repo.persist::<TestAggregate>(
-        &[custom_subject_event(aggregate_id, 1, customer_ref)],
-        None,
-    )
-    .await
-    .unwrap();
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
 
     let events = repo
         .get_events::<TestAggregate>(aggregate_id)
@@ -913,12 +907,9 @@ async fn custom_subject_redacts_string_fields_when_key_deleted() {
     let aggregate_id = "cs-redact";
     let customer_ref = Uuid::new_v4();
 
-    repo.persist::<TestAggregate>(
-        &[custom_subject_event(aggregate_id, 1, customer_ref)],
-        None,
-    )
-    .await
-    .unwrap();
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
 
     key_store.delete_key(&customer_ref).await.unwrap();
 
