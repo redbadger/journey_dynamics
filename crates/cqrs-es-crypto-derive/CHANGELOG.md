@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-07
+
+### Fixed
+
+- The `#[pii(subject)]` field name is now honoured throughout the generated
+  codec. The `classify` arm previously hardcoded the literal `"subject_id"`
+  as the JSON key in the encrypted-payload write path, while the read,
+  reconstruct, and redact arms correctly used the variant's actual
+  identifier. This asymmetry meant the macro only produced consistent
+  payloads when the field happened to be named `subject_id`. The subject
+  field can now be named anything (`subject_id`, `user_id`, `customer_ref`,
+  etc.) and the chosen identifier is used as the JSON key in every read
+  and write site.
+
 ## [0.1.2] - 2026-05-06
 
 ### Fixed
@@ -55,7 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.2...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.3...HEAD
+[0.1.3]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.2...cqrs-es-crypto-derive-v0.1.3
 [0.1.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.1...cqrs-es-crypto-derive-v0.1.2
 [0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.0...cqrs-es-crypto-derive-v0.1.1
 [0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/cqrs-es-crypto-derive-v0.1.0

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-07
+
+### Fixed
+
+- Bumped `cqrs-es-crypto-derive` to 0.1.3 to pick up the fix for
+  `#[pii(subject)]` field names other than `subject_id` being silently
+  ignored by the encrypted-payload write path (see `cqrs-es-crypto-derive`
+  0.1.3).
+
 ## [0.1.2] - 2026-05-06
 
 ### Fixed
@@ -54,7 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aggregate snapshots are not encrypted. If your aggregate state contains PII it
   will be stored in plaintext, and crypto-shredding a subject will not redact it.
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.2...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.3...HEAD
+[0.1.3]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.2...cqrs-es-crypto-v0.1.3
 [0.1.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.1...cqrs-es-crypto-v0.1.2
 [0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.0...cqrs-es-crypto-v0.1.1
 [0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/cqrs-es-crypto-v0.1.0
