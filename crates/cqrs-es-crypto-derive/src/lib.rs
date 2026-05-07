@@ -207,7 +207,7 @@ fn classify_arm(variant: PiiVariantModel) -> zyn::TokenStream {
                             @for (pt in plaintext.iter()) {
                                 {{ pt.name_str }}: {{ pt.binding }},
                             }
-                            "subject_id": __subject_id_str,
+                            {{ subject_str }}: __subject_id_str,
                             {{ sentinel }}: __sentinel.ciphertext_b64,
                             "nonce": __sentinel.nonce_b64,
                         }
@@ -513,6 +513,23 @@ mod tests {
         }
     }
 
+    /// Multi-secret variant whose subject field is named `user_id` instead of
+    /// the conventional `subject_id`. Exercises the contract that
+    /// `#[pii(subject)]` accepts any field name and that name flows into
+    /// every JSON read/write site in the generated code.
+    fn multi_secret_variant_with_custom_subject() -> PiiVariantModel {
+        PiiVariantModel {
+            event_type: "PersonCaptured".to_string(),
+            sentinel: "encrypted_pii".to_string(),
+            fields: vec![
+                field("person_ref", PiiFieldRole::Plaintext),
+                field("user_id", PiiFieldRole::Subject),
+                str_secret_field("name"),
+                str_secret_field("email"),
+            ],
+        }
+    }
+
     // ── classify_arm ──────────────────────────────────────────────────────────
 
     #[test]
@@ -614,6 +631,34 @@ mod tests {
         zyn::assert_tokens_contain!(output, "PiiFields");
         zyn::assert_tokens_contain!(output, "subject_id");
         zyn::assert_tokens_contain!(output, "plaintext_pii");
+    }
+
+    #[test]
+    fn classify_arm_uses_custom_subject_name_in_both_read_and_write() {
+        // Regression guard for the bug where the encrypted-payload write path
+        // hardcoded `"subject_id"` instead of using the variant's actual
+        // subject field name. The read path already used `subject_str`; this
+        // test asserts both sides of `classify_arm` agree.
+        let input = dummy_input();
+        let output = zyn::zyn!(
+            @classify_arm(variant = multi_secret_variant_with_custom_subject())
+        );
+        let raw = output.to_string();
+
+        // The actual subject field name must appear in the generated tokens
+        // (it is used both to read the value and as the JSON key in the
+        // build_encrypted_payload closure).
+        assert!(
+            raw.contains("\"user_id\""),
+            "classify_arm must use the variant's actual subject field name as the JSON key, got: {raw}"
+        );
+
+        // The hardcoded literal `"subject_id"` must NOT appear when the
+        // variant's subject field is named something else.
+        assert!(
+            !raw.contains("\"subject_id\""),
+            "classify_arm must not emit hardcoded \"subject_id\" when the variant uses a different subject name, got: {raw}"
+        );
     }
 
     // ── extract_arm ───────────────────────────────────────────────────────────

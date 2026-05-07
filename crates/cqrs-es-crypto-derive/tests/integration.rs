@@ -136,6 +136,22 @@ enum TestEvent {
         secret_value: String,
     },
 
+    /// Multi-secret variant whose subject field is named `customer_ref`
+    /// rather than the conventional `subject_id`. Verifies that the macro
+    /// uses the variant's actual subject identifier as the JSON key in
+    /// every read/write path, not a hardcoded literal.
+    #[pii(event_type = "CustomSubject")]
+    CustomSubject {
+        #[pii(plaintext)]
+        tag: String,
+        #[pii(subject)]
+        customer_ref: Uuid,
+        #[pii(secret)]
+        name: String,
+        #[pii(secret)]
+        email: String,
+    },
+
     /// Non-PII variant — must pass through the repository completely unchanged.
     Plain,
 }
@@ -262,6 +278,29 @@ fn typed_plaintext_event(
                 "label":        label,
                 "subject_id":   subject_id.to_string(),
                 "secret_value": "the-secret",
+            }
+        }),
+        serde_json::json!({}),
+    )
+}
+
+fn custom_subject_event(
+    aggregate_id: &str,
+    sequence: usize,
+    customer_ref: Uuid,
+) -> SerializedEvent {
+    SerializedEvent::new(
+        aggregate_id.to_string(),
+        sequence,
+        "Test".to_string(),
+        "CustomSubject".to_string(),
+        "1.0".to_string(),
+        serde_json::json!({
+            "CustomSubject": {
+                "tag":          "some-tag",
+                "customer_ref": customer_ref.to_string(),
+                "name":         "Bob Jones",
+                "email":        "bob@example.com",
             }
         }),
         serde_json::json!({}),
@@ -775,5 +814,123 @@ async fn typed_plaintext_round_trips_non_string_fields() {
     assert_eq!(
         inner["subject_id"].as_str().unwrap(),
         subject_id.to_string().as_str()
+    );
+}
+
+// ── Custom subject field name ────────────────────────────────────────────────
+
+/// Persist an event whose `#[pii(subject)]` field is named `customer_ref`
+/// (not `subject_id`). The stored encrypted payload must use `customer_ref`
+/// as the JSON key for the subject — not a hardcoded `subject_id`.
+#[tokio::test]
+async fn custom_subject_field_name_is_preserved_on_persist() {
+    let repo = make_repo();
+    let aggregate_id = "cs-encrypt";
+    let customer_ref = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
+
+    let raw = repo.inner().all_events();
+    assert_eq!(raw.len(), 1);
+    let inner = &raw[0].payload["CustomSubject"];
+
+    // PII fields must not appear in plaintext.
+    assert!(inner.get("name").is_none(), "name must be encrypted");
+    assert!(inner.get("email").is_none(), "email must be encrypted");
+
+    // Sentinel and nonce present.
+    assert!(
+        inner.get("encrypted_pii").is_some(),
+        "encrypted_pii sentinel must be present"
+    );
+    assert!(inner.get("nonce").is_some(), "nonce must be present");
+
+    // The subject field must appear under its actual name `customer_ref`,
+    // NOT under a hardcoded `subject_id`.
+    assert_eq!(
+        inner["customer_ref"].as_str().unwrap(),
+        customer_ref.to_string().as_str(),
+        "custom-named subject field must be persisted under its actual name"
+    );
+    assert!(
+        inner.get("subject_id").is_none(),
+        "no hardcoded `subject_id` key must appear when the variant uses a different subject name, got payload: {inner:?}"
+    );
+
+    // Plaintext field preserved.
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+}
+
+/// Round-trip: persist a custom-subject event, then read it back and verify
+/// every field — including the differently-named subject field — is
+/// reconstructed correctly.
+#[tokio::test]
+async fn custom_subject_round_trip_decrypts_pii_fields() {
+    let repo = make_repo();
+    let aggregate_id = "cs-roundtrip";
+    let customer_ref = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["CustomSubject"];
+
+    assert_eq!(inner["name"].as_str().unwrap(), "Bob Jones");
+    assert_eq!(inner["email"].as_str().unwrap(), "bob@example.com");
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["customer_ref"].as_str().unwrap(),
+        customer_ref.to_string().as_str(),
+        "subject field must round-trip under its actual name"
+    );
+    assert!(
+        inner.get("subject_id").is_none(),
+        "no hardcoded subject_id must appear in reconstructed payload"
+    );
+}
+
+/// Persist a custom-subject event, delete the DEK, and verify redaction
+/// emits the differently-named subject field unchanged while replacing
+/// secret String fields with `"[redacted]"`.
+#[tokio::test]
+async fn custom_subject_redacts_string_fields_when_key_deleted() {
+    let (repo, key_store) = make_repo_with_key_store();
+    let aggregate_id = "cs-redact";
+    let customer_ref = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[custom_subject_event(aggregate_id, 1, customer_ref)], None)
+        .await
+        .unwrap();
+
+    key_store.delete_key(&customer_ref).await.unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["CustomSubject"];
+
+    assert_eq!(inner["name"].as_str().unwrap(), "[redacted]");
+    assert_eq!(inner["email"].as_str().unwrap(), "[redacted]");
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["customer_ref"].as_str().unwrap(),
+        customer_ref.to_string().as_str(),
+        "subject field must remain readable after redaction under its actual name"
+    );
+    assert!(
+        inner.get("subject_id").is_none(),
+        "no hardcoded subject_id must appear in redacted payload"
     );
 }

@@ -66,7 +66,7 @@ enum MyEvent {
 
 | Attribute | Role |
 |-----------|------|
-| `#[pii(subject)]` | The data-subject UUID. Exactly one per PII variant. Kept in the clear so the read path can locate the DEK without decrypting anything first. |
+| `#[pii(subject)]` | The data-subject UUID. Exactly one per PII variant. Kept in the clear so the read path can locate the DEK without decrypting anything first. The field name is up to you (e.g. `subject_id`, `user_id`, `customer_ref`); whatever identifier you write becomes the JSON key in the stored payload. |
 | `#[pii(plaintext)]` | A non-PII field. Kept in the clear on both write and read, including after shredding. |
 | `#[pii(secret)]` | A PII field. Encrypted on write, decrypted or redacted on read. Every field on a PII variant must be annotated; unannotated fields are a compile error. |
 
