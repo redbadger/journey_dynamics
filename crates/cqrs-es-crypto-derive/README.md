@@ -34,6 +34,11 @@ enum MyEvent {
 // + impl PiiEventCodec for MyEventPiiCodec { ... }
 ```
 
+The `#[pii(subject)]` field can be named anything — `subject_id`, `user_id`,
+`customer_ref`, etc. The identifier you write becomes the JSON key in the
+encrypted payload, and the read path uses the same name. Convention is
+`subject_id` but it is not required.
+
 See the [`cqrs-es-crypto` documentation](https://docs.rs/cqrs-es-crypto) for full
 usage instructions, field-role reference, and wiring examples.
 
