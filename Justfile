@@ -8,7 +8,7 @@ generate:
 
 lint:
     cargo fmt --all --check
-    cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
+    cargo clippy -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
 
 test-lib:
     cargo insta test --review --test-runner nextest --all-features --lib

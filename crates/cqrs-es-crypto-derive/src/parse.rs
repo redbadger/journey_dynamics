@@ -549,7 +549,7 @@ mod tests {
         let dob = result[0]
             .fields
             .iter()
-            .find(|f| f.ident.to_string() == "dob")
+            .find(|f| f.ident == "dob")
             .expect("dob field must be present");
         match &dob.redact {
             Some(RedactValue::Literal(s)) => assert_eq!(s, "fallback-value"),
@@ -664,7 +664,7 @@ mod tests {
         let dob = result[0]
             .fields
             .iter()
-            .find(|f| f.ident.to_string() == "dob")
+            .find(|f| f.ident == "dob")
             .expect("dob field must be present");
         match &dob.redact {
             Some(RedactValue::Literal(s)) => assert_eq!(s, "0000-01-01"),
