@@ -118,7 +118,7 @@ fn parse_field_pii_attr(attr: &Attribute) -> syn::Result<RawFieldAttr> {
 /// Returns `true` if the type's inferred redaction value is part of the
 /// crate's contract and may not be overridden by `#[pii(secret, redact = "...")]`.
 ///
-/// Currently: `String`, `Option<_>`, and `serde_json::Value`.
+/// Currently: `String`, `Option<_>`, `serde_json::Value`, and `Vec<_>`.
 ///
 /// **Maintenance contract:** this list is hand-maintained alongside
 /// [`infer_redact`]. If you add a new arm to `infer_redact` whose
@@ -131,7 +131,7 @@ fn has_fixed_default(ty: &syn::Type) -> bool {
         syn::Type::Path(tp) => tp.path.segments.last().map(|seg| seg.ident.to_string()),
         _ => None,
     };
-    matches!(last.as_deref(), Some("String" | "Option" | "Value"))
+    matches!(last.as_deref(), Some("String" | "Option" | "Value" | "Vec"))
 }
 
 /// Infer the [`RedactValue`] for a secret field by inspecting the last path
@@ -152,14 +152,16 @@ fn infer_redact(ty: &syn::Type) -> syn::Result<RedactValue> {
         Some("String") => Ok(RedactValue::Literal("[redacted]".to_string())),
         Some("Option") => Ok(RedactValue::Null),
         Some("Value") => Ok(RedactValue::EmptyObject),
+        Some("Vec") => Ok(RedactValue::EmptyArray),
         #[cfg(feature = "chrono")]
         Some("NaiveDate") => Ok(RedactValue::Literal("0000-01-01".to_string())),
         _ => Err(syn::Error::new_spanned(
             ty,
             "cannot infer redaction value for this type; \
-             only `String`, `Option<_>`, and `serde_json::Value` are supported \
-             out of the box. Enable the `chrono` feature for `NaiveDate`, \
-             or specify `#[pii(secret, redact = \"...\")]` explicitly.",
+             only `String`, `Option<_>`, `serde_json::Value`, and `Vec<_>` are \
+             supported out of the box. Enable the `chrono` feature for \
+             `NaiveDate`, or specify `#[pii(secret, redact = \"...\")]` \
+             explicitly.",
         )),
     }
 }
@@ -217,8 +219,8 @@ fn parse_field(field: &syn::Field, variant_ident: &Ident) -> syn::Result<PiiFiel
                     return Err(syn::Error::new_spanned(
                         field_ident,
                         "redact override is not allowed on `String`, `Option<_>`, \
-                         or `serde_json::Value` fields — their redaction values \
-                         are part of the crate's contract. Remove the \
+                         `serde_json::Value`, or `Vec<_>` fields — their redaction \
+                         values are part of the crate's contract. Remove the \
                          `redact = \"...\"` argument, or wrap the field in a \
                          newtype if you need a different sentinel.",
                     ));
@@ -645,6 +647,47 @@ mod tests {
         assert!(
             err.to_string().contains("only applies to"),
             "error should explain redact only applies to secret fields, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parses_vec_field_with_default_redact() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret)]  numbers: Vec<PhoneNumber>,
+                }
+            }
+        };
+        let result = parse_pii_variants(&variants_from(input)).unwrap();
+        let numbers = result[0]
+            .fields
+            .iter()
+            .find(|f| f.ident == "numbers")
+            .expect("numbers field must be present");
+        match &numbers.redact {
+            Some(RedactValue::EmptyArray) => {}
+            other => panic!("expected RedactValue::EmptyArray, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn errors_on_redact_override_for_vec_field() {
+        let input: DeriveInput = parse_quote! {
+            enum E {
+                #[pii(event_type = "X")]
+                X {
+                    #[pii(subject)] subject_id: uuid::Uuid,
+                    #[pii(secret, redact = "x")] numbers: Vec<PhoneNumber>,
+                }
+            }
+        };
+        let err = parse_pii_variants(&variants_from(input)).unwrap_err();
+        assert!(
+            err.to_string().contains("redact override"),
+            "error should mention redact override, got: {err}"
         );
     }
 

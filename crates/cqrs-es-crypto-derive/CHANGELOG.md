@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-15
+
+### Added
+
+- `#[pii(secret)]` fields of type `Vec<_>` are now supported out of the box.
+  Their default redaction value is the empty JSON array `[]`, mirroring the
+  existing `Option<_> → null` and `serde_json::Value → {}` defaults. The
+  empty array deserializes back into an empty `Vec<_>` on the read path
+  after a subject's DEK has been deleted (crypto-shredding), so a
+  redacted event remains structurally valid for `serde_json::from_value`.
+  The previous `#[pii(secret, redact = "...")]` escape hatch could not be
+  used for `Vec<_>` fields because its argument was always emitted as a
+  JSON string and could not produce a typed array. Like `String`,
+  `Option<_>`, and `serde_json::Value`, the `Vec<_>` default is fixed and
+  cannot be overridden by a `redact = "..."` argument.
+
 ## [0.1.3] - 2026-05-07
 
 ### Fixed
@@ -69,7 +85,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.3...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.4...HEAD
+[0.1.4]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.3...cqrs-es-crypto-derive-v0.1.4
 [0.1.3]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.2...cqrs-es-crypto-derive-v0.1.3
 [0.1.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.1...cqrs-es-crypto-derive-v0.1.2
 [0.1.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.0...cqrs-es-crypto-derive-v0.1.1
