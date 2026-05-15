@@ -32,6 +32,7 @@
 //! | `String`              | `"[redacted]"`  | fixed; not user-overridable                 |
 //! | `Option<_>`           | `null`          | fixed; not user-overridable                 |
 //! | `serde_json::Value`   | `{}`            | fixed; not user-overridable                 |
+//! | `Vec<_>`              | `[]`            | fixed; not user-overridable                 |
 //! | `chrono::NaiveDate`   | `"0000-01-01"`  | requires the `chrono` feature; overridable  |
 //!
 //! For types that don't have an inferred default (or to override one that
@@ -99,6 +100,11 @@ fn redact_value_to_tokens(rv: &RedactValue, span: Span) -> TokenStream {
         RedactValue::Null => std::iter::once(TokenTree::Ident(Ident::new("null", span))).collect(),
         RedactValue::EmptyObject => std::iter::once(TokenTree::Group(Group::new(
             Delimiter::Brace,
+            TokenStream::new(),
+        )))
+        .collect(),
+        RedactValue::EmptyArray => std::iter::once(TokenTree::Group(Group::new(
+            Delimiter::Bracket,
             TokenStream::new(),
         )))
         .collect(),
@@ -327,6 +333,7 @@ fn reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 /// - `String` → `"[redacted]"`
 /// - `Option<_>` → `null`
 /// - `Value` / `serde_json::Value` → `{}`
+/// - `Vec<_>` → `[]`
 #[zyn::element]
 fn redact_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     let span = Span::call_site();
@@ -483,6 +490,14 @@ mod tests {
         }
     }
 
+    fn vec_secret_field(name: &str) -> PiiFieldModel {
+        PiiFieldModel {
+            ident: zyn::format_ident!("{}", name),
+            role: PiiFieldRole::Secret,
+            redact: Some(RedactValue::EmptyArray),
+        }
+    }
+
     /// Multi-secret variant: `person_ref` (plaintext), `subject_id` (subject),
     /// name/email/phone (secret) — mirrors `PersonCaptured`.
     fn multi_secret_variant() -> PiiVariantModel {
@@ -509,6 +524,20 @@ mod tests {
                 field("person_ref", PiiFieldRole::Plaintext),
                 field("subject_id", PiiFieldRole::Subject),
                 value_secret_field("data"),
+            ],
+        }
+    }
+
+    /// Single-secret variant whose secret field is a `Vec<_>` type. Exercises
+    /// the `EmptyArray` redaction path emitted by `redact_arm`.
+    fn single_secret_vec_variant() -> PiiVariantModel {
+        PiiVariantModel {
+            event_type: "PhonesCaptured".to_string(),
+            sentinel: "encrypted_pii".to_string(),
+            fields: vec![
+                field("person_ref", PiiFieldRole::Plaintext),
+                field("subject_id", PiiFieldRole::Subject),
+                vec_secret_field("phone_numbers"),
             ],
         }
     }
@@ -819,5 +848,20 @@ mod tests {
         let input = dummy_input();
         let output = zyn::zyn!(@redact_arm(variant = single_secret_variant()));
         zyn::assert_tokens_contain!(output, "\"PersonDetailsUpdated\"");
+    }
+
+    #[test]
+    fn redact_arm_single_secret_emits_empty_array_for_vec_field() {
+        // `Vec<_>` field → `[]` in the redacted JSON. The serde_json::json!
+        // macro accepts `[]` directly as an empty array value, just as it
+        // accepts `{}` for an empty object.
+        let input = dummy_input();
+        let output = zyn::zyn!(@redact_arm(variant = single_secret_vec_variant()));
+        let raw = output.to_string();
+        assert!(
+            raw.contains("[ ]") || raw.contains("[]"),
+            "single-secret Vec redact arm should contain empty array `[]`, got: {raw}"
+        );
+        zyn::assert_tokens_contain!(output, "\"phone_numbers\"");
     }
 }

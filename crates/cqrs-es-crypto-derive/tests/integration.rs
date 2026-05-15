@@ -152,8 +152,31 @@ enum TestEvent {
         email: String,
     },
 
+    /// Single-secret variant whose secret field is a `Vec<_>` of a serde
+    /// struct. Exercises the `Vec<_>` redaction inference (defaults to the
+    /// empty-array sentinel `[]`) and round-trips a typed array through the
+    /// encryption / decryption / reconstruction paths.
+    #[pii(event_type = "VecSecret")]
+    VecSecret {
+        #[pii(plaintext)]
+        tag: String,
+        #[pii(subject)]
+        subject_id: Uuid,
+        #[pii(secret)]
+        phone_numbers: Vec<PhoneNumber>,
+    },
+
     /// Non-PII variant — must pass through the repository completely unchanged.
     Plain,
+}
+
+/// Test fixture for the `VecSecret` variant — a small serde-deserializable
+/// struct so that round-trip assertions can check typed values rather than
+/// raw JSON.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PhoneNumber {
+    label: String,
+    number: String,
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -301,6 +324,27 @@ fn custom_subject_event(
                 "customer_ref": customer_ref.to_string(),
                 "name":         "Bob Jones",
                 "email":        "bob@example.com",
+            }
+        }),
+        serde_json::json!({}),
+    )
+}
+
+fn vec_secret_event(aggregate_id: &str, sequence: usize, subject_id: Uuid) -> SerializedEvent {
+    SerializedEvent::new(
+        aggregate_id.to_string(),
+        sequence,
+        "Test".to_string(),
+        "VecSecret".to_string(),
+        "1.0".to_string(),
+        serde_json::json!({
+            "VecSecret": {
+                "tag":           "some-tag",
+                "subject_id":    subject_id.to_string(),
+                "phone_numbers": [
+                    { "label": "mobile", "number": "+447700900000" },
+                    { "label": "work",   "number": "+442079460000" },
+                ],
             }
         }),
         serde_json::json!({}),
@@ -932,5 +976,127 @@ async fn custom_subject_redacts_string_fields_when_key_deleted() {
     assert!(
         inner.get("subject_id").is_none(),
         "no hardcoded subject_id must appear in redacted payload"
+    );
+}
+
+// ── Vec secret field ─────────────────────────────────────────────────────────
+
+/// Persist an event whose secret field is `Vec<PhoneNumber>`. The stored
+/// payload must not contain the plaintext array — the encrypted sentinel
+/// takes its place.
+#[tokio::test]
+async fn vec_secret_pii_field_is_encrypted_on_persist() {
+    let repo = make_repo();
+    let aggregate_id = "vec-encrypt";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[vec_secret_event(aggregate_id, 1, subject_id)], None)
+        .await
+        .unwrap();
+
+    let raw = repo.inner().all_events();
+    assert_eq!(raw.len(), 1);
+    let inner = &raw[0].payload["VecSecret"];
+
+    assert!(
+        inner.get("phone_numbers").is_none(),
+        "phone_numbers must be encrypted away in the persisted payload"
+    );
+    assert!(
+        inner.get("encrypted_pii").is_some(),
+        "encrypted_pii sentinel must be present"
+    );
+    assert!(inner.get("nonce").is_some(), "nonce must be present");
+
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
+    );
+}
+
+/// Full round-trip: the reconstructed payload must contain the original
+/// typed array with both `PhoneNumber` entries intact.
+#[tokio::test]
+async fn vec_secret_round_trip_decrypts_typed_array() {
+    let repo = make_repo();
+    let aggregate_id = "vec-roundtrip";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[vec_secret_event(aggregate_id, 1, subject_id)], None)
+        .await
+        .unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["VecSecret"];
+
+    let numbers: Vec<PhoneNumber> = serde_json::from_value(inner["phone_numbers"].clone())
+        .expect("phone_numbers must deserialize back into Vec<PhoneNumber>");
+    assert_eq!(
+        numbers,
+        vec![
+            PhoneNumber {
+                label: "mobile".to_string(),
+                number: "+447700900000".to_string(),
+            },
+            PhoneNumber {
+                label: "work".to_string(),
+                number: "+442079460000".to_string(),
+            },
+        ],
+    );
+
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
+    );
+}
+
+/// After DEK deletion, a `Vec<_>` secret field must be replaced with an
+/// empty JSON array (`[]`), and that array must deserialize back into an
+/// empty `Vec<PhoneNumber>`.
+#[tokio::test]
+async fn vec_secret_redacts_to_empty_array_when_key_deleted() {
+    let (repo, key_store) = make_repo_with_key_store();
+    let aggregate_id = "vec-redact";
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[vec_secret_event(aggregate_id, 1, subject_id)], None)
+        .await
+        .unwrap();
+
+    key_store.delete_key(&subject_id).await.unwrap();
+
+    let events = repo
+        .get_events::<TestAggregate>(aggregate_id)
+        .await
+        .unwrap();
+
+    assert_eq!(events.len(), 1);
+    let inner = &events[0].payload["VecSecret"];
+
+    let numbers = inner["phone_numbers"]
+        .as_array()
+        .expect("phone_numbers must be a JSON array after redaction");
+    assert!(
+        numbers.is_empty(),
+        "phone_numbers must be an empty array `[]` after key deletion, got: {:?}",
+        inner["phone_numbers"]
+    );
+
+    let decoded: Vec<PhoneNumber> = serde_json::from_value(inner["phone_numbers"].clone())
+        .expect("empty array must deserialize as an empty Vec<PhoneNumber>");
+    assert!(decoded.is_empty());
+
+    assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
+    assert_eq!(
+        inner["subject_id"].as_str().unwrap(),
+        subject_id.to_string().as_str()
     );
 }

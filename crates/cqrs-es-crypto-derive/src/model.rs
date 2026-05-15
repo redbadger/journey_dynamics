@@ -47,6 +47,8 @@ pub enum RedactValue {
     Null,
     /// `Value` / `serde_json::Value` fields → emit `{}` in the JSON.
     EmptyObject,
+    /// `Vec<_>` fields → emit `[]` in the JSON.
+    EmptyArray,
 }
 
 // ── Field model ───────────────────────────────────────────────────────────────
