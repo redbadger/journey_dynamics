@@ -929,27 +929,55 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_list_stale_subjects() {
+        use sqlx::Row as _;
         let pool = setup_test_db().await;
-        // Write a DEK under v1.
-        let store_v1 = PostgresKeyStore::new_with_options(
+
+        let subject_id = Uuid::new_v4();
+        PostgresKeyStore::new_with_options(
             pool.clone(),
             make_v1_provider(),
             &PostgresKeyStoreOptions { lazy_rewrap: false },
-        );
-        let subject_id = Uuid::new_v4();
-        store_v1.get_or_create_key(&subject_id).await.unwrap();
+        )
+        .get_or_create_key(&subject_id)
+        .await
+        .unwrap();
 
-        // A store that knows v2 is primary should see the v1 row as stale.
+        // Direct SQL check: verify kek_id was persisted correctly.
+        // This is not affected by how many other rows exist.
+        let stored_kek_id: String =
+            sqlx::query("SELECT kek_id FROM subject_encryption_keys WHERE subject_id = $1")
+                .bind(subject_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+                .get("kek_id");
+        assert_eq!(stored_kek_id, "test:v1", "row must be stored under test:v1");
+
+        // list_stale_subjects must surface this subject when 'test:v2' is primary.
+        // Paginate through all pages — other concurrent tests may have created many
+        // rows that sort before ours, so a single small-batch check is not reliable.
         let store_v2 = PostgresKeyStore::new_with_options(
             pool.clone(),
             make_v1_v2_provider(),
             &PostgresKeyStoreOptions { lazy_rewrap: false },
         );
-        let stale = store_v2
-            .list_stale_subjects("test:v2", 10, None)
-            .await
-            .unwrap();
-        assert!(stale.contains(&subject_id), "v1 row must appear as stale");
+        let mut cursor = None;
+        let mut found = false;
+        loop {
+            let page = store_v2
+                .list_stale_subjects("test:v2", 50, cursor)
+                .await
+                .unwrap();
+            if page.is_empty() {
+                break;
+            }
+            if page.contains(&subject_id) {
+                found = true;
+                break;
+            }
+            cursor = page.last().copied();
+        }
+        assert!(found, "v1 row must appear in list_stale_subjects");
 
         cleanup_key(&pool, &subject_id).await;
     }
