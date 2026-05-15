@@ -72,12 +72,17 @@
 //! - `testing`: exposes [`InMemoryEventRepository`] for downstream tests.
 
 pub mod cipher;
+pub mod kek;
 pub mod key_store;
 pub mod repository;
 
-// ── Cipher ────────────────────────────────────────────────────────────────────
+// ── Cipher ──────────────────────────────────────────────────────────────────────────────
 
-pub use cipher::{CryptoError, EncryptedPayload, KeyMaterial, PiiCipher};
+pub use cipher::{CryptoError, EncryptedPayload, FieldCipher, KeyMaterial, PiiCipher};
+
+// ── KEK provider ───────────────────────────────────────────────────────────────────────────
+
+pub use kek::{KekError, KekHandle, KekProvider, StaticKekProvider, WrappedDek};
 
 // ── Key store ─────────────────────────────────────────────────────────────────
 
