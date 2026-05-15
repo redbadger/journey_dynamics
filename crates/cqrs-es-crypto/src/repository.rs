@@ -36,7 +36,7 @@ use cqrs_es::persist::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::cipher::{EncryptedPayload, PiiCipher};
+use crate::cipher::{EncryptedPayload, FieldCipher};
 use crate::key_store::KeyStore;
 
 // ── PiiEventCodec — types ─────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ pub trait PiiEventCodec: Send + Sync {
 pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     pub(crate) inner: R,
     key_store: Arc<dyn KeyStore>,
-    cipher: Arc<PiiCipher>,
+    cipher: Arc<FieldCipher>,
     codec: Arc<dyn PiiEventCodec>,
 }
 
@@ -169,7 +169,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     pub fn new(
         inner: R,
         key_store: Arc<dyn KeyStore>,
-        cipher: PiiCipher,
+        cipher: FieldCipher,
         codec: Arc<dyn PiiEventCodec>,
     ) -> Self {
         Self {
@@ -475,7 +475,7 @@ mod tests {
     use serde_json::Value;
     use uuid::Uuid;
 
-    use crate::cipher::PiiCipher;
+    use crate::cipher::FieldCipher;
     use crate::key_store::{InMemoryKeyStore, KeyStore};
 
     use super::{
@@ -639,12 +639,11 @@ mod tests {
 
     fn make_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
         let key_store: Arc<dyn KeyStore> = Arc::new(InMemoryKeyStore::new());
-        let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
         let codec = Arc::new(TestPiiCodec);
         CryptoShreddingEventRepository::new(
             InMemoryEventRepository::default(),
             key_store,
-            cipher,
+            FieldCipher::new(),
             codec,
         )
     }
@@ -654,12 +653,11 @@ mod tests {
         Arc<InMemoryKeyStore>,
     ) {
         let key_store = Arc::new(InMemoryKeyStore::new());
-        let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
         let codec = Arc::new(TestPiiCodec);
         let repo = CryptoShreddingEventRepository::new(
             InMemoryEventRepository::default(),
             Arc::clone(&key_store) as Arc<dyn KeyStore>,
-            cipher,
+            FieldCipher::new(),
             codec,
         );
         (repo, key_store)

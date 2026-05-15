@@ -55,8 +55,8 @@ mod tests {
 
     use cqrs_es::persist::{PersistedEventRepository, SerializedEvent};
     use cqrs_es_crypto::{
-        CryptoShreddingEventRepository, InMemoryEventRepository, InMemoryKeyStore, KeyStore,
-        PiiCipher,
+        CryptoShreddingEventRepository, FieldCipher, InMemoryEventRepository, InMemoryKeyStore,
+        KeyStore,
     };
     use uuid::Uuid;
 
@@ -68,12 +68,11 @@ mod tests {
 
     fn make_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
         let key_store: Arc<dyn KeyStore> = Arc::new(InMemoryKeyStore::new());
-        let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
         let codec = Arc::new(JourneyPiiCodec);
         CryptoShreddingEventRepository::new(
             InMemoryEventRepository::default(),
             key_store,
-            cipher,
+            FieldCipher::new(),
             codec,
         )
     }
@@ -83,12 +82,11 @@ mod tests {
         Arc<InMemoryKeyStore>,
     ) {
         let key_store = Arc::new(InMemoryKeyStore::new());
-        let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
         let codec = Arc::new(JourneyPiiCodec);
         let repo = CryptoShreddingEventRepository::new(
             InMemoryEventRepository::default(),
             Arc::clone(&key_store) as Arc<dyn KeyStore>,
-            cipher,
+            FieldCipher::new(),
             codec,
         );
         (repo, key_store)

@@ -9,7 +9,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError},
 };
 
 use async_trait::async_trait;
@@ -17,7 +17,8 @@ use thiserror::Error;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use crate::cipher::{CryptoError, KeyMaterial, PiiCipher};
+use crate::cipher::{FieldCipher, KeyMaterial};
+use crate::kek::{KekError, KekProvider, WrappedDek};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error
@@ -26,8 +27,9 @@ use crate::cipher::{CryptoError, KeyMaterial, PiiCipher};
 /// Errors returned by [`KeyStore`] operations.
 #[derive(Debug, Error)]
 pub enum KeyStoreError {
-    #[error("Crypto error: {0}")]
-    Crypto(#[from] CryptoError),
+    /// A KEK wrap or unwrap operation failed (wrong version, corrupt data, vault error).
+    #[error("KEK error: {0}")]
+    Kek(#[from] KekError),
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("Key store lock poisoned — another thread panicked while holding the lock")]
@@ -113,7 +115,7 @@ impl KeyStore for InMemoryKeyStore {
             }
 
             // Generate a fresh DEK, stash a copy, and return the original.
-            let dek = PiiCipher::generate_dek();
+            let dek = FieldCipher::generate_dek();
             store.insert(*subject_id, (dek.key_id, Zeroizing::new(dek.key.to_vec())));
             dek
         };
@@ -142,18 +144,19 @@ impl KeyStore for InMemoryKeyStore {
 
 /// [`KeyStore`] backed by the `subject_encryption_keys` Postgres table.
 ///
-/// DEKs are stored wrapped (AES-256-KWP) with the KEK held by `cipher`.  The raw key
-/// bytes never leave this struct in plaintext — they are only held in memory for the
-/// duration of a single request.
+/// DEKs are stored wrapped by the supplied [`KekProvider`].  The raw DEK bytes never
+/// leave this struct in plaintext — they are held in memory only for the duration of a
+/// single request.  The `kek_id` of the wrapping KEK version is persisted alongside the
+/// wrapped bytes so that multiple KEK versions can coexist during a rotation.
 pub struct PostgresKeyStore {
     pool: sqlx::Pool<sqlx::Postgres>,
-    cipher: PiiCipher,
+    provider: Arc<dyn KekProvider>,
 }
 
 impl PostgresKeyStore {
     #[must_use]
-    pub const fn new(pool: sqlx::Pool<sqlx::Postgres>, cipher: PiiCipher) -> Self {
-        Self { pool, cipher }
+    pub fn new(pool: sqlx::Pool<sqlx::Postgres>, provider: Arc<dyn KekProvider>) -> Self {
+        Self { pool, provider }
     }
 }
 
@@ -165,21 +168,23 @@ impl KeyStore for PostgresKeyStore {
             return Ok(material);
         }
 
-        // Generate a fresh DEK and wrap it with the KEK before storing.
-        let dek = PiiCipher::generate_dek();
-        let wrapped_key = self.cipher.wrap_dek(&dek);
+        // Generate a fresh DEK and wrap it under the current primary KEK version.
+        let dek = FieldCipher::generate_dek();
+        let kek = self.provider.current();
+        let wrapped = self.provider.wrap(&kek, &dek).await?;
         let key_id = dek.key_id;
 
         // INSERT … ON CONFLICT DO NOTHING handles the concurrent-creation race: if two
         // callers reach this point simultaneously, only one INSERT succeeds.
         let result = sqlx::query(
-            "INSERT INTO subject_encryption_keys (key_id, subject_id, wrapped_key) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO subject_encryption_keys (key_id, subject_id, wrapped_key, kek_id) \
+             VALUES ($1, $2, $3, $4) \
              ON CONFLICT (subject_id) DO NOTHING",
         )
         .bind(key_id)
         .bind(subject_id)
-        .bind(&wrapped_key)
+        .bind(&wrapped.wrapped_key)
+        .bind(&wrapped.kek_id)
         .execute(&self.pool)
         .await?;
 
@@ -197,7 +202,7 @@ impl KeyStore for PostgresKeyStore {
         use sqlx::Row;
 
         let row = sqlx::query(
-            "SELECT key_id, wrapped_key \
+            "SELECT key_id, wrapped_key, kek_id \
              FROM subject_encryption_keys \
              WHERE subject_id = $1",
         )
@@ -209,9 +214,15 @@ impl KeyStore for PostgresKeyStore {
             return Ok(None);
         };
 
-        let key_id: Uuid = row.get("key_id");
-        let wrapped_key: Vec<u8> = row.get("wrapped_key");
-        let material = self.cipher.unwrap_dek(key_id, &wrapped_key)?;
+        let material = self
+            .provider
+            .unwrap(&WrappedDek {
+                key_id: row.get("key_id"),
+                kek_id: row.get("kek_id"),
+                wrapped_key: row.get("wrapped_key"),
+            })
+            .await?;
+
         Ok(Some(material))
     }
 
@@ -230,6 +241,8 @@ impl KeyStore for PostgresKeyStore {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     // ── Helpers ───────────────────────────────────────────────────────────────
@@ -252,8 +265,12 @@ mod tests {
         pool
     }
 
-    fn test_cipher() -> PiiCipher {
-        PiiCipher::new(vec![0x42u8; 32]).expect("0x42-filled 32-byte KEK must be valid")
+    /// Build a [`StaticKekProvider`] suitable for use in Postgres integration tests.
+    fn make_provider() -> Arc<dyn crate::kek::KekProvider> {
+        Arc::new(
+            crate::kek::StaticKekProvider::single("test:v1", vec![0x42u8; 32])
+                .expect("0x42-filled 32-byte KEK must be valid"),
+        )
     }
 
     // ── Unit tests: InMemoryKeyStore ──────────────────────────────────────────
@@ -401,7 +418,7 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_get_or_create_creates_key() {
         let pool = setup_test_db().await;
-        let store = PostgresKeyStore::new(pool.clone(), test_cipher());
+        let store = PostgresKeyStore::new(pool.clone(), make_provider());
         let subject_id = Uuid::new_v4();
 
         let material = store.get_or_create_key(&subject_id).await.unwrap();
@@ -419,7 +436,7 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_get_or_create_is_idempotent() {
         let pool = setup_test_db().await;
-        let store = PostgresKeyStore::new(pool.clone(), test_cipher());
+        let store = PostgresKeyStore::new(pool.clone(), make_provider());
         let subject_id = Uuid::new_v4();
 
         let first = store.get_or_create_key(&subject_id).await.unwrap();
@@ -434,7 +451,7 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_get_key_returns_none_for_unknown_subject() {
         let pool = setup_test_db().await;
-        let store = PostgresKeyStore::new(pool, test_cipher());
+        let store = PostgresKeyStore::new(pool, make_provider());
         let subject_id = Uuid::new_v4();
 
         let result = store.get_key(&subject_id).await.unwrap();
@@ -444,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_delete_key_removes_it() {
         let pool = setup_test_db().await;
-        let store = PostgresKeyStore::new(pool.clone(), test_cipher());
+        let store = PostgresKeyStore::new(pool.clone(), make_provider());
         let subject_id = Uuid::new_v4();
 
         store.get_or_create_key(&subject_id).await.unwrap();
@@ -461,7 +478,7 @@ mod tests {
     #[tokio::test]
     async fn test_postgres_delete_key_is_idempotent() {
         let pool = setup_test_db().await;
-        let store = PostgresKeyStore::new(pool.clone(), test_cipher());
+        let store = PostgresKeyStore::new(pool.clone(), make_provider());
         let subject_id = Uuid::new_v4();
 
         // Deleting a never-created key must not error.
@@ -475,19 +492,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_postgres_wrap_unwrap_survives_db_roundtrip() {
-        // Verifies that the cipher's wrap/unwrap is consistent with what Postgres stores:
+        // Verifies that the provider's wrap/unwrap is consistent with what Postgres stores:
         // the bytes written are the same bytes read back, so DEK material is preserved.
         let pool = setup_test_db().await;
-        let cipher = test_cipher();
-        let store = PostgresKeyStore::new(pool.clone(), test_cipher());
+        let provider = make_provider();
+        let store = PostgresKeyStore::new(pool.clone(), Arc::clone(&provider));
         let subject_id = Uuid::new_v4();
 
         let original = store.get_or_create_key(&subject_id).await.unwrap();
         let original_key_bytes: Vec<u8> = original.key.to_vec();
         let original_key_id = original.key_id;
 
-        // Re-create a store with the same cipher and pool — simulates a server restart.
-        let store2 = PostgresKeyStore::new(pool.clone(), cipher);
+        // Re-create a store with the same provider and pool — simulates a server restart.
+        let store2 = PostgresKeyStore::new(pool.clone(), provider);
         let reloaded = store2.get_key(&subject_id).await.unwrap().unwrap();
 
         assert_eq!(reloaded.key_id, original_key_id);

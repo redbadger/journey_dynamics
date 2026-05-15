@@ -14,7 +14,8 @@ use cqrs_es::{
     persist::{PersistedEventRepository, SerializedEvent},
 };
 use cqrs_es_crypto::{
-    CryptoShreddingEventRepository, InMemoryEventRepository, InMemoryKeyStore, KeyStore, PiiCipher,
+    CryptoShreddingEventRepository, FieldCipher, InMemoryEventRepository, InMemoryKeyStore,
+    KeyStore,
 };
 use cqrs_es_crypto_derive::PiiCodec;
 use uuid::Uuid;
@@ -188,12 +189,11 @@ fn make_repo_with_key_store() -> (
     Arc<InMemoryKeyStore>,
 ) {
     let key_store = Arc::new(InMemoryKeyStore::new());
-    let cipher = PiiCipher::new(vec![0x42u8; 32]).unwrap();
     let codec = Arc::new(TestEventPiiCodec);
     let repo = CryptoShreddingEventRepository::new(
         InMemoryEventRepository::default(),
         Arc::clone(&key_store) as Arc<dyn KeyStore>,
-        cipher,
+        FieldCipher::new(),
         codec,
     );
     (repo, key_store)

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cqrs_es::{CqrsFramework, Query, persist::PersistedEventStore};
-use cqrs_es_crypto::{CryptoShreddingEventRepository, KeyStore, PiiCipher};
+use cqrs_es_crypto::{CryptoShreddingEventRepository, FieldCipher, KeyStore};
 use postgres_es::PostgresEventRepository;
 use sqlx::{Pool, Postgres};
 
@@ -24,7 +24,7 @@ pub type CryptoCqrs = CqrsFramework<
 
 /// Build the CQRS framework and the journey view repository.
 ///
-/// The caller is responsible for creating the [`PiiCipher`] and [`KeyStore`] so that
+/// The caller is responsible for creating the [`FieldCipher`] and [`KeyStore`] so that
 /// the same instances can also be held in
 /// [`ApplicationState`](crate::state::ApplicationState) for use by the shredding endpoint.
 ///
@@ -35,7 +35,7 @@ pub type CryptoCqrs = CqrsFramework<
 pub fn cqrs_framework(
     pool: Pool<Postgres>,
     key_store: Arc<dyn KeyStore>,
-    cipher: PiiCipher,
+    cipher: FieldCipher,
 ) -> (Arc<CryptoCqrs>, Arc<StructuredJourneyViewRepository>) {
     let simple_query = SimpleLoggingQuery {};
 
