@@ -75,6 +75,7 @@ pub mod cipher;
 pub mod kek;
 pub mod key_store;
 pub mod repository;
+pub mod rewrap;
 
 // ── Cipher ──────────────────────────────────────────────────────────────────────────────
 
@@ -86,7 +87,13 @@ pub use kek::{KekError, KekHandle, KekProvider, StaticKekProvider, WrappedDek};
 
 // ── Key store ─────────────────────────────────────────────────────────────────
 
-pub use key_store::{InMemoryKeyStore, KeyStore, KeyStoreError, PostgresKeyStore};
+pub use key_store::{
+    InMemoryKeyStore, KeyStore, KeyStoreError, PostgresKeyStore, PostgresKeyStoreOptions,
+};
+
+// ── Re-wrap worker ──────────────────────────────────────────────────────────────────────
+
+pub use rewrap::{RewrapStats, RewrapWorker, RewrapWorkerOptions};
 
 // ── Repository ────────────────────────────────────────────────────────────────
 

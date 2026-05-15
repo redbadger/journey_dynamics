@@ -67,30 +67,120 @@ pub trait KeyStore: Send + Sync {
     /// After this call all ciphertext encrypted with the deleted key is permanently
     /// unreadable.  Calling `delete_key` on a subject that has no key is a no-op (idempotent).
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError>;
+
+    /// Returns up to `batch_size` subject IDs whose DEK is not wrapped under
+    /// `current_kek_id`.
+    ///
+    /// Results are ordered by subject ID and start after `after` (exclusive cursor
+    /// for pagination). An empty result indicates the re-wrap sweep is complete.
+    ///
+    /// # Errors
+    ///
+    /// Propagates storage errors as [`KeyStoreError`].
+    async fn list_stale_subjects(
+        &self,
+        current_kek_id: &str,
+        batch_size: usize,
+        after: Option<Uuid>,
+    ) -> Result<Vec<Uuid>, KeyStoreError>;
+
+    /// Re-wraps the DEK for `subject_id` under the current primary KEK version.
+    ///
+    /// Returns `true` if the key was actually re-wrapped, `false` if the subject
+    /// was not found (already shredded) or the key was already current.
+    ///
+    /// # Errors
+    ///
+    /// Propagates KEK or storage errors as [`KeyStoreError`].
+    async fn rewrap_key(&self, subject_id: &Uuid) -> Result<bool, KeyStoreError>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // InMemoryKeyStore
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Map from `subject_id` to `(key_id, raw_key_bytes)`.
-type KeyMap = HashMap<Uuid, (Uuid, Zeroizing<Vec<u8>>)>;
+/// Internal per-subject record held by [`InMemoryKeyStore`].
+struct KeyEntry {
+    key_id: Uuid,
+    key: Zeroizing<Vec<u8>>,
+    /// The KEK version id that would have been used to wrap this key at rest.
+    /// For stores created with [`InMemoryKeyStore::new`] this is the sentinel
+    /// `"memory:v0"` since no real wrapping takes place.
+    kek_id: String,
+}
+
+/// Map from `subject_id` to [`KeyEntry`].
+type KeyMap = HashMap<Uuid, KeyEntry>;
 
 /// In-memory [`KeyStore`] backed by a `HashMap`.
 ///
 /// Intended for use in unit tests.  All operations are infallible; the `Result` wrapper
 /// exists solely to satisfy the trait contract.
+///
+/// Create with [`Self::new`] for basic usage, or [`Self::new_with_provider`] when
+/// KEK rotation operations ([`KeyStore::list_stale_subjects`] /
+/// [`KeyStore::rewrap_key`]) are required.
 pub struct InMemoryKeyStore {
-    /// `subject_id` → (`key_id`, `raw_key_bytes`)
+    /// `subject_id` → key entry.
     store: Mutex<KeyMap>,
+    /// KEK provider used to determine the current version for re-wrap support.
+    /// `None` when the store is created with [`Self::new`].
+    provider: Option<Arc<dyn KekProvider>>,
 }
 
 impl InMemoryKeyStore {
+    /// Creates a new, empty [`InMemoryKeyStore`] without a KEK provider.
+    ///
+    /// [`KeyStore::rewrap_key`] will always return `Ok(false)` on a store created
+    /// this way.  Use [`Self::new_with_provider`] when rotation support is needed.
     #[must_use]
     pub fn new() -> Self {
         Self {
             store: Mutex::new(HashMap::new()),
+            provider: None,
         }
+    }
+
+    /// Creates a new, empty [`InMemoryKeyStore`] with a [`KekProvider`].
+    ///
+    /// Keys vended by [`KeyStore::get_or_create_key`] are tagged with the
+    /// provider's current KEK id, enabling [`KeyStore::list_stale_subjects`] and
+    /// [`KeyStore::rewrap_key`] to work correctly.
+    #[must_use]
+    pub fn new_with_provider(provider: Arc<dyn KekProvider>) -> Self {
+        Self {
+            store: Mutex::new(HashMap::new()),
+            provider: Some(provider),
+        }
+    }
+
+    /// Inserts a subject entry directly with the specified `kek_id`, bypassing the
+    /// normal key-creation flow.
+    ///
+    /// This is intended for unit tests that need to pre-populate "stale" entries
+    /// (i.e. entries wrapped under an old KEK version) before exercising the
+    /// re-wrap worker.
+    ///
+    /// Only available in test builds and when the `testing` feature is enabled.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned, which can only happen if another
+    /// thread panicked while holding the lock — effectively impossible in test code.
+    #[cfg(any(test, feature = "testing"))]
+    pub fn insert_for_testing(&self, subject_id: Uuid, kek_id: &str) {
+        let dek = FieldCipher::generate_dek();
+        self.store
+            .lock()
+            .expect("lock is not poisoned in insert_for_testing")
+            .insert(
+                subject_id,
+                KeyEntry {
+                    key_id: dek.key_id,
+                    key: dek.key,
+                    kek_id: kek_id.to_string(),
+                },
+            );
     }
 }
 
@@ -106,17 +196,29 @@ impl KeyStore for InMemoryKeyStore {
         let dek = {
             let mut store = self.store.lock()?;
 
-            if let Some((key_id, key)) = store.get(subject_id) {
+            if let Some(entry) = store.get(subject_id) {
                 // Key already exists — return a copy.
                 return Ok(KeyMaterial {
-                    key_id: *key_id,
-                    key: Zeroizing::new(key.to_vec()),
+                    key_id: entry.key_id,
+                    key: Zeroizing::new(entry.key.to_vec()),
                 });
             }
 
-            // Generate a fresh DEK, stash a copy, and return the original.
+            // Generate a fresh DEK, stash a copy tagged with the current KEK id,
+            // and return the original.
             let dek = FieldCipher::generate_dek();
-            store.insert(*subject_id, (dek.key_id, Zeroizing::new(dek.key.to_vec())));
+            let kek_id = self
+                .provider
+                .as_ref()
+                .map_or_else(|| "memory:v0".to_string(), |p| p.current().id);
+            store.insert(
+                *subject_id,
+                KeyEntry {
+                    key_id: dek.key_id,
+                    key: Zeroizing::new(dek.key.to_vec()),
+                    kek_id,
+                },
+            );
             dek
         };
 
@@ -125,16 +227,55 @@ impl KeyStore for InMemoryKeyStore {
 
     async fn get_key(&self, subject_id: &Uuid) -> Result<Option<KeyMaterial>, KeyStoreError> {
         let store = self.store.lock()?;
-        Ok(store.get(subject_id).map(|(key_id, key)| KeyMaterial {
-            key_id: *key_id,
-            key: Zeroizing::new(key.to_vec()),
+        Ok(store.get(subject_id).map(|e| KeyMaterial {
+            key_id: e.key_id,
+            key: Zeroizing::new(e.key.to_vec()),
         }))
     }
 
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError> {
         self.store.lock()?.remove(subject_id);
-
         Ok(())
+    }
+
+    async fn list_stale_subjects(
+        &self,
+        current_kek_id: &str,
+        batch_size: usize,
+        after: Option<Uuid>,
+    ) -> Result<Vec<Uuid>, KeyStoreError> {
+        // Collect while the lock is held, then release before sorting/truncating.
+        let mut subjects: Vec<Uuid> = {
+            let store = self.store.lock()?;
+            store
+                .iter()
+                .filter(|(_, e)| e.kek_id != current_kek_id)
+                .map(|(id, _)| *id)
+                .filter(|id| after.is_none_or(|cursor| *id > cursor))
+                .collect()
+        };
+        subjects.sort_unstable();
+        subjects.truncate(batch_size);
+        Ok(subjects)
+    }
+
+    async fn rewrap_key(&self, subject_id: &Uuid) -> Result<bool, KeyStoreError> {
+        let Some(ref provider) = self.provider else {
+            return Ok(false);
+        };
+        let current_id = provider.current().id;
+        // Scope the lock to the mutation only; drop it before returning.
+        let result = {
+            let mut store = self.store.lock()?;
+            match store.get_mut(subject_id) {
+                None => false, // subject has been shredded
+                Some(entry) => {
+                    entry.kek_id = current_id; // no-op if already current
+                    true
+                }
+            }
+        };
+        Ok(result)
     }
 }
 
@@ -142,21 +283,54 @@ impl KeyStore for InMemoryKeyStore {
 // PostgresKeyStore
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Configuration for [`PostgresKeyStore`].
+#[derive(Debug, Clone, Copy)]
+pub struct PostgresKeyStoreOptions {
+    /// Spawn a background task to re-wrap stale DEKs on every read.
+    ///
+    /// Default: `true`.  Set to `false` in tests that need deterministic,
+    /// single-threaded key-store state.
+    pub lazy_rewrap: bool,
+}
+
+impl Default for PostgresKeyStoreOptions {
+    fn default() -> Self {
+        Self { lazy_rewrap: true }
+    }
+}
+
 /// [`KeyStore`] backed by the `subject_encryption_keys` Postgres table.
 ///
 /// DEKs are stored wrapped by the supplied [`KekProvider`].  The raw DEK bytes never
 /// leave this struct in plaintext — they are held in memory only for the duration of a
 /// single request.  The `kek_id` of the wrapping KEK version is persisted alongside the
 /// wrapped bytes so that multiple KEK versions can coexist during a rotation.
+#[derive(Clone)]
 pub struct PostgresKeyStore {
     pool: sqlx::Pool<sqlx::Postgres>,
     provider: Arc<dyn KekProvider>,
+    lazy_rewrap: bool,
 }
 
 impl PostgresKeyStore {
+    /// Create a new [`PostgresKeyStore`] with default options (lazy re-wrap enabled).
     #[must_use]
     pub fn new(pool: sqlx::Pool<sqlx::Postgres>, provider: Arc<dyn KekProvider>) -> Self {
-        Self { pool, provider }
+        Self::new_with_options(pool, provider, &PostgresKeyStoreOptions::default())
+    }
+
+    /// Create a new [`PostgresKeyStore`] with explicit options.
+    #[must_use]
+    pub fn new_with_options(
+        pool: sqlx::Pool<sqlx::Postgres>,
+        provider: Arc<dyn KekProvider>,
+        options: &PostgresKeyStoreOptions,
+    ) -> Self {
+        Self {
+            pool,
+            provider,
+            lazy_rewrap: options.lazy_rewrap,
+        }
     }
 }
 
@@ -214,6 +388,19 @@ impl KeyStore for PostgresKeyStore {
             return Ok(None);
         };
 
+        // Fire-and-forget lazy re-wrap when this row's KEK version is stale.
+        if self.lazy_rewrap && row.get::<String, _>("kek_id") != self.provider.current().id {
+            let me = self.clone();
+            let sid = *subject_id;
+            tokio::spawn(async move {
+                if let Err(e) = me.rewrap_key(&sid).await {
+                    tracing::warn!(?sid, error = ?e, "kek.rotation.lazy_rewrap failed");
+                } else {
+                    tracing::debug!(?sid, "kek.rotation.lazy_rewrap succeeded");
+                }
+            });
+        }
+
         let material = self
             .provider
             .unwrap(&WrappedDek {
@@ -233,6 +420,97 @@ impl KeyStore for PostgresKeyStore {
             .await?;
         Ok(())
     }
+
+    async fn list_stale_subjects(
+        &self,
+        current_kek_id: &str,
+        batch_size: usize,
+        after: Option<Uuid>,
+    ) -> Result<Vec<Uuid>, KeyStoreError> {
+        use sqlx::Row;
+
+        let limit = i64::try_from(batch_size).unwrap_or(i64::MAX);
+        let rows = sqlx::query(
+            "SELECT subject_id FROM subject_encryption_keys \
+             WHERE kek_id != $1 AND ($2::uuid IS NULL OR subject_id > $2) \
+             ORDER BY subject_id LIMIT $3",
+        )
+        .bind(current_kek_id)
+        .bind(after)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(rows.iter().map(|r| r.get("subject_id")).collect())
+    }
+
+    async fn rewrap_key(&self, subject_id: &Uuid) -> Result<bool, KeyStoreError> {
+        use sqlx::Row;
+
+        let Some(row) = sqlx::query(
+            "SELECT key_id, wrapped_key, kek_id \
+             FROM subject_encryption_keys WHERE subject_id = $1",
+        )
+        .bind(subject_id)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(false); // already shredded
+        };
+
+        let current_kek = self.provider.current();
+        let existing_kek_id: String = row.get("kek_id");
+
+        if existing_kek_id == current_kek.id {
+            // Already wrapped under the current KEK — touch rewrapped_at for observability.
+            sqlx::query(
+                "UPDATE subject_encryption_keys \
+                 SET rewrapped_at = NOW() WHERE subject_id = $1",
+            )
+            .bind(subject_id)
+            .execute(&self.pool)
+            .await?;
+            return Ok(true);
+        }
+
+        let material = self
+            .provider
+            .unwrap(&WrappedDek {
+                key_id: row.get("key_id"),
+                kek_id: existing_kek_id.clone(),
+                wrapped_key: row.get("wrapped_key"),
+            })
+            .await?;
+
+        let rewrapped = self.provider.wrap(&current_kek, &material).await?;
+
+        // CAS UPDATE: only applies if no concurrent re-wrap has already changed kek_id.
+        let result = sqlx::query(
+            "UPDATE subject_encryption_keys \
+             SET wrapped_key = $1, kek_id = $2, rewrapped_at = NOW() \
+             WHERE subject_id = $3 AND kek_id = $4",
+        )
+        .bind(&rewrapped.wrapped_key)
+        .bind(&rewrapped.kek_id)
+        .bind(subject_id)
+        .bind(&existing_kek_id)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            // A concurrent re-wrap beat us, or the row was shredded mid-flight.
+            // Check whether the row still exists to return the correct value.
+            let exists = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM subject_encryption_keys WHERE subject_id = $1)",
+            )
+            .bind(subject_id)
+            .fetch_one(&self.pool)
+            .await?;
+            return Ok(exists);
+        }
+
+        Ok(true)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +520,8 @@ impl KeyStore for PostgresKeyStore {
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+
+    use crate::kek::StaticKekProvider;
 
     use super::*;
 
@@ -405,6 +685,121 @@ mod tests {
         );
     }
 
+    // ── Rotation unit tests: InMemoryKeyStore ────────────────────────────────
+
+    fn v1_provider() -> Arc<dyn KekProvider> {
+        Arc::new(StaticKekProvider::single("v1", vec![0x42u8; 32]).unwrap())
+    }
+
+    fn v1_v2_provider() -> Arc<dyn KekProvider> {
+        let mut keks = std::collections::HashMap::new();
+        keks.insert("v1".to_string(), Zeroizing::new(vec![0x42u8; 32]));
+        keks.insert("v2".to_string(), Zeroizing::new(vec![0xDEu8; 32]));
+        Arc::new(StaticKekProvider::new("v2", keks).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_list_stale_subjects_empty_when_all_current() {
+        let provider = v1_provider();
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        let subject_id = Uuid::new_v4();
+        store.get_or_create_key(&subject_id).await.unwrap();
+
+        let stale = store.list_stale_subjects("v1", 10, None).await.unwrap();
+        assert!(
+            stale.is_empty(),
+            "no stale entries when all use the current KEK"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_list_stale_subjects_finds_old_kek_entries() {
+        let provider = v1_v2_provider(); // primary = v2
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        let subject_id = Uuid::new_v4();
+        store.insert_for_testing(subject_id, "v1"); // stale entry
+
+        let stale = store.list_stale_subjects("v2", 10, None).await.unwrap();
+        assert!(stale.contains(&subject_id), "v1 entry must appear as stale");
+    }
+
+    #[tokio::test]
+    async fn test_list_stale_subjects_respects_after_cursor() {
+        let provider = v1_v2_provider();
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        // Insert several stale entries.
+        let ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+        for &id in &ids {
+            store.insert_for_testing(id, "v1");
+        }
+        // Sort to mimic what list_stale_subjects returns.
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+
+        // First page.
+        let page1 = store.list_stale_subjects("v2", 3, None).await.unwrap();
+        assert_eq!(page1.len(), 3);
+        assert_eq!(page1, sorted[..3]);
+
+        // Second page — cursor is the last UUID from page1.
+        let cursor = *page1.last().unwrap();
+        let page2 = store
+            .list_stale_subjects("v2", 3, Some(cursor))
+            .await
+            .unwrap();
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2, sorted[3..]);
+    }
+
+    #[tokio::test]
+    async fn test_list_stale_subjects_respects_batch_size() {
+        let provider = v1_v2_provider();
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        for _ in 0..10 {
+            store.insert_for_testing(Uuid::new_v4(), "v1");
+        }
+        let page = store.list_stale_subjects("v2", 4, None).await.unwrap();
+        assert_eq!(page.len(), 4, "batch_size must limit results");
+    }
+
+    #[tokio::test]
+    async fn test_rewrap_key_updates_kek_id() {
+        let provider = v1_v2_provider(); // primary = v2
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        let subject_id = Uuid::new_v4();
+        store.insert_for_testing(subject_id, "v1");
+
+        let result = store.rewrap_key(&subject_id).await.unwrap();
+        assert!(result, "rewrap_key must return true");
+
+        // No longer stale.
+        let stale = store.list_stale_subjects("v2", 10, None).await.unwrap();
+        assert!(
+            !stale.contains(&subject_id),
+            "entry must be current after rewrap"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rewrap_key_is_idempotent() {
+        let provider = v1_v2_provider(); // primary = v2
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        let subject_id = Uuid::new_v4();
+        store.get_or_create_key(&subject_id).await.unwrap(); // already under v2
+
+        // Both calls must succeed even though the first is already current.
+        assert!(store.rewrap_key(&subject_id).await.unwrap());
+        assert!(store.rewrap_key(&subject_id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_rewrap_key_returns_false_for_missing_subject() {
+        let provider = v1_v2_provider();
+        let store = InMemoryKeyStore::new_with_provider(Arc::clone(&provider));
+        let result = store.rewrap_key(&Uuid::new_v4()).await.unwrap();
+        assert!(!result, "rewrap_key on a missing subject must return false");
+    }
+
     // ── Integration tests: PostgresKeyStore ───────────────────────────────────
 
     async fn cleanup_key(pool: &sqlx::Pool<sqlx::Postgres>, subject_id: &Uuid) {
@@ -509,6 +904,153 @@ mod tests {
 
         assert_eq!(reloaded.key_id, original_key_id);
         assert_eq!(*reloaded.key, original_key_bytes);
+
+        cleanup_key(&pool, &subject_id).await;
+    }
+
+    // ── Rotation (PostgresKeyStore) ───────────────────────────────────────────
+
+    fn make_v1_provider() -> Arc<dyn KekProvider> {
+        Arc::new(StaticKekProvider::single("test:v1", vec![0x42u8; 32]).unwrap())
+    }
+
+    fn make_v1_v2_provider() -> Arc<dyn KekProvider> {
+        let mut keks = std::collections::HashMap::new();
+        keks.insert(
+            "test:v1".to_string(),
+            zeroize::Zeroizing::new(vec![0x42u8; 32]),
+        );
+        keks.insert(
+            "test:v2".to_string(),
+            zeroize::Zeroizing::new(vec![0xDEu8; 32]),
+        );
+        Arc::new(StaticKekProvider::new("test:v2", keks).unwrap())
+    }
+
+    #[tokio::test]
+    async fn test_postgres_list_stale_subjects() {
+        let pool = setup_test_db().await;
+        // Write a DEK under v1.
+        let store_v1 = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        let subject_id = Uuid::new_v4();
+        store_v1.get_or_create_key(&subject_id).await.unwrap();
+
+        // A store that knows v2 is primary should see the v1 row as stale.
+        let store_v2 = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_v2_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        let stale = store_v2
+            .list_stale_subjects("test:v2", 10, None)
+            .await
+            .unwrap();
+        assert!(stale.contains(&subject_id), "v1 row must appear as stale");
+
+        cleanup_key(&pool, &subject_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_rewrap_key_updates_kek_id() {
+        let pool = setup_test_db().await;
+        let subject_id = Uuid::new_v4();
+
+        // Create under v1.
+        PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        )
+        .get_or_create_key(&subject_id)
+        .await
+        .unwrap();
+
+        // Re-wrap to v2.
+        let store_v2 = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_v2_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        let rewrapped = store_v2.rewrap_key(&subject_id).await.unwrap();
+        assert!(rewrapped, "rewrap_key must return true");
+
+        // Row must no longer appear as stale.
+        let stale = store_v2
+            .list_stale_subjects("test:v2", 10, None)
+            .await
+            .unwrap();
+        assert!(
+            !stale.contains(&subject_id),
+            "row must be current after rewrap"
+        );
+
+        cleanup_key(&pool, &subject_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_rewrap_key_is_idempotent() {
+        let pool = setup_test_db().await;
+        let subject_id = Uuid::new_v4();
+
+        let store = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_v2_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        store.get_or_create_key(&subject_id).await.unwrap();
+
+        // Already under v2 — second call must still succeed.
+        assert!(store.rewrap_key(&subject_id).await.unwrap());
+        assert!(store.rewrap_key(&subject_id).await.unwrap());
+
+        cleanup_key(&pool, &subject_id).await;
+    }
+
+    #[tokio::test]
+    async fn test_postgres_rewrap_key_missing_subject_returns_false() {
+        let pool = setup_test_db().await;
+        let store = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_v2_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        let result = store.rewrap_key(&Uuid::new_v4()).await.unwrap();
+        assert!(!result, "rewrap_key on a missing subject must return false");
+    }
+
+    #[tokio::test]
+    async fn test_postgres_rewrap_preserves_dek_material() {
+        // End-to-end: DEK material must be identical before and after a rewrap.
+        let pool = setup_test_db().await;
+        let subject_id = Uuid::new_v4();
+
+        // Create under v1, capture the raw key bytes.
+        let store_v1 = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        let original = store_v1.get_or_create_key(&subject_id).await.unwrap();
+        let original_bytes = original.key.to_vec();
+
+        // Rewrap to v2.
+        let store_v2 = PostgresKeyStore::new_with_options(
+            pool.clone(),
+            make_v1_v2_provider(),
+            &PostgresKeyStoreOptions { lazy_rewrap: false },
+        );
+        store_v2.rewrap_key(&subject_id).await.unwrap();
+
+        // Reading back via the v2 store must return the same key bytes.
+        let reloaded = store_v2.get_key(&subject_id).await.unwrap().unwrap();
+        assert_eq!(
+            *reloaded.key, original_bytes,
+            "DEK bytes must survive a KEK re-wrap"
+        );
 
         cleanup_key(&pool, &subject_id).await;
     }

@@ -3,7 +3,9 @@ use std::sync::Arc;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use postgres_es::default_postgress_pool;
 
-use cqrs_es_crypto::{FieldCipher, KeyStore, PostgresKeyStore, StaticKekProvider};
+use cqrs_es_crypto::{
+    FieldCipher, KeyStore, PostgresKeyStore, RewrapWorker, RewrapWorkerOptions, StaticKekProvider,
+};
 
 use crate::{
     config::{CryptoCqrs, cqrs_framework},
@@ -77,6 +79,18 @@ pub async fn new_application_state() -> ApplicationState {
     let cipher = FieldCipher::new();
 
     let (cqrs, journey_query) = cqrs_framework(pool, Arc::clone(&key_store), cipher);
+
+    // Spawn the background re-wrap sweeper.  It polls every 5 minutes and re-wraps
+    // any DEKs still encrypted under a retired KEK version.  Safe to run alongside
+    // live traffic — the CAS UPDATE in rewrap_key makes concurrent re-wraps idempotent.
+    let worker = RewrapWorker::new(
+        Arc::clone(&key_store),
+        Arc::clone(&provider),
+        RewrapWorkerOptions::default(),
+    );
+    tokio::spawn(async move {
+        worker.run_forever(std::time::Duration::from_mins(5)).await;
+    });
 
     ApplicationState {
         cqrs,
