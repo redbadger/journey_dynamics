@@ -70,6 +70,31 @@ pub async fn new_application_state() -> ApplicationState {
             )
         };
 
+    // Boot-time fail-fast: verify every kek_id in the database is resolvable
+    // by the current provider.  If not, a KEK version was retired before all DEKs
+    // were re-wrapped — serving traffic would cause decryption failures at request
+    // time, which is far harder to diagnose than a clean startup panic.
+    {
+        let unknown: Vec<String> =
+            sqlx::query_scalar::<_, String>("SELECT DISTINCT kek_id FROM subject_encryption_keys")
+                .fetch_all(&pool)
+                .await
+                .expect("Failed to query kek_ids from subject_encryption_keys")
+                .into_iter()
+                .filter(|id| provider.by_id(id).is_none())
+                .collect();
+
+        assert!(
+            unknown.is_empty(),
+            "FATAL: {} kek_id value(s) in subject_encryption_keys are not known to \
+             the configured KekProvider: {unknown:?}. A KEK version was likely retired \
+             before all DEKs were re-wrapped under the new version. Restore the \
+             missing KEK variable(s) or run `cargo run --bin rewrap` to diagnose. \
+             See docs/KEK_ROTATION_RUNBOOK.md.",
+            unknown.len(),
+        );
+    }
+
     // The KeyStore owns the provider and uses it to wrap/unwrap DEKs.
     let key_store: Arc<dyn KeyStore> =
         Arc::new(PostgresKeyStore::new(pool.clone(), Arc::clone(&provider)));

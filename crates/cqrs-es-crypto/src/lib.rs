@@ -27,19 +27,24 @@
 //!
 //! # Key management
 //!
-//! DEKs are wrapped (encrypted) with a Key Encryption Key (KEK) using AES-256-KWP
-//! (RFC 5649) before storage. The [`PostgresKeyStore`] persists wrapped DEKs in a
-//! `subject_encryption_keys` table. Deleting a row is the shredding operation.
+//! Each subject gets a unique DEK wrapped by a Key Encryption Key (KEK) via
+//! [`StaticKekProvider`] (env-var backed) or any [`KekProvider`] implementation.
+//! [`PostgresKeyStore`] persists wrapped DEKs in `subject_encryption_keys`.
+//! Deleting a row is the shredding operation.  The `kek_id` column records which
+//! KEK version wrapped each DEK, enabling zero-downtime KEK rotation.
 //!
 //! The required DDL is:
 //!
 //! ```sql
 //! CREATE TABLE subject_encryption_keys (
-//!     key_id      UUID      NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
-//!     subject_id  UUID      NOT NULL UNIQUE,
-//!     wrapped_key BYTEA     NOT NULL,
-//!     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+//!     key_id       UUID      NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
+//!     subject_id   UUID      NOT NULL UNIQUE,
+//!     wrapped_key  BYTEA     NOT NULL,
+//!     kek_id       TEXT      NOT NULL,
+//!     rewrapped_at TIMESTAMP,
+//!     created_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 //! );
+//! CREATE INDEX ON subject_encryption_keys (kek_id);
 //! ```
 //!
 //! # Usage
@@ -47,8 +52,8 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use cqrs_es_crypto::{
-//!     CryptoShreddingEventRepository, PiiCipher, PiiEventCodec, PiiFields,
-//!     EncryptedPiiSentinel, PostgresKeyStore,
+//!     CryptoShreddingEventRepository, EncryptedPiiSentinel, FieldCipher,
+//!     PiiEventCodec, PiiFields, PostgresKeyStore, StaticKekProvider,
 //! };
 //!
 //! // 1. Implement PiiEventCodec for your domain.
@@ -56,10 +61,12 @@
 //! impl PiiEventCodec for MyCodec { /* ... */ }
 //!
 //! // 2. Build the crypto repository around your inner repository.
-//! let cipher = PiiCipher::new(kek_bytes)?;
-//! let key_store = Arc::new(PostgresKeyStore::new(pool.clone(), PiiCipher::new(kek_bytes)?));
+//! let provider = Arc::new(StaticKekProvider::single("v1", kek_bytes)?);
+//! let key_store = Arc::new(PostgresKeyStore::new(pool.clone(), Arc::clone(&provider)));
 //! let codec = Arc::new(MyCodec);
-//! let repo = CryptoShreddingEventRepository::new(inner_repo, key_store, cipher, codec);
+//! let repo = CryptoShreddingEventRepository::new(
+//!     inner_repo, key_store, FieldCipher::new(), codec,
+//! );
 //! ```
 //!
 //! # Cargo features
@@ -79,6 +86,7 @@ pub mod rewrap;
 
 // ── Cipher ──────────────────────────────────────────────────────────────────────────────
 
+#[allow(deprecated)] // PiiCipher is re-exported for backwards compatibility.
 pub use cipher::{CryptoError, EncryptedPayload, FieldCipher, KeyMaterial, PiiCipher};
 
 // ── KEK provider ───────────────────────────────────────────────────────────────────────────

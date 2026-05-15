@@ -37,7 +37,7 @@ pub struct EncryptedPayload {
     /// 96-bit (12-byte) nonce used during encryption.
     ///
     /// Must be stored alongside the ciphertext and supplied verbatim to
-    /// [`PiiCipher::decrypt`].
+    /// [`FieldCipher::decrypt`].
     pub nonce: Vec<u8>,
 }
 
@@ -57,10 +57,28 @@ pub enum CryptoError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Handles AES-256-GCM field encryption/decryption and AES-256-KWP key wrapping.
+///
+/// # Deprecation
+///
+/// `PiiCipher` mixed two unrelated concerns: AES-GCM field encryption (which only
+/// needs a DEK) and AES-KWP DEK wrapping (which needs a KEK).  These are now split:
+///
+/// - Use [`FieldCipher`] for field encryption and decryption.
+/// - Use [`StaticKekProvider`](crate::kek::StaticKekProvider) (or any
+///   [`KekProvider`](crate::kek::KekProvider) implementation) for DEK wrapping.
+///
+/// `PiiCipher` is retained only for backwards compatibility with existing
+/// event stores and will be removed in a future release.
+#[deprecated(
+    since = "0.1.5",
+    note = "Use `FieldCipher` for field encryption and `StaticKekProvider` \
+            (or another `KekProvider`) for DEK wrapping."
+)]
 pub struct PiiCipher {
     kek: Zeroizing<Vec<u8>>, // 32-byte Key Encryption Key
 }
 
+#[allow(deprecated)] // impl block for the deprecated PiiCipher itself
 impl PiiCipher {
     /// Construct from raw KEK bytes.
     ///
@@ -222,12 +240,13 @@ impl FieldCipher {
     }
 
     /// Generate a fresh random 256-bit DEK using the OS CSPRNG.
-    ///
-    /// Identical to [`PiiCipher::generate_dek`] — provided here so callers that have
-    /// migrated to `FieldCipher` do not need to keep `PiiCipher` in scope.
     #[must_use]
     pub fn generate_dek() -> KeyMaterial {
-        PiiCipher::generate_dek()
+        let key = Aes256Gcm::generate_key(OsRng);
+        KeyMaterial {
+            key_id: Uuid::new_v4(),
+            key: Zeroizing::new(key.to_vec()),
+        }
     }
 
     /// Encrypt `plaintext` with `dek` using AES-256-GCM.
@@ -294,6 +313,7 @@ impl FieldCipher {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(deprecated)] // PiiCipher tests are retained to verify backwards-compatible behaviour.
 mod tests {
     use super::*;
 
