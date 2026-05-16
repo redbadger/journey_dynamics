@@ -1,6 +1,6 @@
 # Split `journey_person`: Core Lookup vs Read-Model Projection
 
-**Status:** Plan — ready for implementation  
+**Status:** Plan — ready for implementation
 **Audience:** Implementing agent
 
 ---
@@ -25,18 +25,24 @@ between event-persist and projection-update silently loses the
 `email → subject_id` mapping — making future GDPR erasure by email
 impossible for that subject.
 
+Additionally, DEK creation in `subject_encryption_keys` also happens
+outside the event-persist transaction (inside `encrypt_events` via
+`KeyStore::get_or_create_key`). A crash between DEK creation and event
+persist leaves an orphan DEK row — harmless but wasteful.
+
 ## 2. Goal
 
 Split the table so that:
 
 | Concern | Table | Written | Consistency |
 |---------|-------|---------|-------------|
-| `email → subject_id` lookup | **`subject_lookup`** (new) | Inside the same DB transaction as event INSERT | **Atomic with event persist** |
+| `email → subject_id` lookup | **`subject_lookup`** (new) | Inside the same DB transaction as event INSERT and DEK creation | **Atomic with event persist** |
+| DEK (subject encryption key) | **`subject_encryption_keys`** (existing) | Same transaction | **Atomic with event persist** |
 | Person read-model (name, email, phone, details, forgotten) | **`journey_person`** (existing, unchanged) | Via `Query::dispatch` after commit | Eventual (acceptable) |
 
 ## 3. Architectural approach
 
-### Why we can't just "put it in the same transaction"
+### Why we can't just "put it in the same transaction" using upstream crates
 
 The transaction that persists events is managed inside
 `PostgresEventRepository::insert_events` (`postgres-es` crate, upstream).
@@ -46,34 +52,64 @@ additional writes into that transaction from outside the crate.
 
 ### What we do instead
 
-Create a **`TransactionalEventRepository`** in the `journey_dynamics`
-application crate that:
-
-- **Wraps** `CryptoShreddingEventRepository<PostgresEventRepository>` (used
-  for reads and for its `encrypt_events` method).
-- **Holds its own `Pool<Postgres>`** and manages its own write-path
-  transaction.
-- **On `persist`**: encrypts events (via the wrapped crypto repo), opens a
-  transaction, INSERTs encrypted events _and_ subject-lookup rows, commits.
-- **On reads**: delegates entirely to the wrapped crypto repo (which
-  delegates to `PostgresEventRepository` for raw reads, then decrypts).
-
-The result is a single Postgres transaction containing both event inserts
-and lookup inserts — full atomicity without forking either upstream crate.
+Add a **transactional write path** directly to
+`CryptoShreddingEventRepository` (our crate, `cqrs-es-crypto`). When
+configured with a `Pool<Postgres>` and optional persist hooks, it manages
+the entire write — DEK creation, event encryption, event insertion, and
+hook writes — in a single Postgres transaction. Reads continue to
+delegate to the inner `PostgresEventRepository` as before.
 
 ```
-BEFORE                                 AFTER
+BEFORE (current)                          AFTER
 
-PersistedEventStore                    PersistedEventStore
-  └─ CryptoShreddingEventRepository     └─ TransactionalEventRepository (NEW)
-       └─ PostgresEventRepository              ├─ Pool<Postgres>       ← owns the write tx
-                                               └─ CryptoShreddingEventRepository
-                                                    └─ PostgresEventRepository ← reads only
+CryptoShreddingEventRepository            CryptoShreddingEventRepository
+  │                                         │
+  ├─ encrypt_events():                      ├─ persist() [transactional path]:
+  │    key_store.get_or_create_key()        │    BEGIN
+  │      → auto-commit to                   │    SELECT/INSERT subject_encryption_keys
+  │        subject_encryption_keys          │    encrypt events (in-memory AES-GCM)
+  │    cipher.encrypt()                     │    INSERT INTO events
+  │                                         │    hooks.on_persist() → e.g. INSERT subject_lookup
+  ├─ persist():                             │    COMMIT
+  │    inner.persist()                      │
+  │      → PostgresEventRepository          ├─ get_events() / stream_events() / etc.:
+  │        → BEGIN                          │    inner.get_events() [unchanged — still
+  │          INSERT INTO events             │    delegates to PostgresEventRepository]
+  │          COMMIT                         │
+  │                                         └─ persist() [legacy path, pool = None]:
+  └─ (then CqrsFramework dispatches            encrypt_events() + inner.persist()
+      to Query::dispatch, which writes          [unchanged — for InMemoryEventRepository]
+      journey_person outside any tx)
 ```
 
 `PostgresEventRepository` remains in the dependency tree (reads still flow
-through it), but its `persist` method is **never called** — the write path
-is entirely owned by `TransactionalEventRepository`.
+through it), but its `persist` method is **never called** when the
+transactional path is active — the write path is entirely owned by
+`CryptoShreddingEventRepository`.
+
+### Why this is the right place
+
+`CryptoShreddingEventRepository` already holds everything needed:
+
+- `cipher: Arc<PiiCipher>` — `generate_dek()` and `wrap_dek()` are
+  in-memory operations; `unwrap_dek()` for the fast-path read is also
+  available. No need to go through the `KeyStore` trait for the
+  transactional path.
+- `codec: Arc<dyn PiiEventCodec>` — `classify()` identifies which events
+  carry PII and returns the
+ `subject_id` + plaintext fields.
+- It lives in `cqrs-es-crypto`, the same crate as `PostgresKeyStore`, so it
+  already knows the `subject_encryption_keys` table schema.
+- The `key_store` field is still used on the **read** path (`get_key` for
+  decryption) and for the legacy non-transactional write path.
+
+### What stays domain-agnostic
+
+The `PersistHook` trait receives `&[SerializedEvent]` (the unencrypted
+events) and a `&mut Transaction<Postgres>`. The hook is implemented in
+the application crate (`journey_dynamics`) and carries the domain knowledge
+of which event types map to which lookup rows. The `cqrs-es-crypto` crate
+knows nothing about `PersonCaptured` or `subject_lookup`.
 
 ---
 
@@ -120,275 +156,330 @@ DROP TABLE IF EXISTS subject_lookup CASCADE;
   columns, or the table can be generalised to
   `(subject_id, lookup_type, lookup_value)` later. Keep it simple for now.
 
-### 4.2 `cqrs-es-crypto` crate: expose `encrypt_events`
+### 4.2 `cqrs-es-crypto`: new `PersistHook` trait
 
-In `crates/cqrs-es-crypto/src/repository.rs`, change the visibility of
-`encrypt_events` from private to public:
+Add to `crates/cqrs-es-crypto/src/repository.rs` (and re-export from
+`lib.rs`):
 
 ```rust
-// BEFORE
-async fn encrypt_events(
-    &self,
-    events: &[SerializedEvent],
-) -> Result<Vec<SerializedEvent>, PersistenceError> { ... }
-
-// AFTER
-/// Encrypt PII fields in the given events according to the configured codec.
+/// Hook called within the transactional persist path.
 ///
-/// This is used by [`TransactionalEventRepository`] (or similar wrappers)
-/// that manage their own persist transaction and need access to the
-/// encrypted payloads without calling `persist`.
-pub async fn encrypt_events(
-    &self,
-    events: &[SerializedEvent],
-) -> Result<Vec<SerializedEvent>, PersistenceError> { ... }
-```
-
-No logic changes — just visibility.
-
-### 4.3 New `LookupExtractor` trait
-
-Define this in the `journey_dynamics` application crate (not in
-`cqrs-es-crypto` — it carries domain knowledge about `PersonCaptured`
-events):
-
-```rust
-// crates/journey_dynamics/src/lookup_extractor.rs
-
-use cqrs_es::persist::SerializedEvent;
-
-/// A subject-lookup row to be written transactionally with event persist.
-pub struct SubjectLookup {
-    pub subject_id: Uuid,
-    pub email_lower: String,
-}
-
-/// Extracts subject-lookup entries from unencrypted serialised events.
-pub trait LookupExtractor: Send + Sync {
-    fn extract(&self, events: &[SerializedEvent]) -> Vec<SubjectLookup>;
-}
-```
-
-And the concrete implementation:
-
-```rust
-/// Extracts (subject_id, email) from PersonCaptured events.
-pub struct PersonCapturedLookupExtractor;
-
-impl LookupExtractor for PersonCapturedLookupExtractor {
-    fn extract(&self, events: &[SerializedEvent]) -> Vec<SubjectLookup> {
-        events
-            .iter()
-            .filter(|e| e.event_type == "PersonCaptured")
-            .filter_map(|e| {
-                let inner = e.payload.get("PersonCaptured")?;
-                let subject_id = inner.get("subject_id")?.as_str()?.parse::<Uuid>().ok()?;
-                let email = inner.get("email")?.as_str()?;
-                Some(SubjectLookup {
-                    subject_id,
-                    email_lower: email.to_lowercase(),
-                })
-            })
-            .collect()
-    }
-}
-```
-
-### 4.4 New `TransactionalEventRepository`
-
-Create `crates/journey_dynamics/src/transactional_event_repository.rs`:
-
-```rust
-use std::sync::Arc;
-
-use cqrs_es::Aggregate;
-use cqrs_es::persist::{
-    PersistedEventRepository, PersistenceError, ReplayStream,
-    SerializedEvent, SerializedSnapshot,
-};
-use cqrs_es_crypto::CryptoShreddingEventRepository;
-use postgres_es::PostgresEventRepository;
-use serde_json::Value;
-use sqlx::{Pool, Postgres, Row};
-
-use crate::lookup_extractor::LookupExtractor;
-
-/// A [`PersistedEventRepository`] that writes events AND subject-lookup rows
-/// in a single Postgres transaction, then delegates reads to the wrapped
-/// [`CryptoShreddingEventRepository`].
-pub struct TransactionalEventRepository {
-    /// Shared Postgres connection pool — used for the write-path transaction.
-    pool: Pool<Postgres>,
-    /// Wrapped crypto repo — used for reads (decrypt) and `encrypt_events`.
-    crypto: CryptoShreddingEventRepository<PostgresEventRepository>,
-    /// Extracts lookup rows from unencrypted events.
-    extractor: Arc<dyn LookupExtractor>,
-}
-
-impl TransactionalEventRepository {
-    pub fn new(
-        pool: Pool<Postgres>,
-        crypto: CryptoShreddingEventRepository<PostgresEventRepository>,
-        extractor: Arc<dyn LookupExtractor>,
-    ) -> Self {
-        Self { pool, crypto, extractor }
-    }
-}
-
-impl PersistedEventRepository for TransactionalEventRepository {
-    // ── Reads: delegate to the crypto repo (decrypt → inner → postgres) ──
-
-    async fn get_events<A: Aggregate>(
-        &self,
-        aggregate_id: &str,
-    ) -> Result<Vec<SerializedEvent>, PersistenceError> {
-        self.crypto.get_events::<A>(aggregate_id).await
-    }
-
-    async fn get_last_events<A: Aggregate>(
-        &self,
-        aggregate_id: &str,
-        last_sequence: usize,
-    ) -> Result<Vec<SerializedEvent>, PersistenceError> {
-        self.crypto.get_last_events::<A>(aggregate_id, last_sequence).await
-    }
-
-    async fn get_snapshot<A: Aggregate>(
-        &self,
-        aggregate_id: &str,
-    ) -> Result<Option<SerializedSnapshot>, PersistenceError> {
-        self.crypto.get_snapshot::<A>(aggregate_id).await
-    }
-
-    async fn stream_events<A: Aggregate>(
-        &self,
-        aggregate_id: &str,
-    ) -> Result<ReplayStream, PersistenceError> {
-        self.crypto.stream_events::<A>(aggregate_id).await
-    }
-
-    async fn stream_all_events<A: Aggregate>(
-        &self,
-    ) -> Result<ReplayStream, PersistenceError> {
-        self.crypto.stream_all_events::<A>().await
-    }
-
-    // ── Write: encrypt, then single transaction for events + lookups ─────
-
-    async fn persist<A: Aggregate>(
+/// Receives the **unencrypted** serialised events and a live Postgres
+/// transaction. Implementations can inspect event payloads and perform
+/// domain-specific writes (e.g. subject-lookup inserts) that will be
+/// committed atomically with the event and DEK inserts.
+///
+/// If the hook returns an error, the entire transaction is rolled back.
+#[async_trait]
+pub trait PersistHook: Send + Sync {
+    async fn on_persist(
         &self,
         events: &[SerializedEvent],
-        snapshot_update: Option<(String, Value, usize)>,
-    ) -> Result<(), PersistenceError> {
-        // 1. Extract lookups from the PLAINTEXT events (before encryption).
-        let lookups = self.extractor.extract(events);
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), PersistenceError>;
+}
+```
 
-        // 2. Encrypt PII fields.
-        let encrypted = self.crypto.encrypt_events(events).await?;
+### 4.3 `cqrs-es-crypto`: extend `CryptoShreddingEventRepository`
 
-        // 3. Open a single transaction for events + lookups.
-        let mut tx = self.pool.begin().await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+Add two optional fields and builder methods:
 
-        // 3a. Insert encrypted events.
-        for event in &encrypted {
-            let payload = serde_json::to_value(&event.payload)?;
-            let metadata = serde_json::to_value(&event.metadata)?;
-            sqlx::query(
-                "INSERT INTO events \
-                 (aggregate_type, aggregate_id, sequence, \
-                  event_type, event_version, payload, metadata) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)"
-            )
-            .bind(&event.aggregate_type)
-            .bind(&event.aggregate_id)
-            .bind(event.sequence as i64)
-            .bind(&event.event_type)
-            .bind(&event.event_version)
-            .bind(&payload)
-            .bind(&metadata)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+```rust
+pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
+    pub(crate) inner: R,
+    key_store: Arc<dyn KeyStore>,
+    cipher: Arc<PiiCipher>,
+    codec: Arc<dyn PiiEventCodec>,
+    /// When set, `persist` uses a single Postgres transaction for DEK
+    /// creation, event insertion, and hook writes. When `None`, falls back
+    /// to the legacy path (encrypt → inner.persist).
+    pool: Option<sqlx::Pool<sqlx::Postgres>>,
+    /// Hooks called within the transactional persist. Ignored when `pool`
+    /// is `None`.
+    persist_hooks: Vec<Arc<dyn PersistHook>>,
+}
+
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    // Existing new() unchanged — pool defaults to None, hooks to empty vec.
+
+    /// Enable the transactional write path.
+    ///
+    /// When set, `persist` will manage its own Postgres transaction that
+    /// atomically commits DEKs, encrypted events, and any persist-hook
+    /// writes. The inner repository's `persist` is bypassed for writes
+    /// (reads still delegate through it).
+    #[must_use]
+    pub fn with_transactional_writes(
+        mut self,
+        pool: sqlx::Pool<sqlx::Postgres>,
+    ) -> Self {
+        self.pool = Some(pool);
+        self
+    }
+
+    /// Register a hook that participates in the persist transaction.
+    ///
+    /// Hooks receive the **unencrypted** events and a `&mut Transaction`
+    /// and can perform additional writes (e.g. subject-lookup upserts).
+    /// Multiple hooks are called in registration order.
+    #[must_use]
+    pub fn with_persist_hook(mut self, hook: Arc<dyn PersistHook>) -> Self {
+        self.persist_hooks.push(hook);
+        self
+    }
+}
+```
+
+### 4.4 `cqrs-es-crypto`: transactional `persist` implementation
+
+Replace the `persist` method in the `PersistedEventRepository` impl:
+
+```rust
+async fn persist<A: Aggregate>(
+    &self,
+    events: &[SerializedEvent],
+    snapshot_update: Option<(String, Value, usize)>,
+) -> Result<(), PersistenceError> {
+    let Some(pool) = &self.pool else {
+        // Legacy path: encrypt then delegate to inner (e.g. InMemoryEventRepository).
+        let encrypted = self.encrypt_events(events).await?;
+        return self.inner.persist::<A>(&encrypted, snapshot_update).await;
+    };
+
+    // ── Transactional path ────────────────────────────────────────────
+
+    let mut tx = pool.begin().await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+    // 1. Encrypt events, creating DEKs inside the transaction.
+    let encrypted = self.encrypt_events_in_tx(events, &mut tx).await?;
+
+    // 2. Insert encrypted events.
+    for event in &encrypted {
+        let payload = serde_json::to_value(&event.payload)?;
+        let metadata = serde_json::to_value(&event.metadata)?;
+        sqlx::query(
+            "INSERT INTO events \
+             (aggregate_type, aggregate_id, sequence, \
+              event_type, event_version, payload, metadata) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+        )
+        .bind(&event.aggregate_type)
+        .bind(&event.aggregate_id)
+        .bind(event.sequence as i64)
+        .bind(&event.event_type)
+        .bind(&event.event_version)
+        .bind(&payload)
+        .bind(&metadata)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+    }
+
+    // 3. Handle snapshot (currently always None for event-sourced stores).
+    if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
+        sqlx::query(
+            "INSERT INTO snapshots \
+             (aggregate_type, aggregate_id, last_sequence, \
+              current_snapshot, payload) \
+             VALUES ($1, $2, 0, $3, $4) \
+             ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
+             SET last_sequence = EXCLUDED.last_sequence, \
+                 current_snapshot = $3, payload = $4"
+        )
+        .bind(A::TYPE)
+        .bind(&aggregate_id)
+        .bind(current_snapshot as i64)
+        .bind(&aggregate)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+    }
+
+    // 4. Call hooks with the UNENCRYPTED events inside the transaction.
+    for hook in &self.persist_hooks {
+        hook.on_persist(events, &mut tx).await?;
+    }
+
+    // 5. Commit — DEKs, events, and hook writes are now atomically visible.
+    tx.commit().await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+    Ok(())
+}
+```
+
+### 4.5 `cqrs-es-crypto`: new `encrypt_events_in_tx` method
+
+This is the key new method. It mirrors `encrypt_events` but creates/fetches
+DEKs within the transaction instead of using `self.key_store`:
+
+```rust
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    /// Like `encrypt_events`, but creates DEKs within the provided
+    /// transaction so that key creation is atomic with event persistence.
+    async fn encrypt_events_in_tx(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<SerializedEvent>, PersistenceError> {
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            let mut event = event.clone();
+            if let Some(pii) = self.codec.classify(&event) {
+                let dek = self.get_or_create_key_in_tx(
+                    &pii.subject_id, tx
+                ).await?;
+
+                let aad = format!("{}:{}", event.aggregate_id, event.sequence)
+                    .into_bytes();
+                let plaintext = serde_json::to_vec(&pii.plaintext_pii)?;
+                let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
+
+                let sentinel = EncryptedPiiSentinel {
+                    ciphertext_b64: BASE64.encode(&encrypted.ciphertext),
+                    nonce_b64: BASE64.encode(&encrypted.nonce),
+                };
+
+                event.payload = (pii.build_encrypted_payload)(sentinel);
+            }
+            out.push(event);
+        }
+        Ok(out)
+    }
+
+    /// Get or create a DEK within a transaction.
+    ///
+    /// Mirrors `PostgresKeyStore::get_or_create_key` but uses the provided
+    /// transaction executor instead of an independent pool connection, so
+    /// the DEK INSERT is atomic with the caller's transaction.
+    async fn get_or_create_key_in_tx(
+        &self,
+        subject_id: &Uuid,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<KeyMaterial, PersistenceError> {
+        use sqlx::Row;
+
+        // Fast path: DEK already exists (may be from a prior committed tx
+        // or from an earlier event in the same batch).
+        let existing = sqlx::query(
+            "SELECT key_id, wrapped_key \
+             FROM subject_encryption_keys WHERE subject_id = $1"
+        )
+        .bind(subject_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if let Some(row) = existing {
+            let key_id: Uuid = row.get("key_id");
+            let wrapped_key: Vec<u8> = row.get("wrapped_key");
+            let material = self.cipher.unwrap_dek(key_id, &wrapped_key)
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            return Ok(material);
         }
 
-        // 3b. Upsert subject-lookup rows.
-        for lookup in &lookups {
+        // Generate, wrap, and insert within the transaction.
+        let dek = PiiCipher::generate_dek();
+        let wrapped_key = self.cipher.wrap_dek(&dek);
+
+        let result = sqlx::query(
+            "INSERT INTO subject_encryption_keys \
+             (key_id, subject_id, wrapped_key) \
+             VALUES ($1, $2, $3) \
+             ON CONFLICT (subject_id) DO NOTHING"
+        )
+        .bind(dek.key_id)
+        .bind(subject_id)
+        .bind(&wrapped_key)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if result.rows_affected() == 0 {
+            // Concurrent insert won the race — re-read from the tx.
+            let row = sqlx::query(
+                "SELECT key_id, wrapped_key \
+                 FROM subject_encryption_keys WHERE subject_id = $1"
+            )
+            .bind(subject_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+            let key_id: Uuid = row.get("key_id");
+            let wrapped_key: Vec<u8> = row.get("wrapped_key");
+            let material = self.cipher.unwrap_dek(key_id, &wrapped_key)
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            Ok(material)
+        } else {
+            Ok(dek)
+        }
+    }
+}
+```
+
+**Note:** `get_or_create_key_in_tx` mirrors `PostgresKeyStore::get_or_create_key`
+exactly, but executes against `&mut **tx` instead of `&self.pool`. The
+`PiiCipher` is used directly for `generate_dek`, `wrap_dek`, and
+`unwrap_dek` — no `KeyStore` trait involved on the transactional path.
+
+### 4.6 `journey_dynamics`: implement `PersistHook`
+
+New file `crates/journey_dynamics/src/subject_lookup_hook.rs`:
+
+```rust
+use async_trait::async_trait;
+use cqrs_es::persist::{PersistenceError, SerializedEvent};
+use cqrs_es_crypto::PersistHook;
+use uuid::Uuid;
+
+/// Writes `(subject_id, email_lower)` rows to `subject_lookup` for every
+/// `PersonCaptured` event, within the persist transaction.
+pub struct SubjectLookupHook;
+
+#[async_trait]
+impl PersistHook for SubjectLookupHook {
+    async fn on_persist(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), PersistenceError> {
+        for event in events {
+            if event.event_type != "PersonCaptured" {
+                continue;
+            }
+            let Some(inner) = event.payload.get("PersonCaptured") else {
+                continue;
+            };
+            let Some(subject_id) = inner
+                .get("subject_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.parse::<Uuid>().ok())
+            else {
+                continue;
+            };
+            let Some(email) = inner.get("email").and_then(|v| v.as_str()) else {
+                continue;
+            };
+
             sqlx::query(
                 "INSERT INTO subject_lookup (subject_id, email_lower) \
-                 VALUES ($1, $2) \
-                 ON CONFLICT (subject_id) DO UPDATE SET email_lower = $2"
+                 VALUES ($1, lower($2)) \
+                 ON CONFLICT (subject_id) DO UPDATE SET email_lower = lower($2)"
             )
-            .bind(lookup.subject_id)
-            .bind(&lookup.email_lower)
-            .execute(&mut *tx)
+            .bind(subject_id)
+            .bind(email)
+            .execute(&mut **tx)
             .await
             .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
         }
-
-        // 3c. Handle snapshot (if applicable — currently always None for
-        //     event-sourced stores, but handle gracefully).
-        if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
-            sqlx::query(
-                "INSERT INTO snapshots \
-                 (aggregate_type, aggregate_id, last_sequence, \
-                  current_snapshot, payload) \
-                 VALUES ($1, $2, 0, $3, $4) \
-                 ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
-                 SET last_sequence = EXCLUDED.last_sequence, \
-                     current_snapshot = $3, \
-                     payload = $4"
-            )
-            .bind(A::TYPE)
-            .bind(&aggregate_id)
-            .bind(current_snapshot as i64)
-            .bind(&aggregate)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-        }
-
-        // 3d. Commit — events and lookups are now atomically visible.
-        tx.commit().await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-
         Ok(())
     }
 }
 ```
 
-**Key property:** The `events` parameter to `persist` contains
-**unencrypted** `SerializedEvent`s (the `PersistedEventStore` calls
-`persist` with plain events; encryption is normally done inside
-`CryptoShreddingEventRepository::persist`). Our wrapper intercepts at this
-level, extracts lookups from plaintext, encrypts, and writes both in one
-transaction.
-
-**About the event INSERT SQL:** This replicates what
-`PostgresEventRepository::insert_events` does internally. The SQL is simple
-(one INSERT per event) and the `events` table schema is defined in our own
-migration. This is explicitly **not** forking `postgres-es` — we are
-implementing the `PersistedEventRepository` trait ourselves for the write
-path only. The `sequence` column is cast from `usize` to `i64` to match
-the `BIGINT` type.
-
-### 4.5 Update `config.rs`
-
-```rust
-// BEFORE
-pub type CryptoCqrs = CqrsFramework<
-    Journey,
-    PersistedEventStore<CryptoShreddingEventRepository<PostgresEventRepository>, Journey>,
->;
-
-// AFTER
-pub type CryptoCqrs = CqrsFramework<
-    Journey,
-    PersistedEventStore<TransactionalEventRepository, Journey>,
->;
-```
-
-In `cqrs_framework`:
+### 4.7 Update `config.rs`: wire in pool + hook
 
 ```rust
 // BEFORE
@@ -400,13 +491,16 @@ let store = PersistedEventStore::new_event_store(crypto_repo);
 // AFTER
 let inner = PostgresEventRepository::new(pool.clone());
 let codec = Arc::new(JourneyPiiCodec);
-let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec);
-let extractor = Arc::new(PersonCapturedLookupExtractor);
-let transactional = TransactionalEventRepository::new(pool, crypto_repo, extractor);
-let store = PersistedEventStore::new_event_store(transactional);
+let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec)
+    .with_transactional_writes(pool)
+    .with_persist_hook(Arc::new(SubjectLookupHook));
+let store = PersistedEventStore::new_event_store(crypto_repo);
 ```
 
-### 4.6 Update `find_subjects_by_email` to use `subject_lookup`
+**The `CryptoCqrs` type alias does not change.** The outer type is still
+`CryptoShreddingEventRepository<PostgresEventRepository>`.
+
+### 4.8 Update `find_subjects_by_email` to use `subject_lookup`
 
 In `view_repository.rs`:
 
@@ -446,7 +540,7 @@ pub async fn find_subjects_by_email(&self, email: &str) -> Result<Vec<Uuid>, sql
 No `AND NOT forgotten` filter needed — rows are deleted from
 `subject_lookup` on shredding, so only active subjects are present.
 
-### 4.7 Update shredding flow: delete from `subject_lookup`
+### 4.9 Update shredding flow: delete from `subject_lookup`
 
 In `route_handler.rs`, in the `shred_subject` function, after deleting the
 DEK, also delete the subject from the lookup table:
@@ -468,7 +562,7 @@ cleaner for this write).
 Alternatively, add a `delete_subject_lookup` method to
 `StructuredJourneyViewRepository` or to a new `SubjectLookupRepository`.
 
-### 4.8 `journey_person` becomes a pure projection
+### 4.10 `journey_person` becomes a pure projection
 
 No schema change to `journey_person` — it continues to work exactly as it
 does today. Its email column is still populated by the projection and still
@@ -483,33 +577,56 @@ This is a separate concern and can be done later.
 
 ---
 
-## 5. What about the DEK creation?
+## 5. Transaction scope — what's atomic now
 
-`CryptoShreddingEventRepository::encrypt_events` calls
-`key_store.get_or_create_key()`, which writes to `subject_encryption_keys`
-**outside** our transaction. This means DEK creation and event+lookup
-persist are not atomic. Failure modes:
+With the transactional path, a single `persist` call produces **one**
+Postgres transaction containing:
 
-| DEK created? | Events+lookups committed? | Outcome |
-|---|---|---|
-| ✅ | ✅ | Happy path |
-| ✅ | ❌ | Orphan DEK — harmless, unused key material |
-| ❌ | N/A | `encrypt_events` returns error, persist never attempted |
+| Write | Table | Notes |
+|-------|-------|-------|
+| DEK creation | `subject_encryption_keys` | Only for new subjects; existing DEKs are read from the tx |
+| Encrypted events | `events` | Same INSERT SQL as `PostgresEventRepository` |
+| Subject lookup | `subject_lookup` | Via `SubjectLookupHook` |
 
-An orphan DEK wastes a row in `subject_encryption_keys` but has no
-security or correctness implications. No action needed.
+If any step fails, the entire transaction rolls back. No orphan DEKs, no
+orphan lookups, no events without lookups.
 
-## 6. Testing strategy
+**The read path is unchanged:** `get_events`, `get_last_events`,
+`stream_events` etc. still delegate to the inner
+`CryptoShreddingEventRepository → PostgresEventRepository` chain and use
+`self.key_store` for DEK retrieval on decryption. This is correct because
+DEKs created in a committed transaction are visible to subsequent reads
+via the pool.
 
-### Unit tests
+## 6. Legacy (non-transactional) path
 
-- **`LookupExtractor`**: feed it various `SerializedEvent` payloads
+When `pool` is `None` (e.g. in tests using `InMemoryEventRepository` +
+`InMemoryKeyStore`), `persist` falls through to the existing
+`encrypt_events` → `inner.persist` path. No behavioural change for tests.
+
+## 7. Testing strategy
+
+### Unit tests (`cqrs-es-crypto`)
+
+- **`encrypt_events_in_tx`**: use a test database. Begin a transaction,
+  call `encrypt_events_in_tx`, verify the DEK was inserted within the
+  transaction (visible inside the tx but not outside until commit). Commit,
+  verify it's now globally visible.
+- **`persist` transactional path**: persist a batch of events including a
+  PII event. Verify that both `events` and `subject_encryption_keys`
+  contain the expected rows. Then verify that a failed persist (e.g.
+  duplicate sequence) rolls back both the event and the DEK.
+- **`persist` with hooks**: register a mock hook, persist events, verify
+  the hook received the unencrypted events and its writes are committed.
+
+### Unit tests (`journey_dynamics`)
+
+- **`SubjectLookupHook`**: feed it various `SerializedEvent` payloads
   (PersonCaptured, Modified, PersonDetailsUpdated, SubjectForgotten) and
-  assert it only extracts lookups from PersonCaptured.
-- **`TransactionalEventRepository::persist`**: use a test database.
-  Persist a batch of events including a PersonCaptured. Verify that both
-  `events` and `subject_lookup` contain the expected rows. Then verify that
-  a failed persist (e.g. duplicate sequence) rolls back both.
+  assert it only writes lookups for PersonCaptured.
+- **End-to-end persist**: persist a PersonCaptured via the full CQRS stack,
+  verify `events`, `subject_encryption_keys`, and `subject_lookup` all
+  contain the expected rows.
 
 ### Integration / Hurl tests
 
@@ -517,8 +634,7 @@ security or correctness implications. No action needed.
   pass unchanged — the behaviour is identical, just the underlying table
   is different.
 - **New test**: capture a person, verify `subject_lookup` contains the
-  mapping (query the DB directly or use the existing shred-by-email
-  endpoint), then shred by email and verify the lookup row is gone.
+  mapping, then shred by email and verify the lookup row is gone.
 
 ### Regression
 
@@ -526,7 +642,7 @@ security or correctness implications. No action needed.
   the projection and still serves the read API. The only query that changes
   is `find_subjects_by_email`.
 
-## 7. Migration / deployment order
+## 8. Migration / deployment order
 
 1. **Deploy the migration** — creates `subject_lookup`, backfills from
    `journey_person`. Zero downtime; additive only.
@@ -538,35 +654,37 @@ security or correctness implications. No action needed.
 
 No breaking changes; fully backwards-compatible.
 
-## 8. Files to change
+## 9. Files to change
 
 | File | Change |
 |---|---|
 | `migrations/YYYYMMDDHHMMSS_subject_lookup.up.sql` | New migration |
 | `migrations/YYYYMMDDHHMMSS_subject_lookup.down.sql` | Down migration |
-| `crates/cqrs-es-crypto/src/repository.rs` | Make `encrypt_events` `pub` |
-| `crates/journey_dynamics/src/lookup_extractor.rs` | **New file** — `SubjectLookup`, `LookupExtractor` trait, `PersonCapturedLookupExtractor` |
-| `crates/journey_dynamics/src/transactional_event_repository.rs` | **New file** — `TransactionalEventRepository` |
-| `crates/journey_dynamics/src/config.rs` | Update `CryptoCqrs` type alias; wire `TransactionalEventRepository` |
-| `crates/journey_dynamics/src/state.rs` | Expose `pool` on `ApplicationState` (or add lookup cleanup method) |
+| `crates/cqrs-es-crypto/src/repository.rs` | Add `PersistHook` trait; add `pool`, `persist_hooks` fields + builder methods to `CryptoShreddingEventRepository`; add `encrypt_events_in_tx` + `get_or_create_key_in_tx`; update `persist` with transactional path |
+| `crates/cqrs-es-crypto/src/lib.rs` | Re-export `PersistHook` |
+| `crates/journey_dynamics/src/subject_lookup_hook.rs` | **New file** — `SubjectLookupHook` implementing `PersistHook` |
+| `crates/journey_dynamics/src/config.rs` | Wire `.with_transactional_writes(pool).with_persist_hook(...)` |
+| `crates/journey_dynamics/src/state.rs` | Expose `pool` on `ApplicationState` |
 | `crates/journey_dynamics/src/view_repository.rs` | `find_subjects_by_email` → query `subject_lookup`; add `delete_subject_lookup` |
 | `crates/journey_dynamics/src/route_handler.rs` | After DEK deletion, delete from `subject_lookup` |
-| `crates/journey_dynamics/src/lib.rs` | Add `mod lookup_extractor; mod transactional_event_repository;` |
-| Tests (Rust + Hurl) | Update/add as described in §6 |
+| `crates/journey_dynamics/src/lib.rs` | Add `mod subject_lookup_hook;` |
+| Tests (Rust + Hurl) | Update/add as described in §7 |
 
-## 9. Sequence column type note
+**Note:** The `CryptoCqrs` type alias in `config.rs` does **not** change.
+
+## 10. Sequence column type note
 
 `postgres-es` casts `event.sequence` as `i32` in its INSERT. Our events
-table defines `sequence` as `BIGINT`. The `TransactionalEventRepository`
-should bind as `i64` to match the column type. This is a minor
-improvement over the upstream crate's narrower cast.
+table defines `sequence` as `BIGINT`. The transactional write path should
+bind as `i64` to match the column type. This is a minor improvement over
+the upstream crate's narrower cast.
 
-## 10. Future considerations
+## 11. Future considerations
 
 - **Generalised lookup table**: if more lookup dimensions are needed
   (phone, passport), consider `(subject_id, lookup_type, lookup_value)`
-  with a composite primary key. The extractor trait already supports this
-  — just return more `SubjectLookup` variants.
+  with a composite primary key. The `PersistHook` trait already supports
+  this — the hook can write multiple lookup rows per event.
 - **HMAC-hashed lookups**: for defence-in-depth, store
   `HMAC-SHA256(secret, email_lower)` instead of `email_lower`. Requires
   a stable HMAC key (distinct from the KEK) and caller-side hash
@@ -575,3 +693,6 @@ improvement over the upstream crate's narrower cast.
   `journey_person.email`. Can be rewritten as
   `subject_lookup → find_journeys_by_subject` for consistency, or left
   as a projection query. Low priority.
+- **Additional hooks**: the `PersistHook` mechanism is general-purpose.
+  Future hooks could publish events to a message bus, update other
+  projections transactionally, etc.
