@@ -111,6 +111,41 @@ the application crate (`journey_dynamics`) and carries the domain knowledge
 of which event types map to which lookup rows. The `cqrs-es-crypto` crate
 knows nothing about `PersonCaptured` or `subject_lookup`.
 
+### Keeping the crate database-agnostic: feature-gating Postgres
+
+Today `cqrs-es-crypto` unconditionally depends on `sqlx` with the
+`postgres` feature — because `PostgresKeyStore` lives in the crate. This
+means even consumers who only need the generic parts (`PiiCipher`,
+`PiiEventCodec`, `KeyStore` trait, `InMemoryKeyStore`) pull in Postgres.
+
+The transactional write path would deepen this coupling by putting
+`sqlx::Transaction<'_, Postgres>` into a public trait signature
+(`PersistHook`). To keep the boundary clean, **all Postgres-specific
+code is gated behind a `postgres` Cargo feature**:
+
+| Feature `postgres` enabled | Feature `postgres` disabled |
+|---|---|
+| `PostgresKeyStore` compiled | `PostgresKeyStore` not compiled |
+| `PersistHook` trait available | `PersistHook` trait not available |
+| `with_transactional_writes` / `with_persist_hook` available | Builder methods not available |
+| `encrypt_events_in_tx` / `get_or_create_key_in_tx` compiled | Not compiled |
+| Transactional branch in `persist` compiled | Only legacy path compiled |
+| `sqlx` is a dependency | `sqlx` is not a dependency |
+
+The core remains fully database-agnostic: `PiiCipher`, `PiiEventCodec`,
+`CryptoShreddingEventRepository<R>` (legacy encrypt → `inner.persist`
+path), `KeyStore` trait, `InMemoryKeyStore`, `KeyMaterial`.
+
+The `journey_dynamics` application enables the feature:
+
+```toml
+cqrs-es-crypto = { path = "../cqrs-es-crypto", features = ["derive", "postgres"] }
+```
+
+This is also an opportunity to gate `PostgresKeyStore` properly, since it
+has the same Postgres coupling that currently leaks into the core crate
+unconditionally.
+
 ---
 
 ## 4. Detailed changes
@@ -156,10 +191,37 @@ DROP TABLE IF EXISTS subject_lookup CASCADE;
   columns, or the table can be generalised to
   `(subject_id, lookup_type, lookup_value)` later. Keep it simple for now.
 
-### 4.2 `cqrs-es-crypto`: new `PersistHook` trait
+### 4.2 `cqrs-es-crypto`: feature-gate Postgres dependencies
 
-Add to `crates/cqrs-es-crypto/src/repository.rs` (and re-export from
-`lib.rs`):
+Update `crates/cqrs-es-crypto/Cargo.toml`:
+
+```toml
+[features]
+testing = []
+derive = ["dep:cqrs-es-crypto-derive"]
+chrono = ["derive", "cqrs-es-crypto-derive/chrono"]
+postgres = ["dep:sqlx"]  # enables PostgresKeyStore, PersistHook, transactional writes
+
+[dependencies]
+# ... existing non-sqlx deps unchanged ...
+sqlx = { version = "0.8", features = ["postgres", "runtime-tokio-native-tls", "uuid"], optional = true }
+```
+
+Then gate all Postgres-specific items with `#[cfg(feature = "postgres")]`:
+- `PostgresKeyStore` and its `impl KeyStore`
+- The `Database(sqlx::Error)` variant in `KeyStoreError` (replace with a
+  generic `Database(Box<dyn Error>)` or keep behind the gate)
+- `PersistHook` trait
+- `pool` / `persist_hooks` fields, builder methods, `encrypt_events_in_tx`,
+  `get_or_create_key_in_tx`, and the transactional branch in `persist`
+
+The test helpers that use Postgres (`setup_test_db`, etc.) should also be
+behind `#[cfg(feature = "postgres")]`.
+
+### 4.3 `cqrs-es-crypto`: new `PersistHook` trait
+
+Add to `crates/cqrs-es-crypto/src/repository.rs` (gated behind
+`#[cfg(feature = "postgres")]`) and re-export from `lib.rs`:
 
 ```rust
 /// Hook called within the transactional persist path.
@@ -180,7 +242,7 @@ pub trait PersistHook: Send + Sync {
 }
 ```
 
-### 4.3 `cqrs-es-crypto`: extend `CryptoShreddingEventRepository`
+### 4.4 `cqrs-es-crypto`: extend `CryptoShreddingEventRepository`
 
 Add two optional fields and builder methods:
 
@@ -230,7 +292,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 }
 ```
 
-### 4.4 `cqrs-es-crypto`: transactional `persist` implementation
+### 4.5 `cqrs-es-crypto`: transactional `persist` implementation
 
 Replace the `persist` method in the `PersistedEventRepository` impl:
 
@@ -309,7 +371,7 @@ async fn persist<A: Aggregate>(
 }
 ```
 
-### 4.5 `cqrs-es-crypto`: new `encrypt_events_in_tx` method
+### 4.6 `cqrs-es-crypto`: new `encrypt_events_in_tx` method
 
 This is the key new method. It mirrors `encrypt_events` but creates/fetches
 DEKs within the transaction instead of using `self.key_store`:
@@ -424,7 +486,7 @@ exactly, but executes against `&mut **tx` instead of `&self.pool`. The
 `PiiCipher` is used directly for `generate_dek`, `wrap_dek`, and
 `unwrap_dek` — no `KeyStore` trait involved on the transactional path.
 
-### 4.6 `journey_dynamics`: implement `PersistHook`
+### 4.7 `journey_dynamics`: implement `PersistHook`
 
 New file `crates/journey_dynamics/src/subject_lookup_hook.rs`:
 
@@ -479,7 +541,7 @@ impl PersistHook for SubjectLookupHook {
 }
 ```
 
-### 4.7 Update `config.rs`: wire in pool + hook
+### 4.8 Update `config.rs`: wire in pool + hook
 
 ```rust
 // BEFORE
@@ -500,7 +562,7 @@ let store = PersistedEventStore::new_event_store(crypto_repo);
 **The `CryptoCqrs` type alias does not change.** The outer type is still
 `CryptoShreddingEventRepository<PostgresEventRepository>`.
 
-### 4.8 Update `find_subjects_by_email` to use `subject_lookup`
+### 4.9 Update `find_subjects_by_email` to use `subject_lookup`
 
 In `view_repository.rs`:
 
@@ -540,7 +602,7 @@ pub async fn find_subjects_by_email(&self, email: &str) -> Result<Vec<Uuid>, sql
 No `AND NOT forgotten` filter needed — rows are deleted from
 `subject_lookup` on shredding, so only active subjects are present.
 
-### 4.9 Update shredding flow: delete from `subject_lookup`
+### 4.10 Update shredding flow: delete from `subject_lookup`
 
 In `route_handler.rs`, in the `shred_subject` function, after deleting the
 DEK, also delete the subject from the lookup table:
@@ -562,7 +624,7 @@ cleaner for this write).
 Alternatively, add a `delete_subject_lookup` method to
 `StructuredJourneyViewRepository` or to a new `SubjectLookupRepository`.
 
-### 4.10 `journey_person` becomes a pure projection
+### 4.11 `journey_person` becomes a pure projection
 
 No schema change to `journey_person` — it continues to work exactly as it
 does today. Its email column is still populated by the projection and still
@@ -660,8 +722,11 @@ No breaking changes; fully backwards-compatible.
 |---|---|
 | `migrations/YYYYMMDDHHMMSS_subject_lookup.up.sql` | New migration |
 | `migrations/YYYYMMDDHHMMSS_subject_lookup.down.sql` | Down migration |
-| `crates/cqrs-es-crypto/src/repository.rs` | Add `PersistHook` trait; add `pool`, `persist_hooks` fields + builder methods to `CryptoShreddingEventRepository`; add `encrypt_events_in_tx` + `get_or_create_key_in_tx`; update `persist` with transactional path |
-| `crates/cqrs-es-crypto/src/lib.rs` | Re-export `PersistHook` |
+| `crates/cqrs-es-crypto/Cargo.toml` | Make `sqlx` optional; add `postgres` feature |
+| `crates/cqrs-es-crypto/src/repository.rs` | Add `PersistHook` trait (gated); add `pool`, `persist_hooks` fields + builder methods to `CryptoShreddingEventRepository` (gated); add `encrypt_events_in_tx` + `get_or_create_key_in_tx` (gated); update `persist` with transactional path (gated) |
+| `crates/cqrs-es-crypto/src/key_store.rs` | Gate `PostgresKeyStore` behind `#[cfg(feature = "postgres")]` |
+| `crates/cqrs-es-crypto/src/lib.rs` | Gate Postgres re-exports; re-export `PersistHook` under the gate |
+| `crates/journey_dynamics/Cargo.toml` | Add `"postgres"` to `cqrs-es-crypto` features |
 | `crates/journey_dynamics/src/subject_lookup_hook.rs` | **New file** — `SubjectLookupHook` implementing `PersistHook` |
 | `crates/journey_dynamics/src/config.rs` | Wire `.with_transactional_writes(pool).with_persist_hook(...)` |
 | `crates/journey_dynamics/src/state.rs` | Expose `pool` on `ApplicationState` |
