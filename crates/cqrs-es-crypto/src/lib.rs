@@ -111,6 +111,9 @@ pub use repository::{
     PiiFields,
 };
 
+#[cfg(feature = "postgres")]
+pub use repository::PersistHook;
+
 // ── Testing helpers (opt-in via the `testing` feature) ───────────────────────
 
 #[cfg(any(test, feature = "testing"))]

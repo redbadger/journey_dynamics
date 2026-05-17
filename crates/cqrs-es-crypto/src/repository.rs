@@ -37,7 +37,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::cipher::{EncryptedPayload, FieldCipher};
+#[cfg(feature = "postgres")]
+use crate::kek::KekProvider;
 use crate::key_store::KeyStore;
+#[cfg(feature = "postgres")]
+use async_trait::async_trait;
 
 // ── PiiEventCodec — types ─────────────────────────────────────────────────────
 
@@ -152,6 +156,30 @@ pub trait PiiEventCodec: Send + Sync {
 
 // ── CryptoShreddingEventRepository ───────────────────────────────────────────
 
+// ── PersistHook ──────────────────────────────────────────────────────────────
+
+/// Hook called within the transactional persist path.
+///
+/// Receives the **unencrypted** serialised events and a live Postgres
+/// transaction. Implementations can inspect event payloads and perform
+/// domain-specific writes (e.g. subject-lookup inserts) that will be
+/// committed atomically with the event and DEK inserts.
+///
+/// If the hook returns an error, the entire transaction is rolled back.
+///
+/// Only available with the `postgres` feature.
+#[cfg(feature = "postgres")]
+#[async_trait]
+pub trait PersistHook: Send + Sync {
+    async fn on_persist(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), PersistenceError>;
+}
+
+// ── CryptoShreddingEventRepository ───────────────────────────────────────────
+
 /// Wraps an inner [`PersistedEventRepository`] and transparently encrypts /
 /// decrypts PII-bearing event payloads for GDPR crypto-shredding.
 ///
@@ -162,6 +190,18 @@ pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     key_store: Arc<dyn KeyStore>,
     cipher: Arc<FieldCipher>,
     codec: Arc<dyn PiiEventCodec>,
+    /// Postgres connection pool for the transactional write path.
+    /// When `Some`, `persist` manages its own transaction instead of
+    /// delegating to the inner repository.
+    #[cfg(feature = "postgres")]
+    pool: Option<sqlx::Pool<sqlx::Postgres>>,
+    /// KEK provider used to wrap/unwrap DEKs within the transaction.
+    /// Required when `pool` is `Some`.
+    #[cfg(feature = "postgres")]
+    kek_provider: Option<Arc<dyn KekProvider>>,
+    /// Hooks called within the transactional persist, in registration order.
+    #[cfg(feature = "postgres")]
+    persist_hooks: Vec<Arc<dyn PersistHook>>,
 }
 
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
@@ -177,6 +217,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             key_store,
             cipher: Arc::new(cipher),
             codec,
+            #[cfg(feature = "postgres")]
+            pool: None,
+            #[cfg(feature = "postgres")]
+            kek_provider: None,
+            #[cfg(feature = "postgres")]
+            persist_hooks: Vec::new(),
         }
     }
 
@@ -187,7 +233,45 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     pub const fn inner(&self) -> &R {
         &self.inner
     }
+}
 
+// ── Builder methods (postgres feature) ───────────────────────────────────
+
+#[cfg(feature = "postgres")]
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    /// Enable the transactional write path.
+    ///
+    /// When set, `persist` will manage a single Postgres transaction that
+    /// atomically commits DEKs, encrypted events, and any hook writes.
+    /// The inner repository's `persist` is bypassed for writes; reads
+    /// still delegate through it.
+    ///
+    /// `kek_provider` is used to wrap newly generated DEKs and to unwrap
+    /// any DEK created by a concurrent caller within the same transaction.
+    #[must_use]
+    pub fn with_transactional_writes(
+        mut self,
+        pool: sqlx::Pool<sqlx::Postgres>,
+        kek_provider: Arc<dyn KekProvider>,
+    ) -> Self {
+        self.pool = Some(pool);
+        self.kek_provider = Some(kek_provider);
+        self
+    }
+
+    /// Register a hook that participates in the persist transaction.
+    ///
+    /// Hooks receive the **unencrypted** events and a `&mut Transaction`
+    /// so they can perform additional writes atomically alongside the
+    /// event and DEK inserts. Multiple hooks are called in registration order.
+    #[must_use]
+    pub fn with_persist_hook(mut self, hook: Arc<dyn PersistHook>) -> Self {
+        self.persist_hooks.push(hook);
+        self
+    }
+}
+
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     // ── Write helpers ─────────────────────────────────────────────────────────
 
     async fn encrypt_events(
