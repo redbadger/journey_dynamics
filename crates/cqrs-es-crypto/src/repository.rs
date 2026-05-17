@@ -38,7 +38,7 @@ use uuid::Uuid;
 
 use crate::cipher::{EncryptedPayload, FieldCipher};
 #[cfg(feature = "postgres")]
-use crate::kek::KekProvider;
+use crate::kek::{KekProvider, WrappedDek};
 use crate::key_store::KeyStore;
 #[cfg(feature = "postgres")]
 use async_trait::async_trait;
@@ -348,6 +348,129 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             out.push(event);
         }
         Ok(out)
+    }
+}
+
+// ── Transactional helpers (postgres feature) ───────────────────────────────
+
+#[cfg(feature = "postgres")]
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    /// Like [`encrypt_events`], but creates DEKs within the provided
+    /// transaction so that key creation is atomic with event persistence.
+    async fn encrypt_events_in_tx(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<SerializedEvent>, PersistenceError> {
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            let mut event = event.clone();
+            if let Some(pii) = self.codec.classify(&event) {
+                let dek = self.get_or_create_key_in_tx(&pii.subject_id, tx).await?;
+
+                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
+                let plaintext = serde_json::to_vec(&pii.plaintext_pii)?;
+                let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
+
+                let sentinel = EncryptedPiiSentinel {
+                    ciphertext_b64: BASE64.encode(&encrypted.ciphertext),
+                    nonce_b64: BASE64.encode(&encrypted.nonce),
+                };
+
+                event.payload = (pii.build_encrypted_payload)(sentinel);
+            }
+            out.push(event);
+        }
+        Ok(out)
+    }
+
+    /// Get or create a DEK within a transaction.
+    ///
+    /// Mirrors [`PostgresKeyStore::get_or_create_key`] exactly, but executes
+    /// all SQL against the provided transaction instead of an independent pool
+    /// connection, making the DEK INSERT atomic with the caller's transaction.
+    async fn get_or_create_key_in_tx(
+        &self,
+        subject_id: &Uuid,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<crate::cipher::KeyMaterial, PersistenceError> {
+        use sqlx::Row as _;
+
+        // Invariant: kek_provider is always Some when pool is Some.
+        let provider = self
+            .kek_provider
+            .as_ref()
+            .expect("kek_provider must be set — call with_transactional_writes before persist");
+
+        // Fast path: DEK already exists (committed previously, or inserted
+        // by an earlier event in this same batch).
+        let existing = sqlx::query(
+            "SELECT key_id, wrapped_key, kek_id \
+             FROM subject_encryption_keys WHERE subject_id = $1",
+        )
+        .bind(subject_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if let Some(row) = existing {
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            return Ok(material);
+        }
+
+        // Generate a fresh DEK, wrap it under the current primary KEK, and
+        // INSERT within the transaction.
+        let dek = FieldCipher::generate_dek();
+        let kek = provider.current();
+        let wrapped = provider
+            .wrap(&kek, &dek)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        let result = sqlx::query(
+            "INSERT INTO subject_encryption_keys \
+             (key_id, subject_id, wrapped_key, kek_id) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (subject_id) DO NOTHING",
+        )
+        .bind(dek.key_id)
+        .bind(subject_id)
+        .bind(&wrapped.wrapped_key)
+        .bind(&wrapped.kek_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if result.rows_affected() == 0 {
+            // A concurrent transaction inserted first — re-read from the tx.
+            let row = sqlx::query(
+                "SELECT key_id, wrapped_key, kek_id \
+                 FROM subject_encryption_keys WHERE subject_id = $1",
+            )
+            .bind(subject_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            Ok(material)
+        } else {
+            Ok(dek)
+        }
     }
 }
 
