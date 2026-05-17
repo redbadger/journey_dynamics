@@ -15,6 +15,7 @@ categories = ["cryptography", "database"]
 testing = []
 derive = ["dep:cqrs-es-crypto-derive"]
 chrono = ["derive", "cqrs-es-crypto-derive/chrono"]
+postgres = ["dep:sqlx"]
 
 [dependencies]
 cqrs-es-crypto-derive = { version = "0.1.0", path = "../cqrs-es-crypto-derive", optional = true }
@@ -29,7 +30,7 @@ sqlx = { version = "0.8", features = [
     "postgres",
     "runtime-tokio-native-tls",
     "uuid",
-] }
+], optional = true }
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"

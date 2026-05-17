@@ -18,7 +18,9 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::cipher::{FieldCipher, KeyMaterial};
-use crate::kek::{KekError, KekProvider, WrappedDek};
+#[cfg(feature = "postgres")]
+use crate::kek::WrappedDek;
+use crate::kek::{KekError, KekProvider};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Error
@@ -30,6 +32,7 @@ pub enum KeyStoreError {
     /// A KEK wrap or unwrap operation failed (wrong version, corrupt data, vault error).
     #[error("KEK error: {0}")]
     Kek(#[from] KekError),
+    #[cfg(feature = "postgres")]
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("Key store lock poisoned — another thread panicked while holding the lock")]
@@ -284,6 +287,7 @@ impl KeyStore for InMemoryKeyStore {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Configuration for [`PostgresKeyStore`].
+#[cfg(feature = "postgres")]
 #[derive(Debug, Clone, Copy)]
 pub struct PostgresKeyStoreOptions {
     /// Spawn a background task to re-wrap stale DEKs on every read.
@@ -293,6 +297,7 @@ pub struct PostgresKeyStoreOptions {
     pub lazy_rewrap: bool,
 }
 
+#[cfg(feature = "postgres")]
 impl Default for PostgresKeyStoreOptions {
     fn default() -> Self {
         Self { lazy_rewrap: true }
@@ -305,6 +310,7 @@ impl Default for PostgresKeyStoreOptions {
 /// leave this struct in plaintext — they are held in memory only for the duration of a
 /// single request.  The `kek_id` of the wrapping KEK version is persisted alongside the
 /// wrapped bytes so that multiple KEK versions can coexist during a rotation.
+#[cfg(feature = "postgres")]
 #[derive(Clone)]
 pub struct PostgresKeyStore {
     pool: sqlx::Pool<sqlx::Postgres>,
@@ -312,6 +318,7 @@ pub struct PostgresKeyStore {
     lazy_rewrap: bool,
 }
 
+#[cfg(feature = "postgres")]
 impl PostgresKeyStore {
     /// Create a new [`PostgresKeyStore`] with default options (lazy re-wrap enabled).
     #[must_use]
@@ -334,6 +341,7 @@ impl PostgresKeyStore {
     }
 }
 
+#[cfg(feature = "postgres")]
 #[async_trait]
 impl KeyStore for PostgresKeyStore {
     async fn get_or_create_key(&self, subject_id: &Uuid) -> Result<KeyMaterial, KeyStoreError> {
@@ -527,6 +535,7 @@ mod tests {
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
+    #[cfg(feature = "postgres")]
     async fn setup_test_db() -> sqlx::Pool<sqlx::Postgres> {
         let url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
             "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
@@ -546,6 +555,7 @@ mod tests {
     }
 
     /// Build a [`StaticKekProvider`] suitable for use in Postgres integration tests.
+    #[cfg(feature = "postgres")]
     fn make_provider() -> Arc<dyn crate::kek::KekProvider> {
         Arc::new(
             crate::kek::StaticKekProvider::single("test:v1", vec![0x42u8; 32])
@@ -802,6 +812,7 @@ mod tests {
 
     // ── Integration tests: PostgresKeyStore ───────────────────────────────────
 
+    #[cfg(feature = "postgres")]
     async fn cleanup_key(pool: &sqlx::Pool<sqlx::Postgres>, subject_id: &Uuid) {
         sqlx::query("DELETE FROM subject_encryption_keys WHERE subject_id = $1")
             .bind(subject_id)
@@ -810,6 +821,7 @@ mod tests {
             .unwrap();
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_get_or_create_creates_key() {
         let pool = setup_test_db().await;
@@ -828,6 +840,7 @@ mod tests {
         cleanup_key(&pool, &subject_id).await;
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_get_or_create_is_idempotent() {
         let pool = setup_test_db().await;
@@ -843,6 +856,7 @@ mod tests {
         cleanup_key(&pool, &subject_id).await;
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_get_key_returns_none_for_unknown_subject() {
         let pool = setup_test_db().await;
@@ -853,6 +867,7 @@ mod tests {
         assert!(result.is_none());
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_delete_key_removes_it() {
         let pool = setup_test_db().await;
@@ -870,6 +885,7 @@ mod tests {
         // No cleanup needed — delete_key already removed the row.
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_delete_key_is_idempotent() {
         let pool = setup_test_db().await;
@@ -885,6 +901,7 @@ mod tests {
         store.delete_key(&subject_id).await.unwrap();
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_wrap_unwrap_survives_db_roundtrip() {
         // Verifies that the provider's wrap/unwrap is consistent with what Postgres stores:
@@ -910,10 +927,12 @@ mod tests {
 
     // ── Rotation (PostgresKeyStore) ───────────────────────────────────────────
 
+    #[cfg(feature = "postgres")]
     fn make_v1_provider() -> Arc<dyn KekProvider> {
         Arc::new(StaticKekProvider::single("test:v1", vec![0x42u8; 32]).unwrap())
     }
 
+    #[cfg(feature = "postgres")]
     fn make_v1_v2_provider() -> Arc<dyn KekProvider> {
         let mut keks = std::collections::HashMap::new();
         keks.insert(
@@ -927,6 +946,7 @@ mod tests {
         Arc::new(StaticKekProvider::new("test:v2", keks).unwrap())
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_list_stale_subjects() {
         use sqlx::Row as _;
@@ -982,6 +1002,7 @@ mod tests {
         cleanup_key(&pool, &subject_id).await;
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_rewrap_key_updates_kek_id() {
         let pool = setup_test_db().await;
@@ -1019,6 +1040,7 @@ mod tests {
         cleanup_key(&pool, &subject_id).await;
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_rewrap_key_is_idempotent() {
         let pool = setup_test_db().await;
@@ -1038,6 +1060,7 @@ mod tests {
         cleanup_key(&pool, &subject_id).await;
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_rewrap_key_missing_subject_returns_false() {
         let pool = setup_test_db().await;
@@ -1050,6 +1073,7 @@ mod tests {
         assert!(!result, "rewrap_key on a missing subject must return false");
     }
 
+    #[cfg(feature = "postgres")]
     #[tokio::test]
     async fn test_postgres_rewrap_preserves_dek_material() {
         // End-to-end: DEK material must be identical before and after a rewrap.
