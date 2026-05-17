@@ -32,5 +32,22 @@ tokio-util = { version = "0.7", features = ["rt"] }
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
 zen-engine = "0.55.0"
 
+[[test]]
+name = "postgres_view_repository"
+
+[[test]]
+name = "postgres_subject_lookup_hook"
+
 [dev-dependencies]
 cqrs-es-crypto = { path = "../cqrs-es-crypto", features = ["testing"] }
+cqrs-es = "0.5.0"
+serde_json = "1.0.149"
+sqlx = { version = "0.8.6", features = [
+    "json",
+    "migrate",
+    "postgres",
+    "runtime-tokio-native-tls",
+    "uuid",
+] }
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
