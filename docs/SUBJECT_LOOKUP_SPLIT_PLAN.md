@@ -89,19 +89,25 @@ transactional path is active — the write path is entirely owned by
 
 ### Why this is the right place
 
-`CryptoShreddingEventRepository` already holds everything needed:
+`CryptoShreddingEventRepository` already holds most of what is needed:
 
-- `cipher: Arc<PiiCipher>` — `generate_dek()` and `wrap_dek()` are
-  in-memory operations; `unwrap_dek()` for the fast-path read is also
-  available. No need to go through the `KeyStore` trait for the
-  transactional path.
+- `cipher: Arc<FieldCipher>` — stateless (no KEK material, no constructor
+  args). `FieldCipher::generate_dek()` produces fresh random DEK material;
+  `encrypt()`/`decrypt()` handle AES-256-GCM field encryption. No need to
+  go through the `KeyStore` trait for any of this.
 - `codec: Arc<dyn PiiEventCodec>` — `classify()` identifies which events
-  carry PII and returns the
- `subject_id` + plaintext fields.
+  carry PII and returns the `subject_id` + plaintext fields.
 - It lives in `cqrs-es-crypto`, the same crate as `PostgresKeyStore`, so it
   already knows the `subject_encryption_keys` table schema.
 - The `key_store` field is still used on the **read** path (`get_key` for
   decryption) and for the legacy non-transactional write path.
+
+The one thing it does **not** currently hold is a `KekProvider`. After the
+KEK-rotation split, DEK wrapping (`provider.wrap()`) and unwrapping
+(`provider.unwrap()`) are the responsibility of `KekProvider`, not
+`FieldCipher`. The transactional write path must therefore also hold an
+`Arc<dyn KekProvider>` for use inside `get_or_create_key_in_tx`. This is
+passed to `with_transactional_writes` alongside the pool.
 
 ### What stays domain-agnostic
 
@@ -250,19 +256,22 @@ Add two optional fields and builder methods:
 pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     pub(crate) inner: R,
     key_store: Arc<dyn KeyStore>,
-    cipher: Arc<PiiCipher>,
+    cipher: Arc<FieldCipher>,
     codec: Arc<dyn PiiEventCodec>,
     /// When set, `persist` uses a single Postgres transaction for DEK
     /// creation, event insertion, and hook writes. When `None`, falls back
     /// to the legacy path (encrypt → inner.persist).
     pool: Option<sqlx::Pool<sqlx::Postgres>>,
+    /// KEK provider used inside the transactional write path to wrap and
+    /// unwrap DEKs. Required when `pool` is `Some`.
+    kek_provider: Option<Arc<dyn KekProvider>>,
     /// Hooks called within the transactional persist. Ignored when `pool`
     /// is `None`.
     persist_hooks: Vec<Arc<dyn PersistHook>>,
 }
 
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
-    // Existing new() unchanged — pool defaults to None, hooks to empty vec.
+    // Existing new() unchanged — pool/kek_provider default to None, hooks to empty vec.
 
     /// Enable the transactional write path.
     ///
@@ -270,12 +279,18 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     /// atomically commits DEKs, encrypted events, and any persist-hook
     /// writes. The inner repository's `persist` is bypassed for writes
     /// (reads still delegate through it).
+    ///
+    /// `kek_provider` is needed to wrap newly generated DEKs under the
+    /// current primary KEK version, and to unwrap any DEK that was created
+    /// by a concurrent caller within the same transaction.
     #[must_use]
     pub fn with_transactional_writes(
         mut self,
         pool: sqlx::Pool<sqlx::Postgres>,
+        kek_provider: Arc<dyn KekProvider>,
     ) -> Self {
         self.pool = Some(pool);
+        self.kek_provider = Some(kek_provider);
         self
     }
 
@@ -412,9 +427,13 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
     /// Get or create a DEK within a transaction.
     ///
-    /// Mirrors `PostgresKeyStore::get_or_create_key` but uses the provided
-    /// transaction executor instead of an independent pool connection, so
-    /// the DEK INSERT is atomic with the caller's transaction.
+    /// Mirrors `PostgresKeyStore::get_or_create_key` but executes all SQL
+    /// against the provided transaction instead of an independent pool
+    /// connection, making the DEK INSERT atomic with the caller's transaction.
+    ///
+    /// DEK wrapping uses `self.kek_provider` (required when the transactional
+    /// path is active) rather than the `KeyStore` trait, mirroring exactly
+    /// what `PostgresKeyStore::get_or_create_key` does internally.
     async fn get_or_create_key_in_tx(
         &self,
         subject_id: &Uuid,
@@ -422,10 +441,14 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     ) -> Result<KeyMaterial, PersistenceError> {
         use sqlx::Row;
 
+        // Invariant: kek_provider is always Some when pool is Some.
+        let provider = self.kek_provider.as_ref()
+            .expect("kek_provider must be set alongside pool — use with_transactional_writes");
+
         // Fast path: DEK already exists (may be from a prior committed tx
         // or from an earlier event in the same batch).
         let existing = sqlx::query(
-            "SELECT key_id, wrapped_key \
+            "SELECT key_id, wrapped_key, kek_id \
              FROM subject_encryption_keys WHERE subject_id = $1"
         )
         .bind(subject_id)
@@ -434,26 +457,36 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
 
         if let Some(row) = existing {
-            let key_id: Uuid = row.get("key_id");
-            let wrapped_key: Vec<u8> = row.get("wrapped_key");
-            let material = self.cipher.unwrap_dek(key_id, &wrapped_key)
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
                 .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
             return Ok(material);
         }
 
-        // Generate, wrap, and insert within the transaction.
-        let dek = PiiCipher::generate_dek();
-        let wrapped_key = self.cipher.wrap_dek(&dek);
+        // Generate a fresh DEK, wrap it under the current primary KEK version,
+        // and INSERT within the transaction.
+        let dek = FieldCipher::generate_dek();
+        let kek = provider.current();
+        let wrapped = provider
+            .wrap(&kek, &dek)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
 
         let result = sqlx::query(
             "INSERT INTO subject_encryption_keys \
-             (key_id, subject_id, wrapped_key) \
-             VALUES ($1, $2, $3) \
+             (key_id, subject_id, wrapped_key, kek_id) \
+             VALUES ($1, $2, $3, $4) \
              ON CONFLICT (subject_id) DO NOTHING"
         )
         .bind(dek.key_id)
         .bind(subject_id)
-        .bind(&wrapped_key)
+        .bind(&wrapped.wrapped_key)
+        .bind(&wrapped.kek_id)
         .execute(&mut **tx)
         .await
         .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
@@ -461,7 +494,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         if result.rows_affected() == 0 {
             // Concurrent insert won the race — re-read from the tx.
             let row = sqlx::query(
-                "SELECT key_id, wrapped_key \
+                "SELECT key_id, wrapped_key, kek_id \
                  FROM subject_encryption_keys WHERE subject_id = $1"
             )
             .bind(subject_id)
@@ -469,9 +502,13 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .await
             .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
 
-            let key_id: Uuid = row.get("key_id");
-            let wrapped_key: Vec<u8> = row.get("wrapped_key");
-            let material = self.cipher.unwrap_dek(key_id, &wrapped_key)
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
                 .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
             Ok(material)
         } else {
@@ -482,9 +519,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 ```
 
 **Note:** `get_or_create_key_in_tx` mirrors `PostgresKeyStore::get_or_create_key`
-exactly, but executes against `&mut **tx` instead of `&self.pool`. The
-`PiiCipher` is used directly for `generate_dek`, `wrap_dek`, and
-`unwrap_dek` — no `KeyStore` trait involved on the transactional path.
+exactly, but executes against `&mut **tx` instead of `&self.pool`.
+- `FieldCipher::generate_dek()` is a static method — no instance needed.
+- `KekProvider::wrap()`/`unwrap()` handle DEK wrapping — `FieldCipher` holds
+  no KEK material and cannot do this itself.
+- The INSERT includes `kek_id` (added by the KEK rotation migration) so that
+  the re-wrap sweeper can identify and rotate stale DEKs.
 
 ### 4.7 `journey_dynamics`: implement `PersistHook`
 
@@ -543,6 +583,28 @@ impl PersistHook for SubjectLookupHook {
 
 ### 4.8 Update `config.rs`: wire in pool + hook
 
+The `cqrs_framework` function gains a `kek_provider` parameter so that it
+can pass it down to `with_transactional_writes`:
+
+```rust
+// BEFORE (signature)
+pub fn cqrs_framework(
+    pool: Pool<Postgres>,
+    key_store: Arc<dyn KeyStore>,
+    cipher: FieldCipher,
+) -> (Arc<CryptoCqrs>, Arc<StructuredJourneyViewRepository>)
+
+// AFTER (signature)
+pub fn cqrs_framework(
+    pool: Pool<Postgres>,
+    key_store: Arc<dyn KeyStore>,
+    cipher: FieldCipher,
+    kek_provider: Arc<dyn KekProvider>,
+) -> (Arc<CryptoCqrs>, Arc<StructuredJourneyViewRepository>)
+```
+
+And the wiring inside:
+
 ```rust
 // BEFORE
 let inner = PostgresEventRepository::new(pool);
@@ -554,9 +616,19 @@ let store = PersistedEventStore::new_event_store(crypto_repo);
 let inner = PostgresEventRepository::new(pool.clone());
 let codec = Arc::new(JourneyPiiCodec);
 let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec)
-    .with_transactional_writes(pool)
+    .with_transactional_writes(pool, kek_provider)
     .with_persist_hook(Arc::new(SubjectLookupHook));
 let store = PersistedEventStore::new_event_store(crypto_repo);
+```
+
+The call site in `state.rs` passes the already-constructed `provider`:
+
+```rust
+// BEFORE
+let (cqrs, journey_query) = cqrs_framework(pool, Arc::clone(&key_store), cipher);
+
+// AFTER
+let (cqrs, journey_query) = cqrs_framework(pool, Arc::clone(&key_store), cipher, Arc::clone(&provider));
 ```
 
 **The `CryptoCqrs` type alias does not change.** The outer type is still
@@ -728,8 +800,8 @@ No breaking changes; fully backwards-compatible.
 | `crates/cqrs-es-crypto/src/lib.rs` | Gate Postgres re-exports; re-export `PersistHook` under the gate |
 | `crates/journey_dynamics/Cargo.toml` | Add `"postgres"` to `cqrs-es-crypto` features |
 | `crates/journey_dynamics/src/subject_lookup_hook.rs` | **New file** — `SubjectLookupHook` implementing `PersistHook` |
-| `crates/journey_dynamics/src/config.rs` | Wire `.with_transactional_writes(pool).with_persist_hook(...)` |
-| `crates/journey_dynamics/src/state.rs` | Expose `pool` on `ApplicationState` |
+| `crates/journey_dynamics/src/config.rs` | Add `kek_provider: Arc<dyn KekProvider>` param to `cqrs_framework`; wire `.with_transactional_writes(pool, kek_provider).with_persist_hook(...)` |
+| `crates/journey_dynamics/src/state.rs` | Pass `Arc::clone(&provider)` to `cqrs_framework`; expose `pool` on `ApplicationState` |
 | `crates/journey_dynamics/src/view_repository.rs` | `find_subjects_by_email` → query `subject_lookup`; add `delete_subject_lookup` |
 | `crates/journey_dynamics/src/route_handler.rs` | After DEK deletion, delete from `subject_lookup` |
 | `crates/journey_dynamics/src/lib.rs` | Add `mod subject_lookup_hook;` |
