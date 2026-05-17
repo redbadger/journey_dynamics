@@ -1040,40 +1040,12 @@ mod tests {
     #[tokio::test]
     async fn test_find_subjects_by_email_case_insensitive() {
         // Email stored in mixed case; query with lowercase — must still match.
+        // find_subjects_by_email reads subject_lookup only, so no journey setup needed.
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
-        let journey_id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        // Use a unique suffix to avoid collisions with other test rows.
         let stored_email = format!("Alice+{}@Example.COM", Uuid::new_v4());
 
-        repo.dispatch(
-            &journey_id.to_string(),
-            &[
-                EventEnvelope {
-                    aggregate_id: journey_id.to_string(),
-                    sequence: 1,
-                    payload: JourneyEvent::Started { id: journey_id },
-                    metadata: std::collections::HashMap::default(),
-                },
-                EventEnvelope {
-                    aggregate_id: journey_id.to_string(),
-                    sequence: 2,
-                    payload: JourneyEvent::PersonCaptured {
-                        person_ref: "passenger_0".to_string(),
-                        subject_id,
-                        name: "Alice Smith".to_string(),
-                        email: stored_email.clone(),
-                        phone: None,
-                    },
-                    metadata: std::collections::HashMap::default(),
-                },
-            ],
-        )
-        .await;
-
-        // subject_lookup is populated by SubjectLookupHook on the transactional
-        // persist path, not by the projection. Insert directly to test the query.
         sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
             .bind(subject_id)
             .bind(&stored_email)
@@ -1088,59 +1060,24 @@ mod tests {
         assert_eq!(subjects.len(), 1);
         assert_eq!(subjects[0], subject_id);
 
-        cleanup_test_journey(&pool, &journey_id).await;
         cleanup_subject_lookup(&pool, &subject_id).await;
     }
 
     #[tokio::test]
     async fn test_find_subjects_by_email_deduplicates_across_journeys() {
-        // Same subject appears in two journeys — subject_lookup has one row (PK
-        // is subject_id), so the result must contain exactly one entry.
+        // subject_lookup has subject_id as PK — one row regardless of how many
+        // journeys a subject appears in.  The query must return exactly one result.
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
-        let journey_id_1 = Uuid::new_v4();
-        let journey_id_2 = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let unique_email = format!("repeat+{}@example.com", Uuid::new_v4());
 
-        for journey_id in [journey_id_1, journey_id_2] {
-            repo.dispatch(
-                &journey_id.to_string(),
-                &[
-                    EventEnvelope {
-                        aggregate_id: journey_id.to_string(),
-                        sequence: 1,
-                        payload: JourneyEvent::Started { id: journey_id },
-                        metadata: std::collections::HashMap::default(),
-                    },
-                    EventEnvelope {
-                        aggregate_id: journey_id.to_string(),
-                        sequence: 2,
-                        payload: JourneyEvent::PersonCaptured {
-                            person_ref: "passenger_0".to_string(),
-                            subject_id,
-                            name: "Alice Smith".to_string(),
-                            email: unique_email.clone(),
-                            phone: None,
-                        },
-                        metadata: std::collections::HashMap::default(),
-                    },
-                ],
-            )
-            .await;
-        }
-
-        // subject_id is the PK of subject_lookup — one row regardless of how
-        // many journeys the subject appears in.
-        sqlx::query(
-            "INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2)) \
-             ON CONFLICT (subject_id) DO NOTHING",
-        )
-        .bind(subject_id)
-        .bind(&unique_email)
-        .execute(&pool)
-        .await
-        .unwrap();
+        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
+            .bind(subject_id)
+            .bind(&unique_email)
+            .execute(&pool)
+            .await
+            .unwrap();
 
         let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
         assert_eq!(
@@ -1150,8 +1087,6 @@ mod tests {
         );
         assert_eq!(subjects[0], subject_id);
 
-        cleanup_test_journey(&pool, &journey_id_1).await;
-        cleanup_test_journey(&pool, &journey_id_2).await;
         cleanup_subject_lookup(&pool, &subject_id).await;
     }
 
@@ -1161,36 +1096,8 @@ mod tests {
         // Verify the email lookup returns nothing once that deletion has occurred.
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
-        let journey_id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let unique_email = format!("gone+{}@example.com", Uuid::new_v4());
-
-        // Simulate PersonCaptured: projection writes to journey_person;
-        // hook (in production) would write to subject_lookup.
-        repo.dispatch(
-            &journey_id.to_string(),
-            &[
-                EventEnvelope {
-                    aggregate_id: journey_id.to_string(),
-                    sequence: 1,
-                    payload: JourneyEvent::Started { id: journey_id },
-                    metadata: std::collections::HashMap::default(),
-                },
-                EventEnvelope {
-                    aggregate_id: journey_id.to_string(),
-                    sequence: 2,
-                    payload: JourneyEvent::PersonCaptured {
-                        person_ref: "passenger_0".to_string(),
-                        subject_id,
-                        name: "Alice Smith".to_string(),
-                        email: unique_email.clone(),
-                        phone: None,
-                    },
-                    metadata: std::collections::HashMap::default(),
-                },
-            ],
-        )
-        .await;
 
         sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
             .bind(subject_id)
@@ -1199,19 +1106,125 @@ mod tests {
             .await
             .unwrap();
 
-        // Simulate shredding: route handler deletes the subject_lookup row.
-        sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
-            .bind(subject_id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        // Simulate shredding via the actual method the route handler calls.
+        repo.delete_subject_lookup(&subject_id).await.unwrap();
 
         let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
         assert!(
             subjects.is_empty(),
             "shredded subject must not be returned by email lookup"
         );
+    }
 
-        cleanup_test_journey(&pool, &journey_id).await;
+    #[tokio::test]
+    async fn test_find_subjects_by_email_unknown_returns_empty() {
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let unknown = format!("nobody+{}@example.com", Uuid::new_v4());
+
+        let subjects = repo.find_subjects_by_email(&unknown).await.unwrap();
+        assert!(subjects.is_empty(), "unknown email must return empty vec");
+    }
+
+    #[tokio::test]
+    async fn test_find_subjects_by_email_returns_multiple_subjects() {
+        // Two distinct subjects sharing the same email address (e.g. random
+        // UUID-per-slot strategy) must both be returned.
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+        let shared_email = format!("shared+{}@example.com", Uuid::new_v4());
+
+        for subject_id in [subject_a, subject_b] {
+            sqlx::query(
+                "INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))",
+            )
+            .bind(subject_id)
+            .bind(&shared_email)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut subjects = repo.find_subjects_by_email(&shared_email).await.unwrap();
+        subjects.sort();
+        let mut expected = vec![subject_a, subject_b];
+        expected.sort();
+        assert_eq!(subjects, expected, "both subjects must be returned");
+
+        cleanup_subject_lookup(&pool, &subject_a).await;
+        cleanup_subject_lookup(&pool, &subject_b).await;
+    }
+
+    // ── delete_subject_lookup ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_delete_subject_lookup_removes_row() {
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let subject_id = Uuid::new_v4();
+
+        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
+            .bind(subject_id)
+            .bind("test@example.com")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        repo.delete_subject_lookup(&subject_id).await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM subject_lookup WHERE subject_id = $1")
+                .bind(subject_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0, "row must be gone after delete_subject_lookup");
+    }
+
+    #[tokio::test]
+    async fn test_delete_subject_lookup_is_idempotent() {
+        // Calling delete on a subject_id that has no row must not error.
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let subject_id = Uuid::new_v4();
+
+        repo.delete_subject_lookup(&subject_id).await.unwrap();
+        repo.delete_subject_lookup(&subject_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_delete_subject_lookup_does_not_affect_other_subjects() {
+        let pool = setup_test_db().await;
+        let repo = StructuredJourneyViewRepository::new(pool.clone());
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+
+        for subject_id in [subject_a, subject_b] {
+            sqlx::query(
+                "INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))",
+            )
+            .bind(subject_id)
+            .bind(format!("test+{subject_id}@example.com"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        repo.delete_subject_lookup(&subject_a).await.unwrap();
+
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM subject_lookup WHERE subject_id = $1")
+                .bind(subject_b)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 1,
+            "subject_b must be unaffected by subject_a deletion"
+        );
+
+        cleanup_subject_lookup(&pool, &subject_b).await;
     }
 }

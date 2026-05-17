@@ -228,10 +228,10 @@ jsonpath "$.persons[1].forgotten" == false
 # works regardless of case.
 #
 # The service:
-#   1. SELECTs DISTINCT subject_id FROM journey_person
-#      WHERE lower(email) = lower('clara.dupont@example.com') AND NOT forgotten
-#   2. For each subject_id: deletes the DEK and emits SubjectForgotten on
-#      every journey that referenced it.
+#   1. SELECTs subject_id FROM subject_lookup
+#      WHERE email_lower = lower('clara.dupont@example.com')
+#   2. For each subject_id: deletes the DEK, removes the subject_lookup row,
+#      and emits SubjectForgotten on every journey that referenced it.
 # ===========================================
 DELETE {{host}}/subjects/by-email
 Content-Type: application/json
