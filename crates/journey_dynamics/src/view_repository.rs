@@ -226,6 +226,22 @@ impl StructuredJourneyViewRepository {
             .collect())
     }
 
+    /// Remove the `subject_lookup` row for `subject_id`.
+    ///
+    /// Called by the shredding route handler after the DEK has been deleted.
+    /// The deletion is the GDPR erasure of the email address from this table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
+    pub async fn delete_subject_lookup(&self, subject_id: &Uuid) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
+            .bind(subject_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
     async fn update_view(
         &self,

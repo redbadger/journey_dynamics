@@ -2,7 +2,7 @@
 //!
 //! For every `PersonCaptured` event, a `(subject_id, email_lower)` row is
 //! written to `subject_lookup` inside the same transaction as the event
-//! INSERT.  This guarantees the email → subject_id mapping is always
+//! INSERT.  This guarantees the email → `subject_id` mapping is always
 //! consistent with the event store — no crash window.
 
 use async_trait::async_trait;
