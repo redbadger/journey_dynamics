@@ -207,12 +207,13 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn find_subjects_by_email(&self, email: &str) -> Result<Vec<Uuid>, sqlx::Error> {
+        // subject_lookup is the authoritative email → subject_id index.
+        // Rows are deleted on shredding, so no forgotten-filter is needed.
         let rows = sqlx::query(
             r"
-            SELECT DISTINCT subject_id
-            FROM journey_person
-            WHERE lower(email) = lower($1)
-              AND NOT forgotten
+            SELECT subject_id
+            FROM subject_lookup
+            WHERE email_lower = lower($1)
             ",
         )
         .bind(email)
@@ -500,6 +501,13 @@ mod tests {
     async fn cleanup_test_journey(pool: &Pool<Postgres>, journey_id: &Uuid) {
         let _ = sqlx::query("DELETE FROM journey_view WHERE id = $1")
             .bind(journey_id)
+            .execute(pool)
+            .await;
+    }
+
+    async fn cleanup_subject_lookup(pool: &Pool<Postgres>, subject_id: &Uuid) {
+        let _ = sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
+            .bind(subject_id)
             .execute(pool)
             .await;
     }
@@ -1048,6 +1056,15 @@ mod tests {
         )
         .await;
 
+        // subject_lookup is populated by SubjectLookupHook on the transactional
+        // persist path, not by the projection. Insert directly to test the query.
+        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
+            .bind(subject_id)
+            .bind(&stored_email)
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let subjects = repo
             .find_subjects_by_email(&stored_email.to_lowercase())
             .await
@@ -1056,11 +1073,13 @@ mod tests {
         assert_eq!(subjects[0], subject_id);
 
         cleanup_test_journey(&pool, &journey_id).await;
+        cleanup_subject_lookup(&pool, &subject_id).await;
     }
 
     #[tokio::test]
     async fn test_find_subjects_by_email_deduplicates_across_journeys() {
-        // Same subject appears in two journeys — must be returned only once.
+        // Same subject appears in two journeys — subject_lookup has one row (PK
+        // is subject_id), so the result must contain exactly one entry.
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
         let journey_id_1 = Uuid::new_v4();
@@ -1095,6 +1114,18 @@ mod tests {
             .await;
         }
 
+        // subject_id is the PK of subject_lookup — one row regardless of how
+        // many journeys the subject appears in.
+        sqlx::query(
+            "INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2)) \
+             ON CONFLICT (subject_id) DO NOTHING",
+        )
+        .bind(subject_id)
+        .bind(&unique_email)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
         assert_eq!(
             subjects.len(),
@@ -1105,16 +1136,21 @@ mod tests {
 
         cleanup_test_journey(&pool, &journey_id_1).await;
         cleanup_test_journey(&pool, &journey_id_2).await;
+        cleanup_subject_lookup(&pool, &subject_id).await;
     }
 
     #[tokio::test]
-    async fn test_find_subjects_by_email_excludes_forgotten() {
+    async fn test_find_subjects_by_email_excludes_shredded() {
+        // After shredding, the subject_lookup row is deleted by the route handler.
+        // Verify the email lookup returns nothing once that deletion has occurred.
         let pool = setup_test_db().await;
         let repo = StructuredJourneyViewRepository::new(pool.clone());
         let journey_id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let unique_email = format!("gone+{}@example.com", Uuid::new_v4());
 
+        // Simulate PersonCaptured: projection writes to journey_person;
+        // hook (in production) would write to subject_lookup.
         repo.dispatch(
             &journey_id.to_string(),
             &[
@@ -1136,20 +1172,28 @@ mod tests {
                     },
                     metadata: std::collections::HashMap::default(),
                 },
-                EventEnvelope {
-                    aggregate_id: journey_id.to_string(),
-                    sequence: 3,
-                    payload: JourneyEvent::SubjectForgotten { subject_id },
-                    metadata: std::collections::HashMap::default(),
-                },
             ],
         )
         .await;
 
+        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
+            .bind(subject_id)
+            .bind(&unique_email)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Simulate shredding: route handler deletes the subject_lookup row.
+        sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
+            .bind(subject_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
         let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
         assert!(
             subjects.is_empty(),
-            "forgotten subject must not be returned by email lookup"
+            "shredded subject must not be returned by email lookup"
         );
 
         cleanup_test_journey(&pool, &journey_id).await;
