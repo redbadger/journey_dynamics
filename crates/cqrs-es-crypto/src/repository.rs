@@ -472,6 +472,83 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             Ok(dek)
         }
     }
+
+    /// Executes the full write in a single Postgres transaction:
+    /// DEK creation, event encryption, event INSERT, and hook writes.
+    ///
+    /// Called by `persist` when `self.pool` is `Some`.
+    async fn persist_in_transaction<A: Aggregate>(
+        &self,
+        events: &[SerializedEvent],
+        snapshot_update: Option<(String, Value, usize)>,
+        pool: &sqlx::Pool<sqlx::Postgres>,
+    ) -> Result<(), PersistenceError> {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        // 1. Encrypt events, creating DEKs inside the transaction.
+        let encrypted = self.encrypt_events_in_tx(events, &mut tx).await?;
+
+        // 2. Insert encrypted events.
+        for event in &encrypted {
+            let payload = serde_json::to_value(&event.payload)?;
+            let metadata = serde_json::to_value(&event.metadata)?;
+            sqlx::query(
+                "INSERT INTO events \
+                 (aggregate_type, aggregate_id, sequence, \
+                  event_type, event_version, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(&event.aggregate_type)
+            .bind(&event.aggregate_id)
+            .bind(
+                // sequence is a small positive integer; i64::MAX (~9.2e18) is unreachable.
+                i64::try_from(event.sequence).expect("sequence fits in i64"),
+            )
+            .bind(&event.event_type)
+            .bind(&event.event_version)
+            .bind(&payload)
+            .bind(&metadata)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        }
+
+        // 3. Handle snapshot if present.
+        //    Always `None` when using `PersistedEventStore::new_event_store`
+        //    (the normal configuration), but handled for completeness.
+        if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
+            sqlx::query(
+                "INSERT INTO snapshots \
+                 (aggregate_type, aggregate_id, last_sequence, current_snapshot, payload) \
+                 VALUES ($1, $2, 0, $3, $4) \
+                 ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
+                 SET last_sequence = EXCLUDED.last_sequence, \
+                     current_snapshot = $3, payload = $4",
+            )
+            .bind(A::TYPE)
+            .bind(&aggregate_id)
+            .bind(i64::try_from(current_snapshot).expect("snapshot index fits in i64"))
+            .bind(&aggregate)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        }
+
+        // 4. Call hooks with the UNENCRYPTED events inside the transaction.
+        for hook in &self.persist_hooks {
+            hook.on_persist(events, &mut tx).await?;
+        }
+
+        // 5. Commit — DEKs, events, and hook writes are now atomically visible.
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        Ok(())
+    }
 }
 
 impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEventRepository<R> {
@@ -512,6 +589,18 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
         events: &[SerializedEvent],
         snapshot_update: Option<(String, Value, usize)>,
     ) -> Result<(), PersistenceError> {
+        // Transactional path: manage the entire write — DEK creation, event
+        // encryption, event INSERTs, and hook writes — in one transaction.
+        // Only compiled and active when the `postgres` feature is enabled and
+        // `with_transactional_writes` has been called.
+        #[cfg(feature = "postgres")]
+        if let Some(pool) = &self.pool {
+            return self
+                .persist_in_transaction::<A>(events, snapshot_update, pool)
+                .await;
+        }
+
+        // Legacy path: encrypt then delegate to the inner repository.
         let encrypted = self.encrypt_events(events).await?;
         self.inner.persist::<A>(&encrypted, snapshot_update).await
     }
