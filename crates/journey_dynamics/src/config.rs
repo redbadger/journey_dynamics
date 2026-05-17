@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use cqrs_es::{CqrsFramework, Query, persist::PersistedEventStore};
-use cqrs_es_crypto::{CryptoShreddingEventRepository, FieldCipher, KeyStore};
+use cqrs_es_crypto::{CryptoShreddingEventRepository, FieldCipher, KekProvider, KeyStore};
 use postgres_es::PostgresEventRepository;
 use sqlx::{Pool, Postgres};
 
@@ -10,6 +10,7 @@ use crate::{
     domain::journey::{Journey, JourneyServices},
     pii_codec::JourneyPiiCodec,
     services::decision_engine::GoRulesDecisionEngine,
+    subject_lookup_hook::SubjectLookupHook,
     view_repository::StructuredJourneyViewRepository,
 };
 
@@ -36,6 +37,7 @@ pub fn cqrs_framework(
     pool: Pool<Postgres>,
     key_store: Arc<dyn KeyStore>,
     cipher: FieldCipher,
+    kek_provider: Arc<dyn KekProvider>,
 ) -> (Arc<CryptoCqrs>, Arc<StructuredJourneyViewRepository>) {
     let simple_query = SimpleLoggingQuery {};
 
@@ -58,9 +60,11 @@ pub fn cqrs_framework(
 
     let services = JourneyServices::new(decision_engine, schema_validator);
 
-    let inner = PostgresEventRepository::new(pool);
+    let inner = PostgresEventRepository::new(pool.clone());
     let codec = Arc::new(JourneyPiiCodec);
-    let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec);
+    let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec)
+        .with_transactional_writes(pool, kek_provider)
+        .with_persist_hook(Arc::new(SubjectLookupHook));
     let store = PersistedEventStore::new_event_store(crypto_repo);
 
     (
