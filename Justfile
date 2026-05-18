@@ -1,3 +1,5 @@
+set dotenv-load
+
 version := `grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/'`
 
 build: generate
@@ -16,6 +18,15 @@ test-lib:
 test:
     cargo nextest run --all-features
     cargo test --doc --all-features --workspace --exclude cqrs-es-crypto-derive
+
+# Remove rows written by integration tests that may have leaked due to a
+# mid-test panic (cleanup_key did not fire).  Safe to run while the app is
+# stopped; do not run while tests are executing.
+#
+# kek_id values starting with "test:" are exclusively written by the Postgres
+# integration tests and are never produced by the running application.
+clean-test-keys:
+    psql "$DATABASE_URL" -c "DELETE FROM subject_encryption_keys WHERE kek_id LIKE 'test:%';"
 
 # Assumes the server is already running on localhost:3030.
 # Files 01-05 are step-by-step tutorial examples that require a manual

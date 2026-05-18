@@ -37,7 +37,7 @@ pub struct EncryptedPayload {
     /// 96-bit (12-byte) nonce used during encryption.
     ///
     /// Must be stored alongside the ciphertext and supplied verbatim to
-    /// [`PiiCipher::decrypt`].
+    /// [`FieldCipher::decrypt`].
     pub nonce: Vec<u8>,
 }
 
@@ -57,10 +57,28 @@ pub enum CryptoError {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Handles AES-256-GCM field encryption/decryption and AES-256-KWP key wrapping.
+///
+/// # Deprecation
+///
+/// `PiiCipher` mixed two unrelated concerns: AES-GCM field encryption (which only
+/// needs a DEK) and AES-KWP DEK wrapping (which needs a KEK).  These are now split:
+///
+/// - Use [`FieldCipher`] for field encryption and decryption.
+/// - Use [`StaticKekProvider`](crate::kek::StaticKekProvider) (or any
+///   [`KekProvider`](crate::kek::KekProvider) implementation) for DEK wrapping.
+///
+/// `PiiCipher` is retained only for backwards compatibility with existing
+/// event stores and will be removed in a future release.
+#[deprecated(
+    since = "0.1.5",
+    note = "Use `FieldCipher` for field encryption and `StaticKekProvider` \
+            (or another `KekProvider`) for DEK wrapping."
+)]
 pub struct PiiCipher {
     kek: Zeroizing<Vec<u8>>, // 32-byte Key Encryption Key
 }
 
+#[allow(deprecated)] // impl block for the deprecated PiiCipher itself
 impl PiiCipher {
     /// Construct from raw KEK bytes.
     ///
@@ -192,10 +210,110 @@ impl PiiCipher {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// FieldCipher
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A stateless cipher that handles only AES-256-GCM field encryption and decryption.
+///
+/// Unlike [`PiiCipher`], `FieldCipher` holds **no KEK material** — it only operates on
+/// DEKs that are supplied by the caller.  This is the cipher used by
+/// [`CryptoShreddingEventRepository`](crate::repository::CryptoShreddingEventRepository)
+/// for encrypting and decrypting PII fields in event payloads.
+///
+/// DEK generation lives here too because it is purely about producing random AES-256
+/// key material; it has no dependency on a KEK.
+///
+/// # Relationship to `PiiCipher`
+///
+/// `PiiCipher` mixes field encryption (DEK-based) with DEK wrapping (KEK-based).  This
+/// struct contains only the field-encryption half, leaving the KEK concerns to
+/// [`KekProvider`](crate::kek::KekProvider) implementations.  `PiiCipher` is retained
+/// for backwards compatibility but is superseded by `FieldCipher` + a `KekProvider`.
+#[derive(Default)]
+pub struct FieldCipher;
+
+impl FieldCipher {
+    /// Construct a new (stateless) `FieldCipher`.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Generate a fresh random 256-bit DEK using the OS CSPRNG.
+    #[must_use]
+    pub fn generate_dek() -> KeyMaterial {
+        let key = Aes256Gcm::generate_key(OsRng);
+        KeyMaterial {
+            key_id: Uuid::new_v4(),
+            key: Zeroizing::new(key.to_vec()),
+        }
+    }
+
+    /// Encrypt `plaintext` with `dek` using AES-256-GCM.
+    ///
+    /// A fresh random 96-bit nonce is generated on every call.
+    /// `aad` is authenticated additional data; callers should include the aggregate ID
+    /// and event sequence number so ciphertext cannot be transplanted between events.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dek.key` is not exactly 32 bytes.
+    pub fn encrypt(&self, dek: &KeyMaterial, plaintext: &[u8], aad: &[u8]) -> EncryptedPayload {
+        let cipher = Aes256Gcm::new_from_slice(&dek.key)
+            .expect("DEK is always 32 bytes — invariant of KeyMaterial");
+        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let ciphertext = cipher
+            .encrypt(
+                &nonce,
+                Payload {
+                    msg: plaintext,
+                    aad,
+                },
+            )
+            .expect("AES-256-GCM encryption cannot fail given a valid key and nonce");
+        EncryptedPayload {
+            ciphertext,
+            nonce: nonce.to_vec(),
+        }
+    }
+
+    /// Decrypt `encrypted` with `dek` using AES-256-GCM.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CryptoError::DecryptionFailed`] if the authentication tag is invalid or
+    /// the supplied `aad` does not match the `aad` used during encryption.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `dek.key` is not exactly 32 bytes.
+    pub fn decrypt(
+        &self,
+        dek: &KeyMaterial,
+        encrypted: &EncryptedPayload,
+        aad: &[u8],
+    ) -> Result<Vec<u8>, CryptoError> {
+        let cipher = Aes256Gcm::new_from_slice(&dek.key)
+            .expect("DEK is always 32 bytes — invariant of KeyMaterial");
+        let nonce = Nonce::from_slice(&encrypted.nonce);
+        cipher
+            .decrypt(
+                nonce,
+                Payload {
+                    msg: &encrypted.ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| CryptoError::DecryptionFailed)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(deprecated)] // PiiCipher tests are retained to verify backwards-compatible behaviour.
 mod tests {
     use super::*;
 
@@ -394,6 +512,40 @@ mod tests {
             matches!(result, Err(CryptoError::KeyUnwrapFailed)),
             "unwrap_dek with the wrong KEK must return KeyUnwrapFailed"
         );
+    }
+
+    // ── FieldCipher ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn field_cipher_encrypt_decrypt_round_trip() {
+        let cipher = FieldCipher::new();
+        let dek = FieldCipher::generate_dek();
+        let plaintext = b"sensitive PII via FieldCipher";
+        let aad = b"agg-abc:5";
+
+        let encrypted = cipher.encrypt(&dek, plaintext, aad);
+        let decrypted = cipher
+            .decrypt(&dek, &encrypted, aad)
+            .expect("round-trip must succeed");
+        assert_eq!(decrypted, plaintext);
+    }
+
+    #[test]
+    fn field_cipher_decrypt_fails_with_wrong_aad() {
+        let cipher = FieldCipher::new();
+        let dek = FieldCipher::generate_dek();
+        let plaintext = b"sensitive PII";
+        let encrypted = cipher.encrypt(&dek, plaintext, b"agg-abc:1");
+        let result = cipher.decrypt(&dek, &encrypted, b"agg-abc:2");
+        assert!(matches!(result, Err(CryptoError::DecryptionFailed)));
+    }
+
+    #[test]
+    fn field_cipher_generate_dek_is_unique() {
+        let dek1 = FieldCipher::generate_dek();
+        let dek2 = FieldCipher::generate_dek();
+        assert_ne!(*dek1.key, *dek2.key);
+        assert_ne!(dek1.key_id, dek2.key_id);
     }
 
     // ── AAD convention ────────────────────────────────────────────────────────
