@@ -254,6 +254,7 @@ impl StructuredJourneyViewRepository {
                 format!("Invalid UUID: {e}"),
             )))
         })?;
+        let mut tx = self.pool.begin().await?;
 
         match &event.payload {
             JourneyEvent::Started { id } => {
@@ -268,7 +269,7 @@ impl StructuredJourneyViewRepository {
                 .bind("InProgress")
                 .bind::<Option<String>>(None)
                 .bind(event.sequence as i64)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -287,7 +288,7 @@ impl StructuredJourneyViewRepository {
                 .bind(journey_id)
                 .bind(data)
                 .bind(event.sequence as i64)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -320,7 +321,7 @@ impl StructuredJourneyViewRepository {
                 .bind(name)
                 .bind(email)
                 .bind(phone)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -332,7 +333,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -351,7 +352,7 @@ impl StructuredJourneyViewRepository {
                 .bind(journey_id)
                 .bind(person_ref)
                 .bind(data)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -363,7 +364,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -385,7 +386,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(journey_id)
                 .bind(subject_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -397,7 +398,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -410,7 +411,7 @@ impl StructuredJourneyViewRepository {
                     ",
                 )
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -422,7 +423,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(journey_id)
                 .bind(suggested_actions)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
 
                 sqlx::query(
@@ -434,7 +435,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -451,7 +452,7 @@ impl StructuredJourneyViewRepository {
                 .bind(to_step)
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
 
@@ -468,11 +469,12 @@ impl StructuredJourneyViewRepository {
                 .bind("Complete")
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
         }
 
+        tx.commit().await?;
         Ok(())
     }
 }
