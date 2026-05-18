@@ -103,7 +103,8 @@ pub async fn new_application_state() -> ApplicationState {
     // AES-256-GCM field encryption — it does not need the KEK at all.
     let cipher = FieldCipher::new();
 
-    let (cqrs, journey_query) = cqrs_framework(pool, Arc::clone(&key_store), cipher);
+    let (cqrs, journey_query) =
+        cqrs_framework(pool, Arc::clone(&key_store), cipher, Arc::clone(&provider));
 
     // Spawn the background re-wrap sweeper.  It polls every 5 minutes and re-wraps
     // any DEKs still encrypted under a retired KEK version.  Safe to run alongside

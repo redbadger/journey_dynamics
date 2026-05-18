@@ -12,25 +12,30 @@ lint:
     cargo fmt --all --check
     cargo clippy -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
 
-test-lib:
+# Run unit tests
+test-unit:
+    cargo nextest run --all-features --lib
+
+# Run doc tests
+test-doc:
+    cargo test --doc --all-features
+
+# Run unit and integration tests
+test-all:
+    cargo nextest run --all-features
+
+# Run all tests: unit, integration, doc (requires DATABASE_URL)
+test: test-all test-doc
+
+# Snapshot review helper — lib tests only, no database required.
+test-review:
     cargo insta test --review --test-runner nextest --all-features --lib
 
-test:
-    cargo nextest run --all-features
-    cargo test --doc --all-features --workspace --exclude cqrs-es-crypto-derive
-
-# Remove rows written by integration tests that may have leaked due to a
-# mid-test panic (cleanup_key did not fire).  Safe to run while the app is
-# stopped; do not run while tests are executing.
-#
-# kek_id values starting with "test:" are exclusively written by the Postgres
-# integration tests and are never produced by the running application.
+# Remove rows written by integration tests that may have leaked
 clean-test-keys:
     psql "$DATABASE_URL" -c "DELETE FROM subject_encryption_keys WHERE kek_id LIKE 'test:%';"
 
-# Assumes the server is already running on localhost:3030.
-# Files 01-05 are step-by-step tutorial examples that require a manual
-# --variable journey_id=<uuid> and are not run here.
+# Assumes the server is already running on localhost:3030
 test-hurl:
     hurl --variable host=http://localhost:3030 --test \
         tests/error-cases.hurl \
@@ -38,18 +43,10 @@ test-hurl:
         tests/full-flight-booking_with_shredding.hurl \
         tests/full-flight-booking_with_shredding_by_email.hurl
 
+# Lint, build, test, and run hurl tests (needs a running server)
 ci: lint build test test-hurl
 
-# Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io.
-#
-# Publishing order matters: the derive crate must go first because the main
-# crate optionally depends on it. The derive crate's dev-dependency on
-# cqrs-es-crypto is path-only (no version), so cargo excludes it from the
-# published manifest — avoiding a chicken-and-egg resolution failure.
-# cargo publish waits for each crate to be available in the index before
-# returning, so no sleep is needed between steps.
-#
-# Requires `cargo login` to have been run with a valid crates.io token.
+# Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io
 publish:
     cargo publish -p cqrs-es-crypto-derive
     cargo publish -p cqrs-es-crypto

@@ -47,7 +47,13 @@ pub async fn shred_subject(
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
 
-    // 3. For each affected journey, emit a SubjectForgotten audit event via the
+    // 3. Remove the email → subject_id lookup entry.  The DEK is already gone so
+    //    shredding is complete; a failure here is logged but does not abort.
+    if let Err(err) = state.journey_query.delete_subject_lookup(&subject_id).await {
+        eprintln!("Error removing subject_lookup for {subject_id}: {err:#?}");
+    }
+
+    // 4. For each affected journey, emit a SubjectForgotten audit event via the
     //    ForgetSubject command. The view-repository handler for SubjectForgotten nulls
     //    out the person slot and sets forgotten = TRUE.
     for aggregate_id in &journeys {
@@ -113,7 +119,12 @@ pub async fn shred_subjects_by_email(
             return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
         }
 
-        // 2c. Emit a SubjectForgotten audit event on every affected journey.
+        // 2c. Remove the email → subject_id lookup entry.
+        if let Err(err) = state.journey_query.delete_subject_lookup(subject_id).await {
+            eprintln!("Error removing subject_lookup for {subject_id}: {err:#?}");
+        }
+
+        // 2d. Emit a SubjectForgotten audit event on every affected journey.
         for aggregate_id in &journeys {
             if let Err(err) = state
                 .cqrs

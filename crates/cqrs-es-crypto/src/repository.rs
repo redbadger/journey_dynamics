@@ -37,7 +37,11 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::cipher::{EncryptedPayload, FieldCipher};
+#[cfg(feature = "postgres")]
+use crate::kek::{KekProvider, WrappedDek};
 use crate::key_store::KeyStore;
+#[cfg(feature = "postgres")]
+use async_trait::async_trait;
 
 // ── PiiEventCodec — types ─────────────────────────────────────────────────────
 
@@ -152,6 +156,30 @@ pub trait PiiEventCodec: Send + Sync {
 
 // ── CryptoShreddingEventRepository ───────────────────────────────────────────
 
+// ── PersistHook ──────────────────────────────────────────────────────────────
+
+/// Hook called within the transactional persist path.
+///
+/// Receives the **unencrypted** serialised events and a live Postgres
+/// transaction. Implementations can inspect event payloads and perform
+/// domain-specific writes (e.g. subject-lookup inserts) that will be
+/// committed atomically with the event and DEK inserts.
+///
+/// If the hook returns an error, the entire transaction is rolled back.
+///
+/// Only available with the `postgres` feature.
+#[cfg(feature = "postgres")]
+#[async_trait]
+pub trait PersistHook: Send + Sync {
+    async fn on_persist(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), PersistenceError>;
+}
+
+// ── CryptoShreddingEventRepository ───────────────────────────────────────────
+
 /// Wraps an inner [`PersistedEventRepository`] and transparently encrypts /
 /// decrypts PII-bearing event payloads for GDPR crypto-shredding.
 ///
@@ -162,6 +190,18 @@ pub struct CryptoShreddingEventRepository<R: PersistedEventRepository> {
     key_store: Arc<dyn KeyStore>,
     cipher: Arc<FieldCipher>,
     codec: Arc<dyn PiiEventCodec>,
+    /// Postgres connection pool for the transactional write path.
+    /// When `Some`, `persist` manages its own transaction instead of
+    /// delegating to the inner repository.
+    #[cfg(feature = "postgres")]
+    pool: Option<sqlx::Pool<sqlx::Postgres>>,
+    /// KEK provider used to wrap/unwrap DEKs within the transaction.
+    /// Required when `pool` is `Some`.
+    #[cfg(feature = "postgres")]
+    kek_provider: Option<Arc<dyn KekProvider>>,
+    /// Hooks called within the transactional persist, in registration order.
+    #[cfg(feature = "postgres")]
+    persist_hooks: Vec<Arc<dyn PersistHook>>,
 }
 
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
@@ -177,6 +217,12 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             key_store,
             cipher: Arc::new(cipher),
             codec,
+            #[cfg(feature = "postgres")]
+            pool: None,
+            #[cfg(feature = "postgres")]
+            kek_provider: None,
+            #[cfg(feature = "postgres")]
+            persist_hooks: Vec::new(),
         }
     }
 
@@ -187,7 +233,45 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     pub const fn inner(&self) -> &R {
         &self.inner
     }
+}
 
+// ── Builder methods (postgres feature) ───────────────────────────────────
+
+#[cfg(feature = "postgres")]
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    /// Enable the transactional write path.
+    ///
+    /// When set, `persist` will manage a single Postgres transaction that
+    /// atomically commits DEKs, encrypted events, and any hook writes.
+    /// The inner repository's `persist` is bypassed for writes; reads
+    /// still delegate through it.
+    ///
+    /// `kek_provider` is used to wrap newly generated DEKs and to unwrap
+    /// any DEK created by a concurrent caller within the same transaction.
+    #[must_use]
+    pub fn with_transactional_writes(
+        mut self,
+        pool: sqlx::Pool<sqlx::Postgres>,
+        kek_provider: Arc<dyn KekProvider>,
+    ) -> Self {
+        self.pool = Some(pool);
+        self.kek_provider = Some(kek_provider);
+        self
+    }
+
+    /// Register a hook that participates in the persist transaction.
+    ///
+    /// Hooks receive the **unencrypted** events and a `&mut Transaction`
+    /// so they can perform additional writes atomically alongside the
+    /// event and DEK inserts. Multiple hooks are called in registration order.
+    #[must_use]
+    pub fn with_persist_hook(mut self, hook: Arc<dyn PersistHook>) -> Self {
+        self.persist_hooks.push(hook);
+        self
+    }
+}
+
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     // ── Write helpers ─────────────────────────────────────────────────────────
 
     async fn encrypt_events(
@@ -267,6 +351,206 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     }
 }
 
+// ── Transactional helpers (postgres feature) ───────────────────────────────
+
+#[cfg(feature = "postgres")]
+impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
+    /// Like [`encrypt_events`], but creates DEKs within the provided
+    /// transaction so that key creation is atomic with event persistence.
+    async fn encrypt_events_in_tx(
+        &self,
+        events: &[SerializedEvent],
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<Vec<SerializedEvent>, PersistenceError> {
+        let mut out = Vec::with_capacity(events.len());
+        for event in events {
+            let mut event = event.clone();
+            if let Some(pii) = self.codec.classify(&event) {
+                let dek = self.get_or_create_key_in_tx(&pii.subject_id, tx).await?;
+
+                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
+                let plaintext = serde_json::to_vec(&pii.plaintext_pii)?;
+                let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
+
+                let sentinel = EncryptedPiiSentinel {
+                    ciphertext_b64: BASE64.encode(&encrypted.ciphertext),
+                    nonce_b64: BASE64.encode(&encrypted.nonce),
+                };
+
+                event.payload = (pii.build_encrypted_payload)(sentinel);
+            }
+            out.push(event);
+        }
+        Ok(out)
+    }
+
+    /// Get or create a DEK within a transaction.
+    ///
+    /// Mirrors [`PostgresKeyStore::get_or_create_key`] exactly, but executes
+    /// all SQL against the provided transaction instead of an independent pool
+    /// connection, making the DEK INSERT atomic with the caller's transaction.
+    async fn get_or_create_key_in_tx(
+        &self,
+        subject_id: &Uuid,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<crate::cipher::KeyMaterial, PersistenceError> {
+        use sqlx::Row as _;
+
+        // Invariant: kek_provider is always Some when pool is Some.
+        let provider = self
+            .kek_provider
+            .as_ref()
+            .expect("kek_provider must be set — call with_transactional_writes before persist");
+
+        // Fast path: DEK already exists (committed previously, or inserted
+        // by an earlier event in this same batch).
+        let existing = sqlx::query(
+            "SELECT key_id, wrapped_key, kek_id \
+             FROM subject_encryption_keys WHERE subject_id = $1",
+        )
+        .bind(subject_id)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if let Some(row) = existing {
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            return Ok(material);
+        }
+
+        // Generate a fresh DEK, wrap it under the current primary KEK, and
+        // INSERT within the transaction.
+        let dek = FieldCipher::generate_dek();
+        let kek = provider.current();
+        let wrapped = provider
+            .wrap(&kek, &dek)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        let result = sqlx::query(
+            "INSERT INTO subject_encryption_keys \
+             (key_id, subject_id, wrapped_key, kek_id) \
+             VALUES ($1, $2, $3, $4) \
+             ON CONFLICT (subject_id) DO NOTHING",
+        )
+        .bind(dek.key_id)
+        .bind(subject_id)
+        .bind(&wrapped.wrapped_key)
+        .bind(&wrapped.kek_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        if result.rows_affected() == 0 {
+            // A concurrent transaction inserted first — re-read from the tx.
+            let row = sqlx::query(
+                "SELECT key_id, wrapped_key, kek_id \
+                 FROM subject_encryption_keys WHERE subject_id = $1",
+            )
+            .bind(subject_id)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+            let material = provider
+                .unwrap(&WrappedDek {
+                    key_id: row.get("key_id"),
+                    kek_id: row.get("kek_id"),
+                    wrapped_key: row.get("wrapped_key"),
+                })
+                .await
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            Ok(material)
+        } else {
+            Ok(dek)
+        }
+    }
+
+    /// Executes the full write in a single Postgres transaction:
+    /// DEK creation, event encryption, event INSERT, and hook writes.
+    ///
+    /// Called by `persist` when `self.pool` is `Some`.
+    async fn persist_in_transaction<A: Aggregate>(
+        &self,
+        events: &[SerializedEvent],
+        snapshot_update: Option<(String, Value, usize)>,
+        pool: &sqlx::Pool<sqlx::Postgres>,
+    ) -> Result<(), PersistenceError> {
+        let mut tx = pool
+            .begin()
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        // 1. Encrypt events, creating DEKs inside the transaction.
+        let encrypted = self.encrypt_events_in_tx(events, &mut tx).await?;
+
+        // 2. Insert encrypted events.
+        for event in &encrypted {
+            let payload = serde_json::to_value(&event.payload)?;
+            let metadata = serde_json::to_value(&event.metadata)?;
+            sqlx::query(
+                "INSERT INTO events \
+                 (aggregate_type, aggregate_id, sequence, \
+                  event_type, event_version, payload, metadata) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            )
+            .bind(&event.aggregate_type)
+            .bind(&event.aggregate_id)
+            .bind(
+                // sequence is a small positive integer; i64::MAX (~9.2e18) is unreachable.
+                i64::try_from(event.sequence).expect("sequence fits in i64"),
+            )
+            .bind(&event.event_type)
+            .bind(&event.event_version)
+            .bind(&payload)
+            .bind(&metadata)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        }
+
+        // 3. Handle snapshot if present.
+        //    Always `None` when using `PersistedEventStore::new_event_store`
+        //    (the normal configuration), but handled for completeness.
+        if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
+            sqlx::query(
+                "INSERT INTO snapshots \
+                 (aggregate_type, aggregate_id, last_sequence, current_snapshot, payload) \
+                 VALUES ($1, $2, 0, $3, $4) \
+                 ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
+                 SET last_sequence = EXCLUDED.last_sequence, \
+                     current_snapshot = $3, payload = $4",
+            )
+            .bind(A::TYPE)
+            .bind(&aggregate_id)
+            .bind(i64::try_from(current_snapshot).expect("snapshot index fits in i64"))
+            .bind(&aggregate)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        }
+
+        // 4. Call hooks with the UNENCRYPTED events inside the transaction.
+        for hook in &self.persist_hooks {
+            hook.on_persist(events, &mut tx).await?;
+        }
+
+        // 5. Commit — DEKs, events, and hook writes are now atomically visible.
+        tx.commit()
+            .await
+            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+
+        Ok(())
+    }
+}
+
 impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEventRepository<R> {
     async fn get_events<A: Aggregate>(
         &self,
@@ -305,6 +589,18 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
         events: &[SerializedEvent],
         snapshot_update: Option<(String, Value, usize)>,
     ) -> Result<(), PersistenceError> {
+        // Transactional path: manage the entire write — DEK creation, event
+        // encryption, event INSERTs, and hook writes — in one transaction.
+        // Only compiled and active when the `postgres` feature is enabled and
+        // `with_transactional_writes` has been called.
+        #[cfg(feature = "postgres")]
+        if let Some(pool) = &self.pool {
+            return self
+                .persist_in_transaction::<A>(events, snapshot_update, pool)
+                .await;
+        }
+
+        // Legacy path: encrypt then delegate to the inner repository.
         let encrypted = self.encrypt_events(events).await?;
         self.inner.persist::<A>(&encrypted, snapshot_update).await
     }

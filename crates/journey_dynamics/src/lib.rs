@@ -6,6 +6,7 @@ pub mod queries;
 pub mod route_handler;
 pub mod services;
 pub mod state;
+pub mod subject_lookup_hook;
 pub mod view_repository;
 
 use async_trait::async_trait;

@@ -95,11 +95,12 @@ pub use kek::{KekError, KekHandle, KekProvider, StaticKekProvider, WrappedDek};
 
 // ── Key store ─────────────────────────────────────────────────────────────────
 
-pub use key_store::{
-    InMemoryKeyStore, KeyStore, KeyStoreError, PostgresKeyStore, PostgresKeyStoreOptions,
-};
+pub use key_store::{InMemoryKeyStore, KeyStore, KeyStoreError};
 
-// ── Re-wrap worker ──────────────────────────────────────────────────────────────────────
+#[cfg(feature = "postgres")]
+pub use key_store::{PostgresKeyStore, PostgresKeyStoreOptions};
+
+// ── Re-wrap worker (requires postgres feature for real use, but the worker itself is generic) ────
 
 pub use rewrap::{RewrapStats, RewrapWorker, RewrapWorkerOptions};
 
@@ -109,6 +110,9 @@ pub use repository::{
     CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel, PiiEventCodec,
     PiiFields,
 };
+
+#[cfg(feature = "postgres")]
+pub use repository::PersistHook;
 
 // ── Testing helpers (opt-in via the `testing` feature) ───────────────────────
 
