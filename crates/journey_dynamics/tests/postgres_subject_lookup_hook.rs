@@ -1,6 +1,6 @@
 //! Integration tests for [`SubjectLookupHook`].
 //!
-//! These tests connect to a real PostgreSQL database and are intentionally
+//! These tests connect to a real `PostgreSQL` database and are intentionally
 //! kept outside the library crate so that `cargo nextest run --lib` skips them
 //! when no database is available.  Run them with:
 //!
