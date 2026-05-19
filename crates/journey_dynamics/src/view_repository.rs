@@ -275,9 +275,27 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn delete_subject_lookup(&self, subject_id: &Uuid) -> Result<(), sqlx::Error> {
+        Self::do_delete_subject_lookup(&self.pool, subject_id).await
+    }
+
+    pub async fn delete_subject_lookup_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        subject_id: &Uuid,
+    ) -> Result<(), sqlx::Error> {
+        Self::do_delete_subject_lookup(&mut **tx, subject_id).await
+    }
+
+    async fn do_delete_subject_lookup<'e, E>(
+        executor: E,
+        subject_id: &Uuid,
+    ) -> Result<(), sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
             .bind(subject_id)
-            .execute(&self.pool)
+            .execute(executor)
             .await?;
         Ok(())
     }

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use postgres_es::default_postgress_pool;
+use sqlx::{Pool, Postgres};
 
 use cqrs_es_crypto::{
     FieldCipher, KeyStore, PostgresKeyStore, RewrapWorker, RewrapWorkerOptions, StaticKekProvider,
@@ -14,6 +15,7 @@ use crate::{
 
 #[derive(Clone)]
 pub struct ApplicationState {
+    pub pool: Pool<Postgres>,
     pub cqrs: Arc<CryptoCqrs>,
     pub journey_query: Arc<StructuredJourneyViewRepository>,
     pub key_store: Arc<dyn KeyStore>,
@@ -103,8 +105,12 @@ pub async fn new_application_state() -> ApplicationState {
     // AES-256-GCM field encryption — it does not need the KEK at all.
     let cipher = FieldCipher::new();
 
-    let (cqrs, journey_query) =
-        cqrs_framework(pool, Arc::clone(&key_store), cipher, Arc::clone(&provider));
+    let (cqrs, journey_query) = cqrs_framework(
+        pool.clone(),
+        Arc::clone(&key_store),
+        cipher,
+        Arc::clone(&provider),
+    );
 
     // Spawn the background re-wrap sweeper.  It polls every 5 minutes and re-wraps
     // any DEKs still encrypted under a retired KEK version.  Safe to run alongside
@@ -119,6 +125,7 @@ pub async fn new_application_state() -> ApplicationState {
     });
 
     ApplicationState {
+        pool,
         cqrs,
         journey_query,
         key_store,

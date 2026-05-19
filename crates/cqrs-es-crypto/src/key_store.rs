@@ -71,6 +71,24 @@ pub trait KeyStore: Send + Sync {
     /// unreadable.  Calling `delete_key` on a subject that has no key is a no-op (idempotent).
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError>;
 
+    /// Hard-delete the DEK for `subject_id` within an already-open transaction.
+    ///
+    /// Allows the DEK deletion to be committed atomically with other PII deletions
+    /// (e.g. the `subject_lookup` row) in a single Postgres transaction.
+    ///
+    /// The default implementation falls back to [`Self::delete_key`], ignoring the
+    /// transaction. This is correct for non-Postgres implementations (e.g. the
+    /// in-memory store used in tests) where transactions do not apply.
+    #[cfg(feature = "postgres")]
+    async fn delete_key_in_tx(
+        &self,
+        subject_id: &Uuid,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), KeyStoreError> {
+        let _ = tx;
+        self.delete_key(subject_id).await
+    }
+
     /// Returns up to `batch_size` subject IDs whose DEK is not wrapped under
     /// `current_kek_id`.
     ///
@@ -320,6 +338,18 @@ pub struct PostgresKeyStore {
 
 #[cfg(feature = "postgres")]
 impl PostgresKeyStore {
+    async fn do_delete_key<'e, E>(subject_id: &Uuid, executor: E) -> Result<(), KeyStoreError>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+    {
+        sqlx::query("DELETE FROM subject_encryption_keys WHERE subject_id = $1")
+            .bind(subject_id)
+            .execute(executor)
+            .await
+            .map_err(KeyStoreError::Database)?;
+        Ok(())
+    }
+
     /// Create a new [`PostgresKeyStore`] with default options (lazy re-wrap enabled).
     #[must_use]
     pub fn new(pool: sqlx::Pool<sqlx::Postgres>, provider: Arc<dyn KekProvider>) -> Self {
@@ -422,11 +452,15 @@ impl KeyStore for PostgresKeyStore {
     }
 
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError> {
-        sqlx::query("DELETE FROM subject_encryption_keys WHERE subject_id = $1")
-            .bind(subject_id)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
+        Self::do_delete_key(subject_id, &self.pool).await
+    }
+
+    async fn delete_key_in_tx(
+        &self,
+        subject_id: &Uuid,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    ) -> Result<(), KeyStoreError> {
+        Self::do_delete_key(subject_id, &mut **tx).await
     }
 
     async fn list_stale_subjects(

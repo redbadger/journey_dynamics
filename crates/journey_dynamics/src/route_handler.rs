@@ -41,21 +41,39 @@ pub async fn shred_subject(
         }
     };
 
-    // 2. Crypto-shred: delete the DEK — all ciphertext is now permanently unreadable.
-    if let Err(err) = state.key_store.delete_key(&subject_id).await {
+    // 2. Atomically delete the DEK and the email → subject_id lookup entry in a
+    //    single transaction. Both are PII: the DEK renders all ciphertext permanently
+    //    unreadable; the subject_lookup row holds the plaintext email address.
+    //    Committing them together ensures neither survives a mid-shred crash.
+    let mut tx = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            eprintln!("Error starting shred transaction for subject {subject_id}: {err:#?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+    };
+    if let Err(err) = state.key_store.delete_key_in_tx(&subject_id, &mut tx).await {
         eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
-
-    // 3. Remove the email → subject_id lookup entry.  The DEK is already gone so
-    //    shredding is complete; a failure here is logged but does not abort.
-    if let Err(err) = state.journey_query.delete_subject_lookup(&subject_id).await {
+    if let Err(err) = state
+        .journey_query
+        .delete_subject_lookup_in_tx(&mut tx, &subject_id)
+        .await
+    {
         eprintln!("Error removing subject_lookup for {subject_id}: {err:#?}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+    }
+    if let Err(err) = tx.commit().await {
+        eprintln!("Error committing shred transaction for subject {subject_id}: {err:#?}");
+        return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
 
-    // 4. For each affected journey, emit a SubjectForgotten audit event via the
-    //    ForgetSubject command. The view-repository handler for SubjectForgotten nulls
-    //    out the person slot and sets forgotten = TRUE.
+    // 3. For each affected journey, emit a SubjectForgotten audit event via the
+    //    ForgetSubject command. The PII deletions above are already committed, so
+    //    GDPR erasure is complete. These audit events are best-effort: a failure
+    //    is logged but does not abort — the view-repository handler for
+    //    SubjectForgotten nulls out the person slot and sets forgotten = TRUE.
     for aggregate_id in &journeys {
         if let Err(err) = state
             .cqrs
@@ -113,18 +131,32 @@ pub async fn shred_subjects_by_email(
             }
         };
 
-        // 2b. Crypto-shred: delete the DEK — all ciphertext is now permanently unreadable.
-        if let Err(err) = state.key_store.delete_key(subject_id).await {
+        // 2b. Atomically delete the DEK and the subject_lookup row.
+        let mut tx = match state.pool.begin().await {
+            Ok(tx) => tx,
+            Err(err) => {
+                eprintln!("Error starting shred transaction for subject {subject_id}: {err:#?}");
+                return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+            }
+        };
+        if let Err(err) = state.key_store.delete_key_in_tx(subject_id, &mut tx).await {
             eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
             return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
         }
-
-        // 2c. Remove the email → subject_id lookup entry.
-        if let Err(err) = state.journey_query.delete_subject_lookup(subject_id).await {
+        if let Err(err) = state
+            .journey_query
+            .delete_subject_lookup_in_tx(&mut tx, subject_id)
+            .await
+        {
             eprintln!("Error removing subject_lookup for {subject_id}: {err:#?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
+        }
+        if let Err(err) = tx.commit().await {
+            eprintln!("Error committing shred transaction for subject {subject_id}: {err:#?}");
+            return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
         }
 
-        // 2d. Emit a SubjectForgotten audit event on every affected journey.
+        // 2c. Emit a SubjectForgotten audit event on every affected journey.
         for aggregate_id in &journeys {
             if let Err(err) = state
                 .cqrs
