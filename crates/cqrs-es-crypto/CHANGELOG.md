@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-05-19
+
+### Added
+
+- `KeyStore::delete_key_in_tx` (`postgres` feature) — deletes the DEK for a
+  subject within a caller-supplied `sqlx::Transaction`, so DEK removal can be
+  committed atomically in a single Postgres transaction alongside other PII
+  deletions (e.g. a `subject_lookup` row). `PostgresKeyStore` provides a full
+  implementation; all other stores fall back to `delete_key` via the default
+  impl. Postgres-backed custom implementations should override this method to
+  preserve the atomicity guarantee.
+
+### Fixed
+
+- **Torn reads on the decryption path** — all DEKs for an event batch are now
+  pre-fetched in a first pass before any event is decrypted. A crypto-shred
+  arriving mid-batch is therefore applied consistently to every event for that
+  subject rather than leaving earlier events decrypted and later ones redacted.
+  The change also reduces key-store round-trips from O(events) to
+  O(unique subjects).
+- **`last_sequence` hardcoded to `0` in snapshot upsert** — the snapshot
+  `INSERT … ON CONFLICT` statement now records the sequence number of the last
+  event in the persist batch as `last_sequence` instead of always writing `0`.
+  The previous behaviour caused the aggregate replay watermark to always point
+  to the start of the event log, defeating the purpose of snapshotting. The
+  `ON CONFLICT` clause was also corrected to reference `EXCLUDED.*` for all
+  updated columns.
+
 ## [0.2.0] - 2026-05-19
 
 This release adds zero-downtime KEK rotation and an atomic transactional write
@@ -164,7 +192,8 @@ is new — existing users will need to add it explicitly.
 - Aggregate snapshots are not encrypted. If your aggregate state contains PII it
   will be stored in plaintext, and crypto-shredding a subject will not redact it.
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.0...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.1...HEAD
+[0.2.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.0...cqrs-es-crypto-v0.2.1
 [0.2.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.4...cqrs-es-crypto-v0.2.0
 [0.1.4]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.3...cqrs-es-crypto-v0.1.4
 [0.1.3]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.2...cqrs-es-crypto-v0.1.3
