@@ -26,6 +26,13 @@ impl StructuredJourneyViewRepository {
     /// Returns an error if the database query fails.
     pub async fn load(&self, journey_id: &Uuid) -> Result<Option<JourneyView>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
+        // REPEATABLE READ ensures all three queries below see the same committed
+        // snapshot. The default READ COMMITTED would give each statement a fresh
+        // snapshot, allowing a concurrent projection commit to produce a torn read
+        // (e.g. journey_view at version N but persons/workflow already at N+1).
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
 
         let journey_row = sqlx::query(
             r"
@@ -68,8 +75,6 @@ impl StructuredJourneyViewRepository {
         });
 
         let persons = self.load_persons_with(&mut *tx, journey_id).await?;
-
-        tx.rollback().await?;
 
         Ok(Some(JourneyView {
             id,
