@@ -537,16 +537,26 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         //    Always `None` when using `PersistedEventStore::new_event_store`
         //    (the normal configuration), but handled for completeness.
         if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
+            // last_sequence is the event sequence number of the final event in this
+            // batch — the point from which the event log must be replayed on top of
+            // this snapshot. Defaulting to 0 when the batch is empty is safe because
+            // an empty batch with a snapshot update cannot occur in practice.
+            let last_sequence = encrypted.last().map_or(0, |e| {
+                i64::try_from(e.sequence).expect("sequence fits in i64")
+            });
+
             sqlx::query(
                 "INSERT INTO snapshots \
                  (aggregate_type, aggregate_id, last_sequence, current_snapshot, payload) \
-                 VALUES ($1, $2, 0, $3, $4) \
+                 VALUES ($1, $2, $3, $4, $5) \
                  ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
-                 SET last_sequence = EXCLUDED.last_sequence, \
-                     current_snapshot = $3, payload = $4",
+                 SET last_sequence      = EXCLUDED.last_sequence, \
+                     current_snapshot  = EXCLUDED.current_snapshot, \
+                     payload           = EXCLUDED.payload",
             )
             .bind(A::TYPE)
             .bind(&aggregate_id)
+            .bind(last_sequence)
             .bind(i64::try_from(current_snapshot).expect("snapshot index fits in i64"))
             .bind(&aggregate)
             .execute(&mut *tx)
