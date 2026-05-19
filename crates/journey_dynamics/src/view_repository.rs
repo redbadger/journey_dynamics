@@ -161,6 +161,8 @@ impl StructuredJourneyViewRepository {
 
     /// Find journeys that have a non-forgotten person with the given email address.
     ///
+    /// The comparison is case-insensitive.
+    ///
     /// # Errors
     ///
     /// Returns an error if the database query fails.
@@ -171,7 +173,7 @@ impl StructuredJourneyViewRepository {
             r"
             SELECT DISTINCT journey_id
             FROM journey_person
-            WHERE email = $1 AND forgotten = FALSE
+            WHERE lower(email) = lower($1) AND forgotten = FALSE
             ",
         )
         .bind(email)
