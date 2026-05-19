@@ -312,28 +312,46 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         &self,
         events: Vec<SerializedEvent>,
     ) -> Result<Vec<SerializedEvent>, PersistenceError> {
+        // ── Pass 1: collect the unique subject IDs that need a DEK. ──────────
+        //
+        // Fetching all DEKs up front — before decrypting any event — means that
+        // if a crypto-shred arrives mid-loop, every event for that subject is
+        // consistently redacted rather than producing a torn read (some events
+        // decrypted, later ones redacted). It also reduces round-trips from
+        // O(events) to O(unique subjects).
+        use std::collections::HashMap;
+
+        let mut dek_cache: HashMap<uuid::Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
+        for event in &events {
+            if let Some(extract) = self.codec.extract_encrypted(event) {
+                if !dek_cache.contains_key(&extract.subject_id) {
+                    let dek = self
+                        .key_store
+                        .get_key(&extract.subject_id)
+                        .await
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    dek_cache.insert(extract.subject_id, dek);
+                }
+            }
+        }
+
+        // ── Pass 2: decrypt using the cached DEKs. ───────────────────────────
         let mut out = Vec::with_capacity(events.len());
         for event in events {
             let mut event = event;
             if let Some(extract) = self.codec.extract_encrypted(&event) {
-                let dek = self
-                    .key_store
-                    .get_key(&extract.subject_id)
-                    .await
-                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-
                 let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
 
-                event.payload = match dek {
+                event.payload = match dek_cache.get(&extract.subject_id).and_then(Option::as_ref) {
                     Some(dek) => {
                         let encrypted_payload = EncryptedPayload {
                             ciphertext: extract.ciphertext,
                             nonce: extract.nonce,
                         };
-                        let plaintext_bytes =
-                            self.cipher
-                                .decrypt(&dek, &encrypted_payload, &aad)
-                                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                        let plaintext_bytes = self
+                            .cipher
+                            .decrypt(dek, &encrypted_payload, &aad)
+                            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
                         let plaintext_pii: Value = serde_json::from_slice(&plaintext_bytes)?;
                         self.codec
                             .reconstruct(&event, &plaintext_pii)
