@@ -25,15 +25,18 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn load(&self, journey_id: &Uuid) -> Result<Option<JourneyView>, sqlx::Error> {
-        let mut tx = self.pool.begin().await?;
-        // REPEATABLE READ ensures all three queries below see the same committed
-        // snapshot. The default READ COMMITTED would give each statement a fresh
-        // snapshot, allowing a concurrent projection commit to produce a torn read
-        // (e.g. journey_view at version N but persons/workflow already at N+1).
-        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-            .execute(&mut *tx)
-            .await?;
+        let mut tx = self.begin_repeatable_read().await?;
+        self.load_in_tx(&mut tx, journey_id).await
+    }
 
+    /// Inner load: runs all three queries against an already-open transaction.
+    /// The caller is responsible for setting the desired isolation level before
+    /// calling this.
+    async fn load_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        journey_id: &Uuid,
+    ) -> Result<Option<JourneyView>, sqlx::Error> {
         let journey_row = sqlx::query(
             r"
             SELECT id, state, shared_data, current_step, version
@@ -42,7 +45,7 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(journey_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         let Some(row) = journey_row else {
@@ -67,14 +70,14 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(journey_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         let latest_workflow_decision = workflow_row.map(|r| WorkflowDecisionView {
             suggested_actions: r.get("suggested_actions"),
         });
 
-        let persons = self.load_persons_with(&mut *tx, journey_id).await?;
+        let persons = self.load_persons_with(&mut **tx, journey_id).await?;
 
         Ok(Some(JourneyView {
             id,
@@ -92,14 +95,16 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn load_all(&self) -> Result<Vec<JourneyView>, sqlx::Error> {
+        let mut tx = self.begin_repeatable_read().await?;
+
         let rows = sqlx::query("SELECT id FROM journey_view ORDER BY created_at DESC")
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *tx)
             .await?;
 
         let mut views = Vec::new();
         for row in rows {
             let id: Uuid = row.get("id");
-            if let Some(view) = self.load(&id).await? {
+            if let Some(view) = self.load_in_tx(&mut tx, &id).await? {
                 views.push(view);
             }
         }
@@ -113,6 +118,19 @@ impl StructuredJourneyViewRepository {
     /// Returns an error if the database query fails.
     pub async fn load_persons(&self, journey_id: &Uuid) -> Result<Vec<PersonView>, sqlx::Error> {
         self.load_persons_with(&self.pool, journey_id).await
+    }
+
+    /// Open a transaction and immediately promote it to REPEATABLE READ.
+    ///
+    /// REPEATABLE READ ensures that all queries within the transaction see the
+    /// same committed snapshot. The default READ COMMITTED gives each statement
+    /// a fresh snapshot, which can produce torn reads across multi-query loads.
+    async fn begin_repeatable_read(&self) -> Result<sqlx::Transaction<'_, Postgres>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+            .execute(&mut *tx)
+            .await?;
+        Ok(tx)
     }
 
     async fn load_persons_with<'e, E>(
@@ -143,6 +161,8 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn find_by_email(&self, email: &str) -> Result<Vec<JourneyView>, sqlx::Error> {
+        let mut tx = self.begin_repeatable_read().await?;
+
         let rows = sqlx::query(
             r"
             SELECT DISTINCT journey_id
@@ -151,13 +171,13 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(email)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await?;
 
         let mut views = Vec::new();
         for row in rows {
             let id: Uuid = row.get("journey_id");
-            if let Some(view) = self.load(&id).await? {
+            if let Some(view) = self.load_in_tx(&mut tx, &id).await? {
                 views.push(view);
             }
         }
