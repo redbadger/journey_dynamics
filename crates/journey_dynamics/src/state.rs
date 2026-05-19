@@ -121,7 +121,9 @@ pub async fn new_application_state() -> ApplicationState {
         RewrapWorkerOptions::default(),
     );
     tokio::spawn(async move {
-        worker.run_forever(std::time::Duration::from_mins(5)).await;
+        worker
+            .run_forever(std::time::Duration::from_secs(5 * 60))
+            .await;
     });
 
     ApplicationState {
