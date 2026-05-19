@@ -26,6 +26,7 @@
 //! - DEK absent   → call [`PiiEventCodec::redact`] (subject forgotten).
 //! - No sentinel  → event is plaintext / legacy, returned as-is.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -312,28 +313,46 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         &self,
         events: Vec<SerializedEvent>,
     ) -> Result<Vec<SerializedEvent>, PersistenceError> {
+        // ── Pass 1: collect the unique subject IDs that need a DEK. ──────────
+        //
+        // Fetching all DEKs up front — before decrypting any event — means that
+        // if a crypto-shred arrives mid-loop, every event for that subject is
+        // consistently redacted rather than producing a torn read (some events
+        // decrypted, later ones redacted). It also reduces round-trips from
+        // O(events) to O(unique subjects).
+        let mut dek_cache: HashMap<Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
+        for event in &events {
+            if let Some(extract) = self.codec.extract_encrypted(event) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    dek_cache.entry(extract.subject_id)
+                {
+                    let dek = self
+                        .key_store
+                        .get_key(&extract.subject_id)
+                        .await
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    e.insert(dek);
+                }
+            }
+        }
+
+        // ── Pass 2: decrypt using the cached DEKs. ───────────────────────────
         let mut out = Vec::with_capacity(events.len());
         for event in events {
             let mut event = event;
             if let Some(extract) = self.codec.extract_encrypted(&event) {
-                let dek = self
-                    .key_store
-                    .get_key(&extract.subject_id)
-                    .await
-                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-
                 let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
 
-                event.payload = match dek {
+                event.payload = match dek_cache.get(&extract.subject_id).and_then(Option::as_ref) {
                     Some(dek) => {
                         let encrypted_payload = EncryptedPayload {
                             ciphertext: extract.ciphertext,
                             nonce: extract.nonce,
                         };
-                        let plaintext_bytes =
-                            self.cipher
-                                .decrypt(&dek, &encrypted_payload, &aad)
-                                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                        let plaintext_bytes = self
+                            .cipher
+                            .decrypt(dek, &encrypted_payload, &aad)
+                            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
                         let plaintext_pii: Value = serde_json::from_slice(&plaintext_bytes)?;
                         self.codec
                             .reconstruct(&event, &plaintext_pii)
@@ -520,16 +539,26 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         //    Always `None` when using `PersistedEventStore::new_event_store`
         //    (the normal configuration), but handled for completeness.
         if let Some((aggregate_id, aggregate, current_snapshot)) = snapshot_update {
+            // last_sequence is the event sequence number of the final event in this
+            // batch — the point from which the event log must be replayed on top of
+            // this snapshot. Defaulting to 0 when the batch is empty is safe because
+            // an empty batch with a snapshot update cannot occur in practice.
+            let last_sequence = encrypted.last().map_or(0, |e| {
+                i64::try_from(e.sequence).expect("sequence fits in i64")
+            });
+
             sqlx::query(
                 "INSERT INTO snapshots \
                  (aggregate_type, aggregate_id, last_sequence, current_snapshot, payload) \
-                 VALUES ($1, $2, 0, $3, $4) \
+                 VALUES ($1, $2, $3, $4, $5) \
                  ON CONFLICT (aggregate_type, aggregate_id) DO UPDATE \
-                 SET last_sequence = EXCLUDED.last_sequence, \
-                     current_snapshot = $3, payload = $4",
+                 SET last_sequence      = EXCLUDED.last_sequence, \
+                     current_snapshot  = EXCLUDED.current_snapshot, \
+                     payload           = EXCLUDED.payload",
             )
             .bind(A::TYPE)
             .bind(&aggregate_id)
+            .bind(last_sequence)
             .bind(i64::try_from(current_snapshot).expect("snapshot index fits in i64"))
             .bind(&aggregate)
             .execute(&mut *tx)
