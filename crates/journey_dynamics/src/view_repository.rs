@@ -282,20 +282,22 @@ impl StructuredJourneyViewRepository {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
-    async fn update_view(
-        &self,
-        view_id: &str,
-        event: &EventEnvelope<Journey>,
-    ) -> Result<(), sqlx::Error> {
-        let journey_id = Uuid::parse_str(view_id).map_err(|e| {
+    fn parse_journey_id(view_id: &str) -> Result<Uuid, sqlx::Error> {
+        Uuid::parse_str(view_id).map_err(|e| {
             sqlx::Error::Decode(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Invalid UUID: {e}"),
             )))
-        })?;
-        let mut tx = self.pool.begin().await?;
+        })
+    }
 
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    async fn apply_event_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        journey_id: Uuid,
+        event: &EventEnvelope<Journey>,
+    ) -> Result<(), sqlx::Error> {
         match &event.payload {
             JourneyEvent::Started { id } => {
                 sqlx::query(
@@ -309,7 +311,7 @@ impl StructuredJourneyViewRepository {
                 .bind("InProgress")
                 .bind::<Option<String>>(None)
                 .bind(event.sequence as i64)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -328,7 +330,7 @@ impl StructuredJourneyViewRepository {
                 .bind(journey_id)
                 .bind(data)
                 .bind(event.sequence as i64)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -361,7 +363,7 @@ impl StructuredJourneyViewRepository {
                 .bind(name)
                 .bind(email)
                 .bind(phone)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
 
                 sqlx::query(
@@ -373,7 +375,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -392,7 +394,7 @@ impl StructuredJourneyViewRepository {
                 .bind(journey_id)
                 .bind(person_ref)
                 .bind(data)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
 
                 sqlx::query(
@@ -404,7 +406,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -426,7 +428,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(journey_id)
                 .bind(subject_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
 
                 sqlx::query(
@@ -438,7 +440,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -451,7 +453,7 @@ impl StructuredJourneyViewRepository {
                     ",
                 )
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
 
                 sqlx::query(
@@ -463,7 +465,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(journey_id)
                 .bind(suggested_actions)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
 
                 sqlx::query(
@@ -475,7 +477,7 @@ impl StructuredJourneyViewRepository {
                 )
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -492,7 +494,7 @@ impl StructuredJourneyViewRepository {
                 .bind(to_step)
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
 
@@ -509,12 +511,11 @@ impl StructuredJourneyViewRepository {
                 .bind("Complete")
                 .bind(event.sequence as i64)
                 .bind(journey_id)
-                .execute(&mut *tx)
+                .execute(&mut **tx)
                 .await?;
             }
         }
 
-        tx.commit().await?;
         Ok(())
     }
 }
@@ -522,10 +523,36 @@ impl StructuredJourneyViewRepository {
 #[async_trait::async_trait]
 impl Query<Journey> for StructuredJourneyViewRepository {
     async fn dispatch(&self, view_id: &str, events: &[EventEnvelope<Journey>]) {
-        for event in events {
-            if let Err(e) = self.update_view(view_id, event).await {
-                eprintln!("Error updating journey view {view_id}: {e:?}");
+        if events.is_empty() {
+            return;
+        }
+
+        let journey_id = match Self::parse_journey_id(view_id) {
+            Ok(id) => id,
+            Err(e) => {
+                eprintln!("Invalid journey ID '{view_id}': {e:?}");
+                return;
             }
+        };
+
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                eprintln!("Error starting transaction for journey '{view_id}': {e:?}");
+                return;
+            }
+        };
+
+        for event in events {
+            if let Err(e) = self.apply_event_in_tx(&mut tx, journey_id, event).await {
+                eprintln!("Error applying event to journey view '{view_id}': {e:?}");
+                // tx is dropped here, rolling back all events in this batch.
+                return;
+            }
+        }
+
+        if let Err(e) = tx.commit().await {
+            eprintln!("Error committing journey view update for '{view_id}': {e:?}");
         }
     }
 }
