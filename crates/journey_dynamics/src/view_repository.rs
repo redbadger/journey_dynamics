@@ -25,6 +25,8 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn load(&self, journey_id: &Uuid) -> Result<Option<JourneyView>, sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+
         let journey_row = sqlx::query(
             r"
             SELECT id, state, shared_data, current_step, version
@@ -33,7 +35,7 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(journey_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let Some(row) = journey_row else {
@@ -58,14 +60,16 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(journey_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
 
         let latest_workflow_decision = workflow_row.map(|r| WorkflowDecisionView {
             suggested_actions: r.get("suggested_actions"),
         });
 
-        let persons = self.load_persons(journey_id).await?;
+        let persons = self.load_persons_with(&mut *tx, journey_id).await?;
+
+        tx.rollback().await?;
 
         Ok(Some(JourneyView {
             id,
@@ -103,6 +107,17 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn load_persons(&self, journey_id: &Uuid) -> Result<Vec<PersonView>, sqlx::Error> {
+        self.load_persons_with(&self.pool, journey_id).await
+    }
+
+    async fn load_persons_with<'e, E>(
+        &self,
+        executor: E,
+        journey_id: &Uuid,
+    ) -> Result<Vec<PersonView>, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = Postgres>,
+    {
         sqlx::query_as::<_, PersonView>(
             r"
             SELECT journey_id, person_ref, subject_id,
@@ -113,7 +128,7 @@ impl StructuredJourneyViewRepository {
             ",
         )
         .bind(journey_id)
-        .fetch_all(&self.pool)
+        .fetch_all(executor)
         .await
     }
 
