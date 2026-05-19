@@ -125,6 +125,10 @@ impl StructuredJourneyViewRepository {
     /// REPEATABLE READ ensures that all queries within the transaction see the
     /// same committed snapshot. The default READ COMMITTED gives each statement
     /// a fresh snapshot, which can produce torn reads across multi-query loads.
+    ///
+    /// Callers that only read data do not need to commit; dropping the returned
+    /// transaction rolls it back, which is equivalent to a commit for a
+    /// read-only transaction in Postgres.
     async fn begin_repeatable_read(&self) -> Result<sqlx::Transaction<'_, Postgres>, sqlx::Error> {
         let mut tx = self.pool.begin().await?;
         sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -268,8 +272,9 @@ impl StructuredJourneyViewRepository {
 
     /// Remove the `subject_lookup` row for `subject_id`.
     ///
-    /// Called by the shredding route handler after the DEK has been deleted.
-    /// The deletion is the GDPR erasure of the email address from this table.
+    /// Convenience wrapper for use outside a transaction. Production shredding
+    /// uses [`Self::delete_subject_lookup_in_tx`] to commit this deletion
+    /// atomically with the DEK deletion.
     ///
     /// # Errors
     ///
@@ -278,6 +283,15 @@ impl StructuredJourneyViewRepository {
         Self::do_delete_subject_lookup(&self.pool, subject_id).await
     }
 
+    /// Remove the `subject_lookup` row for `subject_id` within an already-open transaction.
+    ///
+    /// Used by the shredding route handler to commit the email-address deletion
+    /// atomically with the DEK deletion in a single transaction. This is the
+    /// GDPR erasure of the email address from this table.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn delete_subject_lookup_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
@@ -564,7 +578,7 @@ impl Query<Journey> for StructuredJourneyViewRepository {
         for event in events {
             if let Err(e) = self.apply_event_in_tx(&mut tx, journey_id, event).await {
                 eprintln!("Error applying event to journey view '{view_id}': {e:?}");
-                // tx is dropped here, rolling back all events in this batch.
+                // Returning here drops tx, which rolls back all events in this batch.
                 return;
             }
         }

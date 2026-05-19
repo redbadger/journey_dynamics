@@ -26,6 +26,7 @@
 //! - DEK absent   → call [`PiiEventCodec::redact`] (subject forgotten).
 //! - No sentinel  → event is plaintext / legacy, returned as-is.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -319,9 +320,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         // consistently redacted rather than producing a torn read (some events
         // decrypted, later ones redacted). It also reduces round-trips from
         // O(events) to O(unique subjects).
-        use std::collections::HashMap;
-
-        let mut dek_cache: HashMap<uuid::Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
+        let mut dek_cache: HashMap<Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
         for event in &events {
             if let Some(extract) = self.codec.extract_encrypted(event) {
                 if !dek_cache.contains_key(&extract.subject_id) {

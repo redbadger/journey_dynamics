@@ -52,7 +52,7 @@ pub async fn shred_subject(
             return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
         }
     };
-    if let Err(err) = state.key_store.delete_key_in_tx(&subject_id, &mut tx).await {
+    if let Err(err) = state.key_store.delete_key_in_tx(&mut tx, &subject_id).await {
         eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
         return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
     }
@@ -100,7 +100,7 @@ pub async fn shred_subjects_by_email(
     Json(body): Json<EraseByEmailBody>,
 ) -> Response {
     // 1. Resolve all non-forgotten subject_ids linked to this email.
-    //    The query uses lower() on both sides for case-insensitive matching.
+    //    The query uses a pre-lowercased column (email_lower) compared against lower($1).
     let subject_ids = match state
         .journey_query
         .find_subjects_by_email(&body.email)
@@ -139,7 +139,7 @@ pub async fn shred_subjects_by_email(
                 return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
             }
         };
-        if let Err(err) = state.key_store.delete_key_in_tx(subject_id, &mut tx).await {
+        if let Err(err) = state.key_store.delete_key_in_tx(&mut tx, subject_id).await {
             eprintln!("Error deleting key for subject {subject_id}: {err:#?}");
             return (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response();
         }
@@ -188,7 +188,7 @@ pub async fn query_handler(
         Ok(Some(journey_view)) => (StatusCode::OK, Json(journey_view)).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(err) => {
-            println!("Error: {err:#?}\n");
+            eprintln!("Error: {err:#?}");
             (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response()
         }
     }
@@ -249,7 +249,7 @@ pub async fn command_handler(
             }
         }
         Err(err) => {
-            println!("Error: {err:#?}\n");
+            eprintln!("Error: {err:#?}");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
     }

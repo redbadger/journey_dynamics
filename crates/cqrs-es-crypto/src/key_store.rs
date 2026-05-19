@@ -76,14 +76,21 @@ pub trait KeyStore: Send + Sync {
     /// Allows the DEK deletion to be committed atomically with other PII deletions
     /// (e.g. the `subject_lookup` row) in a single Postgres transaction.
     ///
-    /// The default implementation falls back to [`Self::delete_key`], ignoring the
-    /// transaction. This is correct for non-Postgres implementations (e.g. the
-    /// in-memory store used in tests) where transactions do not apply.
+    /// # Default implementation
+    ///
+    /// Falls back to [`Self::delete_key`], ignoring the transaction. This is
+    /// acceptable for non-Postgres implementations (e.g. the in-memory store
+    /// used in tests) where transactions do not apply.
+    ///
+    /// **Postgres-backed implementations must override this method.** Relying on
+    /// the default in a Postgres context silently breaks the atomicity guarantee:
+    /// the deletion executes outside the caller's transaction, so a mid-shred
+    /// crash can leave the DEK and `subject_lookup` row in an inconsistent state.
     #[cfg(feature = "postgres")]
     async fn delete_key_in_tx(
         &self,
-        subject_id: &Uuid,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        subject_id: &Uuid,
     ) -> Result<(), KeyStoreError> {
         let _ = tx;
         self.delete_key(subject_id).await
@@ -338,7 +345,7 @@ pub struct PostgresKeyStore {
 
 #[cfg(feature = "postgres")]
 impl PostgresKeyStore {
-    async fn do_delete_key<'e, E>(subject_id: &Uuid, executor: E) -> Result<(), KeyStoreError>
+    async fn do_delete_key<'e, E>(executor: E, subject_id: &Uuid) -> Result<(), KeyStoreError>
     where
         E: sqlx::Executor<'e, Database = sqlx::Postgres>,
     {
@@ -452,15 +459,15 @@ impl KeyStore for PostgresKeyStore {
     }
 
     async fn delete_key(&self, subject_id: &Uuid) -> Result<(), KeyStoreError> {
-        Self::do_delete_key(subject_id, &self.pool).await
+        Self::do_delete_key(&self.pool, subject_id).await
     }
 
     async fn delete_key_in_tx(
         &self,
-        subject_id: &Uuid,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        subject_id: &Uuid,
     ) -> Result<(), KeyStoreError> {
-        Self::do_delete_key(subject_id, &mut **tx).await
+        Self::do_delete_key(&mut **tx, subject_id).await
     }
 
     async fn list_stale_subjects(
