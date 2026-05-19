@@ -1,6 +1,6 @@
 //! Integration tests for [`PostgresKeyStore`].
 //!
-//! These tests require a live PostgreSQL database.  They are only compiled and
+//! These tests require a live `PostgreSQL` database.  They are only compiled and
 //! run when the `postgres` Cargo feature is enabled (enforced via
 //! `required-features` in `Cargo.toml`).
 

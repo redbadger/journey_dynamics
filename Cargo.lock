@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "cqrs-es-crypto"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "aes-gcm",
  "aes-kw",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "cqrs-es-crypto-derive"
-version = "0.1.4"
+version = "0.2.0"
 dependencies = [
  "base64",
  "chrono",

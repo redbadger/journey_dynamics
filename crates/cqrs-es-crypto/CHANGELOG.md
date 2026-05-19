@@ -7,6 +7,99 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-19
+
+This release adds zero-downtime KEK rotation and an atomic transactional write
+path. A `KekProvider` abstraction replaces the old single-key approach, with
+`StaticKekProvider` as the built-in implementation (env-var backed, supports
+multiple named versions). `PostgresKeyStore` now persists a `kek_id` alongside
+each wrapped DEK, and a new `RewrapWorker` re-wraps stale DEKs in the
+background once a new KEK version is promoted to primary. The write path gains
+an opt-in transactional mode (`with_transactional_writes`) and a `PersistHook`
+trait so that domain-specific side-writes (e.g. subject-lookup table inserts)
+are committed atomically with the events. `PiiCipher` is deprecated in favour
+of the split `FieldCipher` + `KekProvider` design. The `postgres` feature gate
+is new — existing users will need to add it explicitly.
+
+### Added
+
+- `KekProvider` trait — abstraction for Key Encryption Key management with
+  `current()`, `by_id()`, `wrap()`, and `unwrap()` methods. Implementations
+  supply the active primary KEK handle and look up KEK versions by ID,
+  enabling zero-downtime rotation.
+- `KekHandle` — lightweight reference to a named KEK version (carries only
+  the `id` string, not raw key bytes).
+- `StaticKekProvider` — in-process `KekProvider` backed by a map of named
+  32-byte keys. Exposes `new` (multi-version map), `single` (one version),
+  and `from_env` (reads `KEK_PRIMARY` / `KEK_<ID>` environment variables) constructors.
+- `WrappedDek` — the unit persisted by `PostgresKeyStore`: a tuple of
+  `(key_id, kek_id, wrapped_key)` used to track which KEK version wrapped
+  each DEK.
+- `KekError` — dedicated error type for KEK operations (`UnknownVersion`,
+  `Wrap`, `Unwrap`, `Transport`).
+- `KeyStore::list_stale_subjects` — cursor-paginated query returning subject
+  IDs whose DEK is still wrapped under a non-primary KEK version, enabling
+  background re-wrap sweeps.
+- `KeyStore::rewrap_key` — atomically unwraps a subject's DEK with the old
+  KEK version and re-wraps it under the current primary, returning `true` if
+  the key was actually updated.
+- `PostgresKeyStoreOptions` — optional configuration struct for
+  `PostgresKeyStore`. Currently exposes `lazy_rewrap` (default `true`),
+  which spawns a background task to re-wrap stale DEKs on each read.
+- `PostgresKeyStore::new_with_options` — constructor accepting
+  `PostgresKeyStoreOptions` for callers that need non-default settings
+  (e.g. deterministic tests with `lazy_rewrap: false`).
+- `InMemoryKeyStore::new_with_provider` — constructor accepting an
+  `Arc<dyn KekProvider>`, enabling in-memory tests that exercise
+  multi-version KEK logic.
+- `InMemoryKeyStore::insert_for_testing` — test helper that pre-populates
+  the store with a subject entry under a specific `kek_id`, making it
+  straightforward to set up stale-key scenarios without calling
+  `get_or_create_key`.
+- `RewrapWorker` — background worker that drives `list_stale_subjects` and
+  `rewrap_key` across all stale subjects in cursor-paginated, bounded-
+  concurrency batches. Drive with `run_once` (single sweep) or
+  `run_forever` (polls on a configurable timer).
+- `RewrapWorkerOptions` — configuration for `RewrapWorker`: `batch_size`,
+  `max_concurrency`, and `batch_pause`.
+- `RewrapStats` — statistics returned by `RewrapWorker::run_once`:
+  `scanned`, `rewrapped`, `failures`, and `duration`.
+- `postgres` Cargo feature — gates all Postgres-specific items
+  (`PostgresKeyStore`, `PostgresKeyStoreOptions`, `PersistHook`). Previously
+  these were compiled unconditionally.
+- `CryptoShreddingEventRepository::with_transactional_writes` — builder
+  method (requires `postgres` feature) that enables an atomic Postgres
+  transaction per `persist` call, committing DEKs, encrypted events, and
+  any hook writes in a single transaction instead of delegating to the inner
+  repository's non-atomic persist.
+- `PersistHook` trait (requires `postgres` feature) — called within the
+  transactional persist path. Receives the unencrypted serialised events and
+  a live `&mut Transaction`; returning an error rolls back the entire
+  transaction. Useful for domain-specific side-writes (e.g. subject-lookup
+  table inserts) that must be atomic with event persistence.
+- `CryptoShreddingEventRepository::with_persist_hook` — registers a
+  `PersistHook`; multiple hooks are called in registration order.
+- DB migration `20260515132849_kek_versioning` — adds `kek_id TEXT NOT NULL`
+  and `rewrapped_at TIMESTAMP` columns to `subject_encryption_keys`, and a
+  supporting index on `kek_id`. Required before upgrading to 0.2.
+
+### Changed
+
+- `PostgresKeyStore::new` now accepts `Arc<dyn KekProvider>` as its second
+  argument instead of a raw 32-byte KEK `Vec<u8>`. Callers must construct a
+  `StaticKekProvider` (or custom implementation) and pass it in.
+- `CryptoShreddingEventRepository::new` now accepts `FieldCipher` instead of
+  the deprecated `PiiCipher`. `FieldCipher` has no KEK argument — wrapping
+  is handled entirely by the `KekProvider` inside `PostgresKeyStore`.
+
+### Deprecated
+
+- `PiiCipher` — mixed field encryption (AES-256-GCM) and DEK wrapping
+  (AES-256-KWP) in a single struct. These concerns are now separated: use
+  `FieldCipher` for field encryption and a `KekProvider` implementation for
+  DEK wrapping. `PiiCipher` remains available for this release but will be
+  removed in a future version.
+
 ## [0.1.4] - 2026-05-15
 
 ### Added
@@ -71,7 +164,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aggregate snapshots are not encrypted. If your aggregate state contains PII it
   will be stored in plaintext, and crypto-shredding a subject will not redact it.
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.4...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.0...HEAD
+[0.2.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.4...cqrs-es-crypto-v0.2.0
 [0.1.4]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.3...cqrs-es-crypto-v0.1.4
 [0.1.3]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.2...cqrs-es-crypto-v0.1.3
 [0.1.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.1...cqrs-es-crypto-v0.1.2
