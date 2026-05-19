@@ -1,7 +1,7 @@
 //! Integration tests for the transactional persist path of
-//! [`CryptoShreddingEventRepository`] backed by a real PostgreSQL database.
+//! [`CryptoShreddingEventRepository`] backed by a real `PostgreSQL` database.
 //!
-//! These tests require a live PostgreSQL database and are only compiled and run
+//! These tests require a live `PostgreSQL` database and are only compiled and run
 //! when both the `postgres` and `testing` Cargo features are enabled (enforced
 //! via `required-features` in `Cargo.toml`).
 
