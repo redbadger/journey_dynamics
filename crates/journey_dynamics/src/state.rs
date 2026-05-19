@@ -122,7 +122,10 @@ pub async fn new_application_state() -> ApplicationState {
     );
     tokio::spawn(async move {
         worker
-            .run_forever(std::time::Duration::from_secs(5 * 60))
+            .run_forever(
+                #[allow(clippy::duration_suboptimal_units)]
+                std::time::Duration::from_secs(5 * 60),
+            )
             .await;
     });
 

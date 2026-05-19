@@ -323,13 +323,15 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         let mut dek_cache: HashMap<Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
         for event in &events {
             if let Some(extract) = self.codec.extract_encrypted(event) {
-                if !dek_cache.contains_key(&extract.subject_id) {
+                if let std::collections::hash_map::Entry::Vacant(e) =
+                    dek_cache.entry(extract.subject_id)
+                {
                     let dek = self
                         .key_store
                         .get_key(&extract.subject_id)
                         .await
                         .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-                    dek_cache.insert(extract.subject_id, dek);
+                    e.insert(dek);
                 }
             }
         }
