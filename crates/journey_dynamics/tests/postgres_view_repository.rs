@@ -18,48 +18,89 @@ use journey_dynamics::{
 };
 use serde_json::json;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
+use test_context::{AsyncTestContext, test_context};
 use uuid::Uuid;
 
-async fn setup_test_db() -> Pool<Postgres> {
-    let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-        "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
-    });
-
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&database_url)
-        .await
-        .expect("Failed to connect to database");
-
-    sqlx::migrate!("../../migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run database migrations");
-
-    pool
+struct PostgresViewRepositoryContext {
+    pool: Pool<Postgres>,
+    journey_ids: Vec<Uuid>,
+    subject_ids: Vec<Uuid>,
 }
 
-async fn cleanup_test_journey(pool: &Pool<Postgres>, journey_id: &Uuid) {
-    let _ = sqlx::query("DELETE FROM journey_view WHERE id = $1")
-        .bind(journey_id)
-        .execute(pool)
-        .await;
+impl AsyncTestContext for PostgresViewRepositoryContext {
+    async fn setup() -> Self {
+        let database_url = std::env::var("DATABASE_URL").unwrap_or_else(|_| {
+            "postgres://postgres:postgres@localhost:5432/journey_dynamics".to_string()
+        });
+
+        let pool = PgPoolOptions::new()
+            .max_connections(5)
+            .connect(&database_url)
+            .await
+            .expect("Failed to connect to database");
+
+        sqlx::migrate!("../../migrations")
+            .run(&pool)
+            .await
+            .expect("Failed to run database migrations");
+
+        Self {
+            pool,
+            journey_ids: Vec::new(),
+            subject_ids: Vec::new(),
+        }
+    }
+
+    async fn teardown(self) {
+        for journey_id in self.journey_ids {
+            let _ = sqlx::query("DELETE FROM journey_view WHERE id = $1")
+                .bind(journey_id)
+                .execute(&self.pool)
+                .await;
+        }
+
+        for subject_id in self.subject_ids {
+            let _ = sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
+                .bind(subject_id)
+                .execute(&self.pool)
+                .await;
+        }
+    }
 }
 
-async fn cleanup_subject_lookup(pool: &Pool<Postgres>, subject_id: &Uuid) {
-    let _ = sqlx::query("DELETE FROM subject_lookup WHERE subject_id = $1")
-        .bind(subject_id)
-        .execute(pool)
-        .await;
+impl PostgresViewRepositoryContext {
+    fn repo(&self) -> StructuredJourneyViewRepository {
+        StructuredJourneyViewRepository::new(self.pool.clone())
+    }
+
+    fn track_journey(&mut self, journey_id: Uuid) -> Uuid {
+        self.journey_ids.push(journey_id);
+        journey_id
+    }
+
+    fn track_subject(&mut self, subject_id: Uuid) -> Uuid {
+        self.subject_ids.push(subject_id);
+        subject_id
+    }
+
+    async fn insert_subject_lookup(&mut self, subject_id: Uuid, email: &str) {
+        self.track_subject(subject_id);
+        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
+            .bind(subject_id)
+            .bind(email)
+            .execute(&self.pool)
+            .await
+            .unwrap();
+    }
 }
 
 // ── Journey lifecycle ────────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_journey_started_event() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_journey_started_event(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -77,15 +118,13 @@ async fn test_journey_started_event() {
     assert_eq!(view.state, JourneyState::InProgress);
     assert_eq!(view.shared_data, json!({}));
     assert!(view.current_step.is_none());
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_journey_full_lifecycle() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -139,17 +178,15 @@ async fn test_journey_full_lifecycle() {
     assert_eq!(view.shared_data["destination"], json!("JFK"));
     assert_eq!(view.current_step, Some("passenger_details".to_string()));
     assert!(view.latest_workflow_decision.is_some());
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
 // ── PersonCaptured ───────────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_person_captured_event() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_person_captured_event(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
 
     repo.dispatch(
@@ -189,15 +226,13 @@ async fn test_person_captured_event() {
     assert_eq!(p.phone.as_deref(), Some("+44-7700-900000"));
     assert_eq!(p.details, json!({}));
     assert!(!p.forgotten);
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_multiple_persons_captured() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_multiple_persons_captured(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
@@ -245,16 +280,14 @@ async fn test_multiple_persons_captured() {
     assert_eq!(persons[0].subject_id, subject_a);
     assert_eq!(persons[1].person_ref, "passenger_1");
     assert_eq!(persons[1].subject_id, subject_b);
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_person_captured_updates_identity_fields() {
+async fn test_person_captured_updates_identity_fields(ctx: &mut PostgresViewRepositoryContext) {
     // A second PersonCaptured for the same person_ref must update, not insert.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
 
     repo.dispatch(
@@ -303,17 +336,15 @@ async fn test_person_captured_updates_identity_fields() {
     assert_eq!(persons[0].name.as_deref(), Some("Alice J. Smith"));
     assert_eq!(persons[0].email.as_deref(), Some("alice.new@example.com"));
     assert_eq!(persons[0].phone.as_deref(), Some("+44-7700-900001"));
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
 // ── PersonDetailsUpdated ─────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_person_details_updated() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_person_details_updated(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
 
     repo.dispatch(
@@ -370,17 +401,17 @@ async fn test_person_details_updated() {
     assert_eq!(p.details["passportNumber"], json!("GB123456789"));
     assert_eq!(p.details["dateOfBirth"], json!("1990-05-15"));
     assert_eq!(p.details["nationality"], json!("GB"));
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
 // ── SubjectForgotten ─────────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_subject_forgotten_only_affects_target_person() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_subject_forgotten_only_affects_target_person(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
@@ -463,18 +494,16 @@ async fn test_subject_forgotten_only_affects_target_person() {
     assert!(!pb.forgotten, "passenger_1 must NOT be forgotten");
     assert_eq!(pb.name.as_deref(), Some("Bob Jones"));
     assert_eq!(pb.email.as_deref(), Some("bob@example.com"));
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
 // ── find_by_email ────────────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_by_email() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id_1 = Uuid::new_v4();
-    let journey_id_2 = Uuid::new_v4();
+async fn test_find_by_email(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id_1 = ctx.track_journey(Uuid::new_v4());
+    let journey_id_2 = ctx.track_journey(Uuid::new_v4());
     let unique_email = format!("alice+{}@example.com", Uuid::new_v4());
 
     // Two journeys, both containing the same email address.
@@ -507,16 +536,13 @@ async fn test_find_by_email() {
 
     let journeys = repo.find_by_email(&unique_email).await.unwrap();
     assert_eq!(journeys.len(), 2);
-
-    cleanup_test_journey(&pool, &journey_id_1).await;
-    cleanup_test_journey(&pool, &journey_id_2).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_by_email_excludes_forgotten_persons() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
-    let journey_id = Uuid::new_v4();
+async fn test_find_by_email_excludes_forgotten_persons(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
     let unique_email = format!("forgotten+{}@example.com", Uuid::new_v4());
 
@@ -556,27 +582,20 @@ async fn test_find_by_email_excludes_forgotten_persons() {
         journeys.is_empty(),
         "forgotten subject must not appear in email search results"
     );
-
-    cleanup_test_journey(&pool, &journey_id).await;
 }
 
 // ── find_subjects_by_email ───────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_case_insensitive() {
+async fn test_find_subjects_by_email_case_insensitive(ctx: &mut PostgresViewRepositoryContext) {
     // Email stored in mixed case; query with lowercase — must still match.
     // find_subjects_by_email reads subject_lookup only, so no journey setup needed.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+    let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
     let stored_email = format!("Alice+{}@Example.COM", Uuid::new_v4());
 
-    sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-        .bind(subject_id)
-        .bind(&stored_email)
-        .execute(&pool)
-        .await
-        .unwrap();
+    ctx.insert_subject_lookup(subject_id, &stored_email).await;
 
     let subjects = repo
         .find_subjects_by_email(&stored_email.to_lowercase())
@@ -584,25 +603,20 @@ async fn test_find_subjects_by_email_case_insensitive() {
         .unwrap();
     assert_eq!(subjects.len(), 1);
     assert_eq!(subjects[0], subject_id);
-
-    cleanup_subject_lookup(&pool, &subject_id).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_deduplicates_across_journeys() {
+async fn test_find_subjects_by_email_deduplicates_across_journeys(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
     // subject_lookup has subject_id as PK — one row regardless of how many
     // journeys a subject appears in.  The query must return exactly one result.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+    let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
     let unique_email = format!("repeat+{}@example.com", Uuid::new_v4());
 
-    sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-        .bind(subject_id)
-        .bind(&unique_email)
-        .execute(&pool)
-        .await
-        .unwrap();
+    ctx.insert_subject_lookup(subject_id, &unique_email).await;
 
     let subjects = repo.find_subjects_by_email(&unique_email).await.unwrap();
     assert_eq!(
@@ -611,25 +625,18 @@ async fn test_find_subjects_by_email_deduplicates_across_journeys() {
         "same subject across two journeys must be deduplicated"
     );
     assert_eq!(subjects[0], subject_id);
-
-    cleanup_subject_lookup(&pool, &subject_id).await;
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_excludes_shredded() {
+async fn test_find_subjects_by_email_excludes_shredded(ctx: &mut PostgresViewRepositoryContext) {
     // After shredding, the subject_lookup row is deleted by the route handler.
     // Verify the email lookup returns nothing once that deletion has occurred.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+    let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
     let unique_email = format!("gone+{}@example.com", Uuid::new_v4());
 
-    sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-        .bind(subject_id)
-        .bind(&unique_email)
-        .execute(&pool)
-        .await
-        .unwrap();
+    ctx.insert_subject_lookup(subject_id, &unique_email).await;
 
     // Simulate shredding via the actual method the route handler calls.
     repo.delete_subject_lookup(&subject_id).await.unwrap();
@@ -641,33 +648,32 @@ async fn test_find_subjects_by_email_excludes_shredded() {
     );
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_unknown_returns_empty() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+async fn test_find_subjects_by_email_unknown_returns_empty(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
     let unknown = format!("nobody+{}@example.com", Uuid::new_v4());
 
     let subjects = repo.find_subjects_by_email(&unknown).await.unwrap();
     assert!(subjects.is_empty(), "unknown email must return empty vec");
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_returns_multiple_subjects() {
+async fn test_find_subjects_by_email_returns_multiple_subjects(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
     // Two distinct subjects sharing the same email address (e.g. random
     // UUID-per-slot strategy) must both be returned.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+    let repo = ctx.repo();
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
     let shared_email = format!("shared+{}@example.com", Uuid::new_v4());
 
     for subject_id in [subject_a, subject_b] {
-        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-            .bind(subject_id)
-            .bind(&shared_email)
-            .execute(&pool)
-            .await
-            .unwrap();
+        ctx.insert_subject_lookup(subject_id, &shared_email).await;
     }
 
     let mut subjects = repo.find_subjects_by_email(&shared_email).await.unwrap();
@@ -675,62 +681,53 @@ async fn test_find_subjects_by_email_returns_multiple_subjects() {
     let mut expected = vec![subject_a, subject_b];
     expected.sort();
     assert_eq!(subjects, expected, "both subjects must be returned");
-
-    cleanup_subject_lookup(&pool, &subject_a).await;
-    cleanup_subject_lookup(&pool, &subject_b).await;
 }
 
 // ── delete_subject_lookup ───────────────────────────────────────────────────────
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_delete_subject_lookup_removes_row() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+async fn test_delete_subject_lookup_removes_row(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
 
-    sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-        .bind(subject_id)
-        .bind("test@example.com")
-        .execute(&pool)
-        .await
-        .unwrap();
+    ctx.insert_subject_lookup(subject_id, "test@example.com")
+        .await;
 
     repo.delete_subject_lookup(&subject_id).await.unwrap();
 
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM subject_lookup WHERE subject_id = $1")
             .bind(subject_id)
-            .fetch_one(&pool)
+            .fetch_one(&ctx.pool)
             .await
             .unwrap();
     assert_eq!(count, 0, "row must be gone after delete_subject_lookup");
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_delete_subject_lookup_is_idempotent() {
+async fn test_delete_subject_lookup_is_idempotent(ctx: &mut PostgresViewRepositoryContext) {
     // Calling delete on a subject_id that has no row must not error.
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+    let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
 
     repo.delete_subject_lookup(&subject_id).await.unwrap();
     repo.delete_subject_lookup(&subject_id).await.unwrap();
 }
 
+#[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_delete_subject_lookup_does_not_affect_other_subjects() {
-    let pool = setup_test_db().await;
-    let repo = StructuredJourneyViewRepository::new(pool.clone());
+async fn test_delete_subject_lookup_does_not_affect_other_subjects(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
     for subject_id in [subject_a, subject_b] {
-        sqlx::query("INSERT INTO subject_lookup (subject_id, email_lower) VALUES ($1, lower($2))")
-            .bind(subject_id)
-            .bind(format!("test+{subject_id}@example.com"))
-            .execute(&pool)
-            .await
-            .unwrap();
+        ctx.insert_subject_lookup(subject_id, &format!("test+{subject_id}@example.com"))
+            .await;
     }
 
     repo.delete_subject_lookup(&subject_a).await.unwrap();
@@ -738,13 +735,11 @@ async fn test_delete_subject_lookup_does_not_affect_other_subjects() {
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM subject_lookup WHERE subject_id = $1")
             .bind(subject_b)
-            .fetch_one(&pool)
+            .fetch_one(&ctx.pool)
             .await
             .unwrap();
     assert_eq!(
         count, 1,
         "subject_b must be unaffected by subject_a deletion"
     );
-
-    cleanup_subject_lookup(&pool, &subject_b).await;
 }
