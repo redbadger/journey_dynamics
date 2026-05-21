@@ -1769,6 +1769,7 @@ dependencies = [
  "cqrs-es",
  "cqrs-es-crypto",
  "dotenv",
+ "futures-util",
  "hegeltest",
  "json-patch",
  "jsonschema 0.46.2",
