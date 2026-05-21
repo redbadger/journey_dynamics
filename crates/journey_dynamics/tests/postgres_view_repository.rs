@@ -12,6 +12,7 @@
 //! `cargo nextest run --lib` succeeds without a database being present.
 
 use cqrs_es::{EventEnvelope, Query};
+use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
     domain::events::JourneyEvent, queries::JourneyState,
     view_repository::StructuredJourneyViewRepository,
@@ -588,21 +589,29 @@ async fn test_find_by_email_excludes_forgotten_persons(ctx: &mut PostgresViewRep
 
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_subjects_by_email_case_insensitive(ctx: &mut PostgresViewRepositoryContext) {
-    // Email stored in mixed case; query with lowercase — must still match.
-    // find_subjects_by_email reads subject_lookup only, so no journey setup needed.
+#[hegel::test(test_cases = 20)]
+async fn test_find_subjects_by_email_case_insensitive(
+    tc: TestCase,
+    ctx: &mut PostgresViewRepositoryContext,
+) {
     let repo = ctx.repo();
     let subject_id = Uuid::new_v4();
-    let stored_email = format!("Alice+{}@Example.COM", Uuid::new_v4());
+    let canonical_email = tc.draw(gs::emails());
+    let stored_email = if tc.draw(gs::booleans()) {
+        canonical_email.to_ascii_uppercase()
+    } else {
+        canonical_email.to_ascii_lowercase()
+    };
+    let query_email = if tc.draw(gs::booleans()) {
+        canonical_email.to_ascii_uppercase()
+    } else {
+        canonical_email.to_ascii_lowercase()
+    };
 
     ctx.insert_subject_lookup(subject_id, &stored_email).await;
 
-    let subjects = repo
-        .find_subjects_by_email(&stored_email.to_lowercase())
-        .await
-        .unwrap();
-    assert_eq!(subjects.len(), 1);
-    assert_eq!(subjects[0], subject_id);
+    let subjects = repo.find_subjects_by_email(&query_email).await.unwrap();
+    assert_eq!(subjects, vec![subject_id]);
 }
 
 #[test_context(PostgresViewRepositoryContext)]
