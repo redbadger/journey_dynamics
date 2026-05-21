@@ -41,6 +41,7 @@ name = "postgres_subject_lookup_hook"
 [dev-dependencies]
 cqrs-es-crypto = { path = "../cqrs-es-crypto", features = ["testing"] }
 cqrs-es = "0.5.0"
+hegel = { package = "hegeltest", version = "0.14.8" }
 serde_json = "1.0.149"
 sqlx = { version = "0.8.6", features = [
     "json",
