@@ -1,5 +1,7 @@
 use cqrs_es::{EventEnvelope, Query};
+use futures_util::{Stream, TryStreamExt, stream};
 use sqlx::{Pool, Postgres, Row};
+use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
 use crate::{
@@ -11,6 +13,14 @@ use crate::{
 #[derive(Clone)]
 pub struct StructuredJourneyViewRepository {
     pool: Pool<Postgres>,
+}
+
+struct LoadAllState<'a> {
+    repo: StructuredJourneyViewRepository,
+    tx: sqlx::Transaction<'a, Postgres>,
+    offset: i64,
+    batch_size: i64,
+    pending_views: VecDeque<JourneyView>,
 }
 
 impl StructuredJourneyViewRepository {
@@ -95,20 +105,50 @@ impl StructuredJourneyViewRepository {
     ///
     /// Returns an error if the database query fails.
     pub async fn load_all(&self) -> Result<Vec<JourneyView>, sqlx::Error> {
-        let mut tx = self.begin_repeatable_read().await?;
+        self.stream_all().await?.try_collect().await
+    }
 
-        let rows = sqlx::query("SELECT id FROM journey_view ORDER BY created_at DESC")
-            .fetch_all(&mut *tx)
-            .await?;
+    /// Stream all journey views using a repeatable-read transaction.
+    ///
+    /// Each yielded item is loaded from the same committed snapshot, even if
+    /// concurrent writes happen while the stream is being consumed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the transaction cannot be opened.
+    pub async fn stream_all(
+        &self,
+    ) -> Result<impl Stream<Item = Result<JourneyView, sqlx::Error>>, sqlx::Error> {
+        let tx = self.begin_repeatable_read().await?;
+        let state = LoadAllState {
+            repo: self.clone(),
+            tx,
+            offset: 0,
+            batch_size: 100,
+            pending_views: VecDeque::new(),
+        };
 
-        let mut views = Vec::new();
-        for row in rows {
-            let id: Uuid = row.get("id");
-            if let Some(view) = self.load_in_tx(&mut tx, &id).await? {
-                views.push(view);
+        Ok(stream::try_unfold(state, |mut state| async move {
+            loop {
+                if let Some(view) = state.pending_views.pop_front() {
+                    return Ok(Some((view, state)));
+                }
+
+                let views = state
+                    .repo
+                    .load_batch_in_tx(&mut state.tx, state.batch_size, state.offset)
+                    .await?;
+
+                if views.is_empty() {
+                    return Ok(None);
+                }
+
+                let batch_len = i64::try_from(views.len())
+                    .map_err(|_| sqlx::Error::Protocol("journey batch length overflow".into()))?;
+                state.offset += batch_len;
+                state.pending_views = views.into();
             }
-        }
-        Ok(views)
+        }))
     }
 
     /// Load all person slots for a journey, ordered by `person_ref`.
@@ -157,6 +197,84 @@ impl StructuredJourneyViewRepository {
         .bind(journey_id)
         .fetch_all(executor)
         .await
+    }
+
+    async fn load_batch_in_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<JourneyView>, sqlx::Error> {
+        let rows = sqlx::query(
+            r"
+            SELECT j.id,
+                   j.state,
+                   j.shared_data,
+                   j.current_step,
+                   j.version,
+                   w.suggested_actions
+            FROM journey_view AS j
+            LEFT JOIN journey_workflow_decision AS w
+              ON w.journey_id = j.id
+             AND w.is_latest = TRUE
+            ORDER BY j.created_at DESC
+            LIMIT $1 OFFSET $2
+            ",
+        )
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut views = Vec::with_capacity(rows.len());
+        let mut journey_ids = Vec::with_capacity(rows.len());
+        let mut view_index = HashMap::with_capacity(rows.len());
+
+        for row in rows {
+            let id: Uuid = row.get("id");
+            let state = match row.get::<String, _>("state").as_str() {
+                "Complete" => JourneyState::Complete,
+                _ => JourneyState::InProgress,
+            };
+            let suggested_actions: Option<Vec<String>> = row.get("suggested_actions");
+
+            view_index.insert(id, views.len());
+            journey_ids.push(id);
+            views.push(JourneyView {
+                id,
+                state,
+                shared_data: row.get("shared_data"),
+                current_step: row.get("current_step"),
+                latest_workflow_decision: suggested_actions
+                    .map(|suggested_actions| WorkflowDecisionView { suggested_actions }),
+                persons: Vec::new(),
+            });
+        }
+
+        let persons = sqlx::query_as::<_, PersonView>(
+            r"
+            SELECT journey_id, person_ref, subject_id,
+                   name, email, phone, details, forgotten
+            FROM journey_person
+            WHERE journey_id = ANY($1)
+            ORDER BY journey_id, person_ref
+            ",
+        )
+        .bind(&journey_ids)
+        .fetch_all(&mut **tx)
+        .await?;
+
+        for person in persons {
+            if let Some(index) = view_index.get(&person.journey_id) {
+                views[*index].persons.push(person);
+            }
+        }
+
+        Ok(views)
     }
 
     /// Find journeys that have a non-forgotten person with the given email address.

@@ -1696,6 +1696,7 @@ dependencies = [
  "cqrs-es",
  "cqrs-es-crypto",
  "dotenv",
+ "futures-util",
  "json-patch",
  "jsonschema 0.46.2",
  "postgres-es",
