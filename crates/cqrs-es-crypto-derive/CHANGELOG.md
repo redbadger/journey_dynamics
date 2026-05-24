@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-24
+
+Companion bump to track `cqrs-es-crypto` 0.2.2. No changes to the
+`#[derive(PiiCodec)]` macro itself.
+
 ## [0.2.1] - 2026-05-19
 
 Companion bump to track `cqrs-es-crypto` 0.2.1. No changes to the
@@ -102,7 +107,8 @@ macro is unchanged.
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.1...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.2...HEAD
+[0.2.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.1...cqrs-es-crypto-derive-v0.2.2
 [0.2.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.0...cqrs-es-crypto-derive-v0.2.1
 [0.2.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.4...cqrs-es-crypto-derive-v0.2.0
 [0.1.4]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.3...cqrs-es-crypto-derive-v0.1.4

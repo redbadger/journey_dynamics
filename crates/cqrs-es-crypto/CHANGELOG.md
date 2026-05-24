@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-24
+
 ### Fixed
 
 - **Unique-constraint violations on the transactional write path no longer
@@ -203,7 +205,8 @@ is new — existing users will need to add it explicitly.
 - Aggregate snapshots are not encrypted. If your aggregate state contains PII it
   will be stored in plaintext, and crypto-shredding a subject will not redact it.
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.1...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.2...HEAD
+[0.2.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.1...cqrs-es-crypto-v0.2.2
 [0.2.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.2.0...cqrs-es-crypto-v0.2.1
 [0.2.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.4...cqrs-es-crypto-v0.2.0
 [0.1.4]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-v0.1.3...cqrs-es-crypto-v0.1.4
