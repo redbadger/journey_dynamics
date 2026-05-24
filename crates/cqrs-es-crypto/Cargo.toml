@@ -18,7 +18,7 @@ chrono = ["derive", "cqrs-es-crypto-derive/chrono"]
 postgres = ["dep:sqlx"]
 
 [dependencies]
-cqrs-es-crypto-derive = { version = "0.2.1", path = "../cqrs-es-crypto-derive", optional = true }
+cqrs-es-crypto-derive = { version = "0.2.2", path = "../cqrs-es-crypto-derive", optional = true }
 aes-gcm = "0.10"
 aes-kw = "0.3"
 async-trait = "0.1"
