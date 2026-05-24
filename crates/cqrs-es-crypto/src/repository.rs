@@ -372,6 +372,24 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
 // ── Transactional helpers (postgres feature) ───────────────────────────────
 
+/// Maps a `sqlx::Error` from the transactional write path to a
+/// [`PersistenceError`], translating a PostgreSQL unique-violation
+/// (SQLSTATE `23505`) — raised on the `events_pkey` `(aggregate_type,
+/// aggregate_id, sequence)` constraint when a concurrent writer commits
+/// first — to [`PersistenceError::OptimisticLockError`]. `cqrs-es` then
+/// surfaces this as `AggregateError::AggregateConflict`, enabling the
+/// standard inline-retry pattern for concurrent writes against the same
+/// aggregate. All other database errors fall through to `UnknownError`.
+#[cfg(feature = "postgres")]
+fn map_sqlx_error(err: sqlx::Error) -> PersistenceError {
+    if let sqlx::Error::Database(db_err) = &err {
+        if db_err.code().as_deref() == Some("23505") {
+            return PersistenceError::OptimisticLockError;
+        }
+    }
+    PersistenceError::UnknownError(Box::new(err))
+}
+
 #[cfg(feature = "postgres")]
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     /// Like [`encrypt_events`], but creates DEKs within the provided
@@ -430,7 +448,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         .bind(subject_id)
         .fetch_optional(&mut **tx)
         .await
-        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        .map_err(map_sqlx_error)?;
 
         if let Some(row) = existing {
             let material = provider
@@ -465,7 +483,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         .bind(&wrapped.kek_id)
         .execute(&mut **tx)
         .await
-        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        .map_err(map_sqlx_error)?;
 
         if result.rows_affected() == 0 {
             // A concurrent transaction inserted first — re-read from the tx.
@@ -476,7 +494,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .bind(subject_id)
             .fetch_one(&mut **tx)
             .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            .map_err(map_sqlx_error)?;
 
             let material = provider
                 .unwrap(&WrappedDek {
@@ -502,10 +520,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         snapshot_update: Option<(String, Value, usize)>,
         pool: &sqlx::Pool<sqlx::Postgres>,
     ) -> Result<(), PersistenceError> {
-        let mut tx = pool
-            .begin()
-            .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
 
         // 1. Encrypt events, creating DEKs inside the transaction.
         let encrypted = self.encrypt_events_in_tx(events, &mut tx).await?;
@@ -532,7 +547,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .bind(&metadata)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            .map_err(map_sqlx_error)?;
         }
 
         // 3. Handle snapshot if present.
@@ -563,7 +578,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             .bind(&aggregate)
             .execute(&mut *tx)
             .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            .map_err(map_sqlx_error)?;
         }
 
         // 4. Call hooks with the UNENCRYPTED events inside the transaction.
@@ -572,9 +587,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         }
 
         // 5. Commit — DEKs, events, and hook writes are now atomically visible.
-        tx.commit()
-            .await
-            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+        tx.commit().await.map_err(map_sqlx_error)?;
 
         Ok(())
     }

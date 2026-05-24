@@ -450,3 +450,33 @@ async fn test_transactional_persist_plain_events_roundtrip() {
 
     cleanup(&pool, &aggregate_id).await;
 }
+
+#[tokio::test]
+async fn test_duplicate_sequence_returns_optimistic_lock_error() {
+    // A concurrent writer inserting at the same (aggregate_type, aggregate_id,
+    // sequence) must surface as `PersistenceError::OptimisticLockError` so that
+    // the cqrs-es framework can map it to `AggregateError::AggregateConflict`
+    // and downstream callers can retry. Without this mapping the conflict
+    // bubbles up as `UnexpectedError` and the standard inline-retry pattern
+    // for command handlers is defeated.
+    let pool = setup_test_db().await;
+    let repo = make_transactional_repo(pool.clone());
+    let aggregate_id = format!("tx-optlock-{}", Uuid::new_v4());
+    let subject_id = Uuid::new_v4();
+
+    repo.persist::<TestAggregate>(&[pii_event(&aggregate_id, 1, subject_id)], None)
+        .await
+        .expect("first persist must succeed");
+
+    let result = repo
+        .persist::<TestAggregate>(&[pii_event(&aggregate_id, 1, subject_id)], None)
+        .await;
+
+    cleanup(&pool, &aggregate_id).await;
+    cleanup_dek(&pool, &subject_id).await;
+
+    assert!(
+        matches!(result, Err(PersistenceError::OptimisticLockError)),
+        "expected OptimisticLockError on duplicate (aggregate_id, sequence), got: {result:?}"
+    );
+}
