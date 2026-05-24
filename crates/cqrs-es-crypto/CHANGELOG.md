@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Unique-constraint violations on the transactional write path no longer
+  surface as `UnknownError`** — when `with_transactional_writes` is enabled,
+  a Postgres `events_pkey` violation (SQLSTATE `23505`) is now mapped to
+  `PersistenceError::OptimisticLockError`, matching the behaviour of the
+  legacy delegating path. `cqrs-es` surfaces this as
+  `AggregateError::AggregateConflict`, so the standard inline-retry pattern
+  for concurrent writes against the same aggregate now triggers as intended
+  instead of being abandoned as an unexpected error.
+
 ## [0.2.1] - 2026-05-19
 
 ### Added
