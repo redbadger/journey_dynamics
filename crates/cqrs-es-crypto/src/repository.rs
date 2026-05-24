@@ -373,8 +373,8 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 // ── Transactional helpers (postgres feature) ───────────────────────────────
 
 /// Maps a `sqlx::Error` from the transactional write path to a
-/// [`PersistenceError`], translating a PostgreSQL unique-violation
-/// (SQLSTATE `23505`) — raised on the `events_pkey` `(aggregate_type,
+/// [`PersistenceError`], translating a `PostgreSQL` unique-violation
+/// (`SQLSTATE` `23505`) — raised on the `events_pkey` `(aggregate_type,
 /// aggregate_id, sequence)` constraint when a concurrent writer commits
 /// first — to [`PersistenceError::OptimisticLockError`]. `cqrs-es` then
 /// surfaces this as `AggregateError::AggregateConflict`, enabling the
