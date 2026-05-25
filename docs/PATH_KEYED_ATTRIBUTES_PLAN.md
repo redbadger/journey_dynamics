@@ -28,7 +28,7 @@ The plan is divided into three phases:
 
 | Phase | Goal                                                                 |
 | ----- | -------------------------------------------------------------------- |
-| **A** | Introduce new types and the new `SetAttributes` command **alongside** existing commands. Old code paths remain fully functional. |
+| **A** | Refactor `cqrs-es-crypto` to support multi-subject partitioned ciphertext (back-compatible on read). Introduce new types and the `SetAttributes` command **alongside** existing commands. Old code paths remain fully functional. |
 | **B** | Switch the flight-booking example and HTTP surface to the new model. Add an event up-caster for old events. |
 | **C** | Remove deprecated commands, events, fields, columns, and migrations. |
 
@@ -242,16 +242,182 @@ still passes with the new column; `phase` round-trips through the view.
 
 ---
 
-### A5. Add `SetAttributes` command and `AttributesSet` event (parallel to existing)
+### A5. Refactor `cqrs-es-crypto` to multi-subject partitioned ciphertext
 
-**Pre-flight.** Read `domain/commands.rs`, `domain/events.rs`,
-`domain/journey.rs::handle`, `domain/journey.rs::apply`,
-`crates/journey_dynamics/src/pii_codec.rs` (for the macro-derived codec
-structure).
+**Pre-flight.** Read `crates/cqrs-es-crypto/src/lib.rs`,
+`crates/cqrs-es-crypto/src/repository.rs`,
+`crates/cqrs-es-crypto/src/cipher.rs`, the `PiiEventCodec` trait, and the
+derive expansion for `PersonCaptured` (`cargo expand -p journey_dynamics
+--lib pii_codec`).
+
+**Goal.** Change the crate's on-disk envelope from "one `(subject_id,
+ciphertext)` per event" to "`Vec<{ subject_id, label, ciphertext }>` per
+event", in a way that is backward-compatible on the **read** path — legacy
+single-blob events still decrypt and redact correctly through the new code.
+This step is purely a `cqrs-es-crypto` + `cqrs-es-crypto-derive` change; no
+`journey_dynamics` semantics shift.
 
 **Do.**
 
-#### A5.1 — Wire format
+#### A5.1 — New public types
+
+```rust
+pub struct SecretPartition {
+    /// Subject whose DEK encrypts this partition.
+    pub subject_id: Uuid,
+    /// Caller-supplied label routing the cleartext bytes back into the
+    /// event on read. Opaque to the crypto layer (e.g. a field name or a
+    /// person_ref). Must be unique within an event.
+    pub label: String,
+    /// Cleartext bytes (typically JSON) to be encrypted.
+    pub payload: Vec<u8>,
+}
+
+pub struct EncryptedPartition {
+    pub subject_id: Uuid,
+    pub label: String,
+    pub nonce: Vec<u8>,
+    pub ciphertext: Vec<u8>,
+}
+
+pub struct DecryptedPartition {
+    pub subject_id: Uuid,
+    pub label: String,
+    pub payload: Vec<u8>,
+}
+```
+
+#### A5.2 — `PiiEventCodec` trait
+
+Replace single-subject extract/reconstruct with partition-aware methods:
+
+```rust
+pub trait PiiEventCodec: Send + Sync {
+    /// Identify partitions to encrypt. Empty vec = pure-plaintext event.
+    fn extract_partitions(&self, event: &SerializedEvent)
+        -> Result<Vec<SecretPartition>, PiiCodecError>;
+
+    /// Reattach decrypted partitions to a serialized event by `label`.
+    fn reconstruct(&self, event: &mut SerializedEvent,
+        partitions: Vec<DecryptedPartition>) -> Result<(), PiiCodecError>;
+
+    /// Redact partitions whose DEK has been deleted. The codec decides
+    /// the per-label sentinel shape; the repository never invents content.
+    fn redact_partitions(&self, event: &mut SerializedEvent,
+        labels: &[String]) -> Result<(), PiiCodecError>;
+}
+```
+
+Provide a `SingleSubjectCodec` adapter trait (default-implemented over the
+new trait) so hand-rolled callers that still think in single-subject terms
+can be lifted unchanged with `label = "default"`.
+
+#### A5.3 — On-disk envelope
+
+The encrypted event payload becomes:
+
+```json
+{
+  "EventType": {
+    "...plaintext fields...": "...",
+    "subjects":              ["<uuid>", "..."],
+    "encrypted_partitions":  [
+      { "subject_id": "<uuid>",
+        "label":      "<string>",
+        "nonce":      "<b64>",
+        "ciphertext": "<b64>" }
+    ]
+  }
+}
+```
+
+- `subjects` is a plaintext peer array maintained by the repository (not
+  by the codec) for indexing.
+- `encrypted_partitions` is the canonical secret carrier.
+- The legacy `encrypted_data` / inline `subject_id` shape is recognised on
+  read only (see A5.4) and is never emitted by new writes.
+
+#### A5.4 — Read-path back-compat
+
+The repository detects the legacy shape — a top-level `subject_id` field
+plus a single secret field (per the old codec's `extract_secret`) — and
+translates it on the fly to a one-element partition vector with `label =
+"default"`. The codec sees only the new shape. Add a fixture-based test:
+ a legacy `PersonCaptured` or `PersonDetailsUpdated` payload (captured from
+current main) round-trips through decrypt and redact without alteration.
+
+#### A5.5 — Per-partition AAD
+
+Each partition's AAD is the concatenation `aggregate_id || sequence ||
+subject_id || label`. This makes partitions non-fungible across events,
+across subjects in the same event, **and** across labels (preventing
+intra-event swap attacks). Update `cipher.rs` to thread the AAD per
+partition. Add a test asserting that swapping two partitions' bytes within
+one event fails the GCM tag check.
+
+#### A5.6 — Multi-partition decrypt and redact
+
+`CryptoShreddingEventRepository::get_events` (and friends) iterates
+partitions on read. For each: try `KeyStore::get_key(subject_id)`. If
+`NotFound`, the partition's label is collected into a `redacted_labels`
+list passed to `redact_partitions` after the decryptable partitions have
+been reattached. Surviving partitions decrypt normally.
+
+Add a test: a two-partition event where one subject has been
+crypto-shredded — assert the surviving partition decrypts intact and the
+deleted one carries the codec-defined sentinel.
+
+#### A5.7 — Derive macro update
+
+The macro currently generates single-subject extract/reconstruct from
+`#[pii(subject)]` + `#[pii(secret)]` fields. Update its code-gen to emit
+`extract_partitions` returning a `Vec<SecretPartition>` of length 0 or 1
+(0 when `subject_id.is_none()`, 1 with `label = "default"` otherwise), and
+an `extract_partitions`-mirrored `reconstruct`. The existing
+`PersonCaptured` / `PersonDetailsUpdated` derives continue to compile
+unchanged. `redact_partitions` reuses the existing sentinel rules per
+field.
+
+#### A5.8 — CHANGELOG, README, version
+
+- Splice the prepared content from
+  [`CQRS_ES_CRYPTO_PARTITIONS_ADR.md`](./CQRS_ES_CRYPTO_PARTITIONS_ADR.md)
+  into `crates/cqrs-es-crypto/README.md` per the placement notes at the
+  bottom of that document. After folding in, delete the staging document.
+- Add the prepared CHANGELOG entry (also in the staging document) under
+  `## [Unreleased]` in `crates/cqrs-es-crypto/CHANGELOG.md`.
+- Bump `crates/cqrs-es-crypto/Cargo.toml` and
+  `crates/cqrs-es-crypto-derive/Cargo.toml` minor versions. The workspace
+  package version (`Cargo.toml`) stays put.
+
+#### A5.9 — Tests
+
+- All existing `cqrs-es-crypto` and `cqrs-es-crypto-derive` tests pass
+  unchanged.
+- New tests: legacy-shape read, multi-partition write/read, partial
+  shredding (one subject deleted, one intact), AAD swap-detection.
+- All existing `journey_dynamics::pii_codec` tests still pass — the
+  `PersonCaptured`/`PersonDetailsUpdated` codec arms work via the
+  unchanged derive macro contract.
+
+**Validation.** `cargo test -p cqrs-es-crypto -p cqrs-es-crypto-derive -p
+journey_dynamics`.
+
+**Done when.** Workspace tests pass; events written before this step still
+decrypt; the new partitioned shape round-trips end-to-end; the README and
+CHANGELOG document the format change.
+
+---
+
+### A6. Add `SetAttributes` command and `AttributesSet` event (parallel to existing)
+
+**Pre-flight.** Read `domain/commands.rs`, `domain/events.rs`,
+`domain/journey.rs::handle`, `domain/journey.rs::apply`,
+`crates/journey_dynamics/src/pii_codec.rs`.
+
+**Do.**
+
+#### A6.1 — Wire format
 
 In `domain/commands.rs`:
 
@@ -270,54 +436,66 @@ pub enum JourneyCommand {
 }
 ```
 
-#### A5.2 — Event
+Note: a single `SetAttributes` may touch attributes for **multiple
+subjects** (e.g. two passengers' passport numbers in one form submission).
+The aggregate accepts this; the codec encrypts each subject's slice under
+its own DEK as a separate partition (see A5).
 
-In `domain/events.rs`:
+#### A6.2 — Event
+
+Hand-written (not derived) — see step A7. Conceptual shape:
 
 ```rust
-#[pii(event_type = "AttributesSet", sentinel = "encrypted_data")]
-AttributesSet {
-    #[pii(plaintext)] plaintext: BTreeMap<AttributePath, Value>,
-    #[pii(subject)]   subject_id: Option<Uuid>,
-    #[pii(secret)]    secret: BTreeMap<AttributePath, Value>,
-},
+pub enum JourneyEvent {
+    // …
+    AttributesSet {
+        /// Path → value changes that are not classified as Secret.
+        plaintext: BTreeMap<AttributePath, Value>,
+        /// One entry per subject whose data is touched by this command.
+        /// Empty when the command set only plaintext attributes.
+        secret_partitions: Vec<SecretPartitionData>,
+    },
+    // …
+}
+
+pub struct SecretPartitionData {
+    /// Journey-local slot name; used as the codec `label`.
+    pub person_ref: String,
+    /// The subject's identity, copied from `PersonSlot.subject_id`.
+    pub subject_id: Uuid,
+    /// Path → value changes encrypted under `subject_id`'s DEK.
+    pub changes: BTreeMap<AttributePath, Value>,
+}
 ```
 
-Notes:
+Update `event_type()` (`"AttributesSet"`) and `event_version()` (`"1.0"`).
+Mark with `#[serde(default)]` on `secret_partitions` so future shape
+tweaks remain forward-compatible.
 
-- This v1 event supports **at most one subject per command**. Multi-subject
-  is deferred (see Phase C / future work). Document this in a comment.
-- `subject_id: Option<Uuid>` is `None` when `secret` is empty.
-- Update `event_type()` and `event_version()`.
-- Confirm `cqrs-es-crypto-derive` supports `BTreeMap<_, _>` in a `#[pii]`
-  field; if not, fall back to hand-writing the codec arm for
-  `AttributesSet` (see step A6). Prefer hand-writing if the macro requires
-  shape changes — the new event is schema-driven and a different beast.
-
-#### A5.3 — Aggregate `handle`
+#### A6.3 — Aggregate `handle`
 
 Add a `JourneyCommand::SetAttributes { changes } =>` arm. It must:
 
 1. Reject if journey not started (`NotFound`).
-2. Reject if `Complete`.
+2. Reject if `Complete` (`AlreadyCompleted`).
 3. Reject if `changes` is empty (`InvalidData("no changes")`).
-4. Compute the path classification using the schema obtained from
-   `services.attribute_schema()` (see A5.4). Unknown paths → return
+4. Compute the path classification using `services.attribute_schema()`
+   (see A6.4). Unknown paths → return
    `JourneyError::UnknownAttributePath(Vec<AttributePath>)`.
-5. For every secret path of shape `persons/<ref>/…`, resolve `<ref>` →
+5. For every secret path under `persons/<ref>/…`, resolve `<ref>` →
    `slot.subject_id`. If the slot does not exist, return
-   `PersonNotFound(<ref>)`.
-6. Reject if the resolved secret subjects are not all the same single
-   subject (`MultiSubjectNotSupported`). This is the v1 restriction.
-7. Validate plaintext leaves against the JSON Schema (if provided) by
+   `PersonNotFound(<ref>)`. Group the resolved secret changes by
+   `(person_ref, subject_id)` into one `SecretPartitionData` per person.
+6. Validate plaintext leaves against the JSON Schema (if provided) by
    building a rehydrated tree from the union of current `shared_data` and
    the new plaintext changes, then calling `services.schema_validator()`.
-8. Call `services.decision_engine().evaluate_next_steps(...)` with the new
-   path-keyed shape (see A5.5 below).
-9. Emit one `AttributesSet { plaintext, secret, subject_id }` event then
-   one `WorkflowEvaluated { suggested_actions }`. No `StepProgressed`.
+7. Call `services.decision_engine().evaluate_attributes(...)` with the
+   merged bag (see A6.5).
+8. Emit one `AttributesSet { plaintext, secret_partitions }` event
+   followed by one `WorkflowEvaluated { suggested_actions }`. No
+   `StepProgressed`.
 
-#### A5.4 — `JourneyServices`
+#### A6.4 — `JourneyServices`
 
 Extend with an `attribute_schema: Arc<AttributeSchema>` and an
 accessor. Update the constructor and **all** call sites (`state.rs`,
@@ -328,7 +506,7 @@ tests, integration tests) to pass an `AttributeSchema`. In tests and in
 > The flight-booking example will later supply a real schema; for now
 > `state.rs` builds a permissive one so the binary keeps booting.
 
-#### A5.5 — Decision engine: new entry point
+#### A6.5 — Decision engine: new entry point
 
 Add a method on the trait (default-implemented for back-compat):
 
@@ -348,29 +526,35 @@ Both `SimpleDecisionEngine` and `GoRulesDecisionEngine` keep their existing
 `evaluate_attributes`. Phase B will refine the GoRules side to read flat
 paths properly.
 
-#### A5.6 — Aggregate `apply`
+#### A6.6 — Aggregate `apply`
 
 Add an `AttributesSet` arm:
 
 - For each plaintext path: `json_path::set_at_path(&mut self.shared_data,
   &path, value.clone())`.
-- For each secret path under `persons/<ref>/…`: parse out `<ref>`, look up
-  the slot. **Temporary dual-write**: also mirror into the existing
-  `slot.details` blob using the suffix path. This keeps the legacy view
-  rows useful through Phase A/B. Remove in Phase C.
+- For each `SecretPartitionData`, iterate its `changes`:
+  - Look up the slot by `person_ref`. (It must exist because `handle`
+    enforced this, but defensive: skip if missing.)
+  - Write each path/value into `shared_data` under `persons/<ref>/…` using
+    `set_at_path`.
+  - **Temporary mirror-write**: also merge into the existing
+    `slot.details` blob using the suffix path. This keeps the legacy
+    `journey_person.details` column populated through Phase A/B. Removed
+    in step C4.
 
-#### A5.7 — Tests
+#### A6.7 — Tests
 
 Mirror the existing `domain/journey.rs` test module. Add tests:
 
 - `set_attributes_requires_started`
 - `set_attributes_rejects_after_complete`
+- `set_attributes_rejects_empty_changes`
 - `set_attributes_rejects_unknown_path` (configure schema)
 - `set_attributes_plaintext_merges_into_shared_data`
 - `set_attributes_secret_requires_person_captured`
 - `set_attributes_secret_writes_under_slot`
 - `set_attributes_emits_workflow_evaluated`
-- `set_attributes_rejects_multi_subject`
+- `set_attributes_multi_subject_produces_one_partition_per_subject`
 - `set_attributes_invalid_data_against_json_schema`
 
 **Validation.** `cargo test --workspace`.
@@ -381,58 +565,89 @@ HTTP route.
 
 ---
 
-### A6. Path-keyed PII codec for `AttributesSet`
+### A7. Path-keyed multi-partition codec for `AttributesSet`
 
-**Pre-flight.** Read `crates/journey_dynamics/src/pii_codec.rs` and the
-generated impl for `PersonDetailsUpdated` (search for `PersonDetailsUpdated`
-under `crates/cqrs-es-crypto-derive`).
+**Pre-flight.** Read `crates/journey_dynamics/src/pii_codec.rs`, the
+expanded derive output for the existing variants (via `cargo expand`), and
+the new `PiiEventCodec` trait shape introduced in A5.
 
 **Do.**
 
-- Decide between option (1) extending the derive macro with
-  `#[pii(by_path)]` or (2) hand-writing the codec arm. **Recommendation:
-  hand-write** — see the design doc's rationale (the macro is for
-  field-fixed PII, path-keyed is data-driven).
+- Replace `#[derive(PiiCodec)]` on `JourneyEvent` with a hand-written
+  `impl PiiEventCodec for JourneyEvent { … }`.
 
-- If hand-writing: replace `#[derive(PiiCodec)]` on `JourneyEvent` with a
-  hand-written `impl PiiEventCodec for JourneyEvent { … }` that:
+  - Reuse the macro's emitted logic for `PersonCaptured` and
+    `PersonDetailsUpdated` (copy from `cargo expand`, then clean up).
+    These each contribute zero or one partition with `label = "default"`.
+  - Add an `AttributesSet` arm:
+    - **`extract_partitions`**: for each `SecretPartitionData` in
+      `secret_partitions`, emit a `SecretPartition { subject_id, label:
+      person_ref.clone(), payload: serde_json::to_vec(&changes)? }`.
+      Returns an empty `Vec` when `secret_partitions` is empty.
+    - **`reconstruct`**: bucket the incoming `Vec<DecryptedPartition>` by
+      `label`. For each, deserialise the payload bytes back into
+      `BTreeMap<AttributePath, Value>` and write it into the matching
+      `SecretPartitionData.changes` field (keyed by `person_ref`).
+    - **`redact_partitions`**: for each label in the redaction list,
+      replace the matching `SecretPartitionData.changes` with a single
+      entry `{ AttributePath("redacted") => Value::Bool(true) }`,
+      mirroring the existing project sentinel convention.
 
-  - Reuses the macro output for the existing variants (copy-and-paste from
-    `cargo expand`, then clean up).
-  - Adds an `AttributesSet` arm that:
-    - `classify` returns `Pii` iff `subject_id.is_some() && !secret.is_empty()`.
-    - `extract_secret` returns the JSON-serialised `secret` map and the
-      `subject_id`.
-    - `reconstruct` reads the decrypted JSON back into `secret` and clears
-      the inline `secret` field on the serialized event (replaced by the
-      ciphertext sub-payload).
-    - `redact` empties `secret` and replaces it with a `{"redacted":
-      true}` marker per the project's existing redaction convention.
+- The hand-written impl is the single source of truth for `JourneyEvent`
+  going forward; the derive macro is no longer used for this enum.
 
 - New unit tests in `pii_codec.rs`:
 
-  - `test_attributes_set_passes_through_when_no_secret`
-  - `test_attributes_set_encrypts_secret_partition_under_subject_dek`
-  - `test_attributes_set_decrypts_secret_partition`
-  - `test_attributes_set_redacted_when_dek_deleted`
-  - `test_attributes_set_aad_binds_to_event_position`
+  - `test_attributes_set_passes_through_when_no_secret_partitions`
+  - `test_attributes_set_encrypts_each_partition_under_its_own_dek`
+  - `test_attributes_set_decrypts_multi_subject_partitions`
+  - `test_attributes_set_partial_shred_keeps_intact_partitions`
+    (subject A's DEK deleted, subject B's intact — only A's changes are
+    redacted)
+  - `test_attributes_set_aad_binds_partition_to_subject_and_label`
 
 **Validation.** `cargo test -p journey_dynamics pii_codec`.
 
-**Done when.** New codec tests pass; all existing codec tests (for
-`PersonCaptured`, `PersonDetailsUpdated`, etc.) still pass.
+**Done when.** New multi-partition tests pass; all existing
+`PersonCaptured` / `PersonDetailsUpdated` codec tests still pass; the
+`subjects` plaintext peer array is populated correctly by the repository
+for downstream indexing.
 
 ---
 
-### A7. HTTP extractor and route accept `SetAttributes`
+### A8. Subject indexing for `AttributesSet`; HTTP extractor accepts the new command
 
-**Pre-flight.** Read `command_extractor.rs`, `route_handler.rs`.
+**Pre-flight.** Read `command_extractor.rs`, `route_handler.rs`,
+`view_repository.rs` (subject-lookup queries), and
+`migrations/20260423132137_init.up.sql`.
 
 **Do.**
 
-- No code change strictly required (the existing extractor uses serde and
-  will pick up the new variant automatically). Verify by adding an
-  end-to-end test that POSTs:
+- **Migration** `migrations/2026MMDDHHMMSS_attributes_set_index.up.sql`:
+
+  ```sql
+  CREATE INDEX idx_events_attributes_set_subjects
+      ON events USING GIN ((payload -> 'AttributesSet' -> 'subjects'))
+      WHERE event_type = 'AttributesSet';
+  ```
+
+  and matching `.down.sql`.
+
+- Update `view_repository.rs::find_journeys_by_subject` (and any sibling
+  query) so that subject lookup unions across:
+
+  - `event_type = 'PersonCaptured'` with the existing
+    `payload -> 'PersonCaptured' ->> 'subject_id'` index (legacy and
+    current).
+  - `event_type = 'AttributesSet'` with the new GIN index on
+    `payload -> 'AttributesSet' -> 'subjects'`.
+
+  Use an array-containment predicate: `payload -> 'AttributesSet' ->
+  'subjects' @> jsonb_build_array($1::text)`.
+
+- HTTP extractor: no code change strictly required (serde picks up the new
+  variant automatically). Verify by adding a unit-style end-to-end test
+  under `crates/journey_dynamics/tests/` that POSTs:
 
   ```json
   { "SetAttributes": { "changes": {
@@ -444,19 +659,15 @@ under `crates/cqrs-es-crypto-derive`).
   to `/journeys/{id}` and asserts a 204 and that `shared_data` contains
   `{"search":{"origin":"LHR","destination":"JFK"}}`.
 
-- Add the test under `crates/journey_dynamics/tests/` as a unit-style test
-  that goes through the route handler with an in-memory state (do not
-  introduce a new HTTP integration test framework).
+- Defer the nested-form sugar to B4.
 
-- Document the ergonomic nested-form decoder as a follow-up (Phase B step
-  B4); not required to land here.
+**Validation.** `cargo test --workspace`. Run
+`postgres_subject_lookup_hook.rs` if Postgres is available, asserting
+lookups resolve through both index paths.
 
-**Validation.** `cargo test --workspace`. Manually `cargo run -p
-journey_dynamics` and `curl` once if a developer is on the task; not
-required for the agent.
-
-**Done when.** New test passes; both `Capture` and `SetAttributes` POSTs
-are accepted by the same route.
+**Done when.** Both `Capture` and `SetAttributes` POSTs are accepted at
+the same route; subject lookups locate journeys that touched the subject
+via either `PersonCaptured` or `AttributesSet`.
 
 ---
 
@@ -497,15 +708,18 @@ fixtures of the old payload shape (add at least one fixture under
 - Add a thin layer between the event store and the aggregate that, on
   read, translates:
   - `JourneyEvent::Modified { step, data }` → `JourneyEvent::AttributesSet
-    { plaintext: flatten(data) namespaced under "<step>/...", secret:
-    empty, subject_id: None }`.
+    { plaintext: flatten(data) prefixed by `"<step>/"`, secret_partitions:
+    vec![] }`.
   - `JourneyEvent::PersonDetailsUpdated { person_ref, subject_id, data }`
-    → `JourneyEvent::AttributesSet { plaintext: empty, secret:
-    flatten(data) namespaced under "persons/<ref>/...", subject_id:
-    Some(subject_id) }`.
+    → `JourneyEvent::AttributesSet { plaintext: empty, secret_partitions:
+    vec![SecretPartitionData { person_ref, subject_id, changes:
+    flatten(data) prefixed by `"persons/<ref>/"` }] }`.
   - `JourneyEvent::StepProgressed { … }` → **dropped** (no longer needed;
     `current_step` removal happens in Phase C, but the event is replay-only
     harmless until then — see "Done when").
+  - Legacy ciphertext envelope shape (single-blob) → already handled by
+    the back-compat read path landed in A5.4; the up-caster operates on
+    already-decrypted `SerializedEvent`s, not on ciphertext.
 
 - Implement as a function `upcast_event(SerializedEvent) -> SerializedEvent`
   invoked in a wrapping `PersistedEventRepository` adapter. Place under
@@ -738,33 +952,28 @@ event-upcaster.
 
 ---
 
-### C5. Drop legacy event indexes; replace with one for `AttributesSet`
+### C5. Drop the legacy `PersonDetailsUpdated` index
 
-**Pre-flight.** Inspect indexes created by
-`migrations/20260423132137_init.up.sql`.
+**Pre-flight.** Confirm that no remaining caller queries
+`idx_events_person_details_updated_subject` (the up-caster turns these
+events into `AttributesSet` on read; the new GIN index from A8 covers
+those lookups instead).
 
 **Do.**
 
 - New migration:
 
   ```sql
-  DROP INDEX IF EXISTS idx_events_person_captured_subject;
   DROP INDEX IF EXISTS idx_events_person_details_updated_subject;
-  CREATE INDEX idx_events_attributes_set_subject
-      ON events ((payload -> 'AttributesSet' ->> 'subject_id'))
-      WHERE event_type = 'AttributesSet';
   ```
 
-  Keep `PersonCaptured` indexed (it still exists).
+  Keep `idx_events_person_captured_subject` (the variant still exists).
+  Keep `idx_events_attributes_set_subjects` (added in A8).
 
-- Update any `find_journeys_by_subject` query in `queries.rs` /
-  `view_repository.rs` to include the new index path.
+**Validation.** `postgres_subject_lookup_hook.rs` still finds journeys for
+a given subject across all relevant event types.
 
-**Validation.** Postgres integration test
-`postgres_subject_lookup_hook.rs` still finds journeys via both
-`PersonCaptured` and `AttributesSet`.
-
-**Done when.** Index exists and integration test passes.
+**Done when.** The unused index is gone; lookups still work.
 
 ---
 
@@ -804,34 +1013,45 @@ production. If unsure, keep the up-caster indefinitely — it is cheap.
 
 ### Things to defer (explicit non-goals of this plan)
 
-- **Multi-subject events in one `SetAttributes`.** Step A5 rejects them
-  with `MultiSubjectNotSupported`. Lifting this requires the
-  `cqrs-es-crypto` crate to support a vector of `(subject_id,
-  ciphertext)` per event (see the design doc, "Multi-subject events").
-  Track as a follow-up RFC.
 - **Snapshot encryption** (carried over from `cqrs-es-crypto`'s known
-  limitations).
+  limitations). Snapshots remain plaintext; do not store PII in aggregate
+  state that gets snapshotted.
 - **JDM ergonomics for deeply-nested flat paths.** B3 confirms feasibility
   for the depth used in flight-booking; richer ergonomics (e.g. `$path`
   selectors) are a separate workstream.
+- **Cross-event partition deduplication.** If the same subject appears in
+  many `AttributesSet` events, each event still carries its own
+  partition. A future optimisation could batch-encrypt, but the current
+  per-event partition model is simpler and matches the event-sourcing
+  grain.
+
+### Things now in scope that were previously deferred
+
+- **Multi-subject events in one `SetAttributes`.** Handled natively by the
+  partitioned ciphertext envelope landed in A5. No `MultiSubjectNotSupported`
+  error exists.
+- **Per-path redaction within an event.** A consequence of partitioning:
+  when subject A is shredded but subject B is not, A's paths are redacted
+  while B's are intact in the same `AttributesSet` event.
 
 ---
 
 ## Suggested PR cadence
 
-| PR | Steps | Reviewer focus                                  |
-| -- | ----- | ----------------------------------------------- |
-| 1  | A1, A2, A3 | Pure additive types and helpers. Skim, ✅. |
-| 2  | A4    | Schema migration + serde defaults review.       |
-| 3  | A5    | Aggregate semantics, error taxonomy.            |
-| 4  | A6    | Cryptography. Senior review required.           |
-| 5  | A7    | API surface; light.                             |
-| 6  | B1, B2 | Event versioning and up-caster correctness.    |
-| 7  | B3    | Example behaviour change; product review too.   |
-| 8  | B4, B5 | Docs.                                          |
-| 9  | C1, C2 | Removal of legacy command/event variants.      |
-| 10 | C3, C4, C5 | Schema migrations.                         |
-| 11 | C6 (if scheduled) | Final cleanup.                      |
+| PR | Steps | Reviewer focus                                              |
+| -- | ----- | ----------------------------------------------------------- |
+| 1  | A1, A2, A3 | Pure additive types and helpers. Skim, ✅.             |
+| 2  | A4    | Schema migration + serde defaults review.                   |
+| 3  | A5    | **Cryptography refactor. Senior review required.** Envelope shape, AAD per partition, back-compat read path. |
+| 4  | A6    | Aggregate semantics, error taxonomy, multi-subject handling. |
+| 5  | A7    | Hand-written multi-partition codec for `AttributesSet`.     |
+| 6  | A8    | API surface + subject-lookup migration.                     |
+| 7  | B1, B2 | Event versioning and up-caster correctness.                |
+| 8  | B3    | Example behaviour change; product review too.               |
+| 9  | B4, B5 | Docs.                                                      |
+| 10 | C1, C2 | Removal of legacy command/event variants.                  |
+| 11 | C3, C4, C5 | Schema migrations + dead-index cleanup.                |
+| 12 | C6 (if scheduled) | Final cleanup.                                  |
 
 ---
 
@@ -847,3 +1067,10 @@ production. If unsure, keep the up-caster indefinitely — it is cheap.
   into the new path-keyed shape before the aggregate sees them.
 - **Phase.** A coarse derived label (e.g. `collecting_search`) computed
   from the bag by the decision engine. Not part of the command surface.
+- **Partition.** A subject-scoped slice of an event's secret data,
+  encrypted under one DEK. An `AttributesSet` event carries zero or more
+  partitions, one per subject whose data is touched in the submission.
+- **Label.** A within-event identifier for a partition, used by the codec
+  to route decrypted bytes back into the right field. For
+  `AttributesSet`, the label is the `person_ref`; for legacy single-subject
+  events, it is the string `"default"`.
