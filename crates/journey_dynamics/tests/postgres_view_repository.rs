@@ -11,6 +11,8 @@
 //! They are deliberately kept out of `--lib` runs so that
 //! `cargo nextest run --lib` succeeds without a database being present.
 
+use std::collections::HashMap;
+
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
@@ -199,7 +201,7 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
             aggregate_id: journey_id_1.to_string(),
             sequence: 1,
             payload: JourneyEvent::Started { id: journey_id_1 },
-            metadata: Default::default(),
+            metadata: HashMap::default(),
         }],
     )
     .await;
@@ -211,7 +213,7 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
                 aggregate_id: journey_id_2.to_string(),
                 sequence: 1,
                 payload: JourneyEvent::Started { id: journey_id_2 },
-                metadata: Default::default(),
+                metadata: HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id_2.to_string(),
@@ -223,7 +225,7 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
                     email: "alice@example.com".to_string(),
                     phone: None,
                 },
-                metadata: Default::default(),
+                metadata: HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id_2.to_string(),
@@ -231,7 +233,7 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
                 payload: JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["passenger_details".to_string()],
                 },
-                metadata: Default::default(),
+                metadata: HashMap::default(),
             },
         ],
     )

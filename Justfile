@@ -10,7 +10,7 @@ generate:
 
 lint:
     cargo fmt --all --check
-    cargo clippy -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
+    cargo clippy --all-targets -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
 
 # Run unit tests
 test-unit:
