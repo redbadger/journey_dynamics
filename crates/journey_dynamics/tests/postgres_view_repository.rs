@@ -11,6 +11,8 @@
 //! They are deliberately kept out of `--lib` runs so that
 //! `cargo nextest run --lib` succeeds without a database being present.
 
+use std::collections::HashMap;
+
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
@@ -179,6 +181,82 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
     assert_eq!(view.shared_data["destination"], json!("JFK"));
     assert_eq!(view.current_step, Some("passenger_details".to_string()));
     assert!(view.latest_workflow_decision.is_some());
+}
+
+// ── load_all ─────────────────────────────────────────────────────────────
+
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_load_all_returns_inserted_journeys_with_nested_data(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let journey_id_1 = ctx.track_journey(Uuid::new_v4());
+    let journey_id_2 = ctx.track_journey(Uuid::new_v4());
+    let subject_id = Uuid::new_v4();
+
+    repo.dispatch(
+        &journey_id_1.to_string(),
+        &[EventEnvelope {
+            aggregate_id: journey_id_1.to_string(),
+            sequence: 1,
+            payload: JourneyEvent::Started { id: journey_id_1 },
+            metadata: HashMap::default(),
+        }],
+    )
+    .await;
+
+    repo.dispatch(
+        &journey_id_2.to_string(),
+        &[
+            EventEnvelope {
+                aggregate_id: journey_id_2.to_string(),
+                sequence: 1,
+                payload: JourneyEvent::Started { id: journey_id_2 },
+                metadata: HashMap::default(),
+            },
+            EventEnvelope {
+                aggregate_id: journey_id_2.to_string(),
+                sequence: 2,
+                payload: JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id,
+                    name: "Alice Smith".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+                metadata: HashMap::default(),
+            },
+            EventEnvelope {
+                aggregate_id: journey_id_2.to_string(),
+                sequence: 3,
+                payload: JourneyEvent::WorkflowEvaluated {
+                    suggested_actions: vec!["passenger_details".to_string()],
+                },
+                metadata: HashMap::default(),
+            },
+        ],
+    )
+    .await;
+
+    let views = repo.load_all().await.unwrap();
+
+    assert!(views.iter().any(|view| view.id == journey_id_1));
+
+    let journey_with_nested_data = views.iter().find(|view| view.id == journey_id_2).unwrap();
+    assert_eq!(journey_with_nested_data.persons.len(), 1);
+    assert_eq!(
+        journey_with_nested_data.persons[0].email.as_deref(),
+        Some("alice@example.com")
+    );
+    assert_eq!(
+        journey_with_nested_data
+            .latest_workflow_decision
+            .as_ref()
+            .unwrap()
+            .suggested_actions,
+        vec!["passenger_details".to_string()]
+    );
 }
 
 // ── PersonCaptured ───────────────────────────────────────────────────────
