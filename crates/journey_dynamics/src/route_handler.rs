@@ -59,14 +59,50 @@ pub async fn shred_subjects_by_email(
         }
     };
 
-    // 2. For each resolved subject_id, run the same shredding flow.
-    for subject_id in subject_ids {
-        if let Err(response) = shred_one_subject(&state, subject_id).await {
-            return response;
+    // 2. Attempt to shred every resolved subject.
+    let total = subject_ids.len();
+    match shred_each(subject_ids, |subject_id| {
+        shred_one_subject(&state, subject_id)
+    })
+    .await
+    {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(failed) => {
+            // shred_one_subject already logged each underlying error with its
+            // subject_id; here we only summarise which subjects still need erasure.
+            eprintln!(
+                "Erasure by email incomplete: {}/{total} subject(s) failed and must be retried: {failed:?}",
+                failed.len(),
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "erasure incomplete for one or more subjects; retry the request",
+            )
+                .into_response()
         }
     }
+}
 
-    StatusCode::NO_CONTENT.into_response()
+/// Runs `shred` for every subject. Best-effort: a failure on one subject does
+/// not stop the others. Returns `Ok(())` when all succeeded, or `Err(failed)`
+/// listing the subjects whose shred failed and therefore still need erasure on a
+/// later retry.
+async fn shred_each<F, Fut, E>(subject_ids: Vec<Uuid>, shred: F) -> Result<(), Vec<Uuid>>
+where
+    F: Fn(Uuid) -> Fut,
+    Fut: std::future::Future<Output = Result<(), E>>,
+{
+    let mut failed = Vec::new();
+    for subject_id in subject_ids {
+        if shred(subject_id).await.is_err() {
+            failed.push(subject_id);
+        }
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(failed)
+    }
 }
 
 /// Core shredding logic for a single subject.
@@ -212,5 +248,56 @@ pub async fn command_handler(
             eprintln!("Error: {err:#?}");
             (StatusCode::BAD_REQUEST, err.to_string()).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use uuid::Uuid;
+
+    use super::shred_each;
+
+    /// Best-effort: a failure on one subject must not stop the others, and the
+    /// failing subject must be reported so a retry can re-run only what's left.
+    #[tokio::test]
+    async fn shred_each_attempts_every_subject_and_reports_failures() {
+        let s1 = Uuid::new_v4();
+        let s2 = Uuid::new_v4(); // this subject's shred fails
+        let s3 = Uuid::new_v4();
+
+        let attempted = Mutex::new(Vec::new());
+        let result = shred_each(vec![s1, s2, s3], |subject_id| {
+            attempted.lock().unwrap().push(subject_id);
+            async move {
+                if subject_id == s2 {
+                    Err("boom")
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        // Every subject was attempted — including the two ordered after the failure.
+        assert_eq!(*attempted.lock().unwrap(), vec![s1, s2, s3]);
+        // Only the failing subject is reported as still needing erasure.
+        assert_eq!(result, Err(vec![s2]));
+    }
+
+    #[tokio::test]
+    async fn shred_each_reports_ok_when_all_succeed() {
+        let ids = vec![Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        let result: Result<(), Vec<Uuid>> =
+            shred_each(ids, |_subject_id| async { Ok::<(), &str>(()) }).await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    async fn shred_each_empty_input_is_ok() {
+        let result: Result<(), Vec<Uuid>> =
+            shred_each(Vec::new(), |_subject_id| async { Ok::<(), &str>(()) }).await;
+        assert_eq!(result, Ok(()));
     }
 }
