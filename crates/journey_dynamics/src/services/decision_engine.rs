@@ -51,6 +51,9 @@ where
 #[derive(Debug, Clone)]
 pub struct WorkflowDecision {
     pub suggested_actions: Vec<String>,
+    /// Optional phase label returned by the decision engine.
+    /// `None` until the JDM model emits a `phase` output key.
+    pub phase: Option<String>,
 }
 
 #[async_trait]
@@ -105,7 +108,10 @@ impl DecisionEngine for SimpleDecisionEngine {
             JourneyState::Complete => vec![],
         };
 
-        Ok(WorkflowDecision { suggested_actions })
+        Ok(WorkflowDecision {
+            suggested_actions,
+            phase: None,
+        })
     }
 }
 
@@ -231,6 +237,16 @@ impl DecisionEngine for GoRulesDecisionEngine {
             })
             .unwrap_or_default();
 
-        Ok(WorkflowDecision { suggested_actions })
+        // Mirror the `suggested_actions` extraction: read `phase` if the JDM
+        // output contains it, otherwise fall back to `None`.
+        let phase: Option<String> = take
+            .get("phase")
+            .and_then(zen_engine::Variable::as_str)
+            .map(str::to_string);
+
+        Ok(WorkflowDecision {
+            suggested_actions,
+            phase,
+        })
     }
 }

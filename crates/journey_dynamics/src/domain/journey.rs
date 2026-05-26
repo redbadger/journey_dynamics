@@ -45,6 +45,9 @@ pub struct PersonSlot {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkflowDecisionState {
     pub suggested_actions: Vec<String>,
+    /// Phase label from the decision engine.
+    /// `None` until the `WorkflowEvaluated` event carries `phase` (step B1).
+    pub phase: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -269,7 +272,14 @@ impl Aggregate for Journey {
                 }
             }
             JourneyEvent::WorkflowEvaluated { suggested_actions } => {
-                self.latest_workflow_decision = Some(WorkflowDecisionState { suggested_actions });
+                // TODO(path-keyed-step-B1): `phase` is not carried by this
+                // event yet; it will be added in step B1 to avoid an
+                // event-up-caster in Phase A. Until then phase is always None
+                // after replay.
+                self.latest_workflow_decision = Some(WorkflowDecisionState {
+                    suggested_actions,
+                    phase: None,
+                });
             }
             JourneyEvent::StepProgressed { to_step, .. } => {
                 self.current_step = Some(to_step);

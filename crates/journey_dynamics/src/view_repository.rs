@@ -72,7 +72,7 @@ impl StructuredJourneyViewRepository {
 
         let workflow_row = sqlx::query(
             r"
-            SELECT suggested_actions
+            SELECT suggested_actions, phase
             FROM journey_workflow_decision
             WHERE journey_id = $1 AND is_latest = TRUE
             ORDER BY created_at DESC
@@ -85,6 +85,7 @@ impl StructuredJourneyViewRepository {
 
         let latest_workflow_decision = workflow_row.map(|r| WorkflowDecisionView {
             suggested_actions: r.get("suggested_actions"),
+            phase: r.get("phase"),
         });
 
         let persons = self.load_persons_with(&mut **tx, journey_id).await?;
@@ -212,7 +213,8 @@ impl StructuredJourneyViewRepository {
                    j.shared_data,
                    j.current_step,
                    j.version,
-                   w.suggested_actions
+                   w.suggested_actions,
+                   w.phase
             FROM journey_view AS j
             LEFT JOIN journey_workflow_decision AS w
               ON w.journey_id = j.id
@@ -244,13 +246,18 @@ impl StructuredJourneyViewRepository {
 
             view_index.insert(id, views.len());
             journey_ids.push(id);
+            let phase: Option<String> = row.get("phase");
             views.push(JourneyView {
                 id,
                 state,
                 shared_data: row.get("shared_data"),
                 current_step: row.get("current_step"),
-                latest_workflow_decision: suggested_actions
-                    .map(|suggested_actions| WorkflowDecisionView { suggested_actions }),
+                latest_workflow_decision: suggested_actions.map(|suggested_actions| {
+                    WorkflowDecisionView {
+                        suggested_actions,
+                        phase,
+                    }
+                }),
                 persons: Vec::new(),
             });
         }
@@ -608,11 +615,13 @@ impl StructuredJourneyViewRepository {
                 .execute(&mut **tx)
                 .await?;
 
+                // TODO(path-keyed-step-B1): `phase` is not carried by this
+                // event yet; it will be written as NULL until step B1 adds it.
                 sqlx::query(
                     r"
                     INSERT INTO journey_workflow_decision
-                        (journey_id, suggested_actions, is_latest)
-                    VALUES ($1, $2, TRUE)
+                        (journey_id, suggested_actions, is_latest, phase)
+                    VALUES ($1, $2, TRUE, NULL)
                     ",
                 )
                 .bind(journey_id)
