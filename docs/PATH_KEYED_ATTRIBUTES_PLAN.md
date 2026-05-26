@@ -29,20 +29,22 @@ The plan is divided into three phases:
 | Phase | Goal                                                                 |
 | ----- | -------------------------------------------------------------------- |
 | **A** | Refactor `cqrs-es-crypto` to support multi-subject partitioned ciphertext (back-compatible on read). Introduce new types and the `SetAttributes` command **alongside** existing commands. Old code paths remain fully functional. |
-| **B** | Switch the flight-booking example and HTTP surface to the new model. Add an event up-caster for old events. |
-| **C** | Remove deprecated commands, events, fields, columns, and migrations. |
+| **B** | Switch the flight-booking example and HTTP surface to the new model. Documentation refresh. |
+| **C** | Mark the legacy command/event/field surface `#[deprecated]`. **Nothing is removed.** Existing callers continue to compile and run; the compiler emits warnings nudging them to the new surface. Eventual removal is out of scope for this plan and would happen in a later release. |
 
 After Phase A every test continues to pass. After Phase B the example uses
 `SetAttributes` exclusively but `Capture`/`CapturePersonDetails` still work for
-back-compat. After Phase C the legacy surface is gone.
+back-compat. After Phase C the legacy surface is still fully functional but
+emits deprecation warnings at compile time.
 
 ### Conventions
 
 - Each step starts with **Pre-flight** (what to read) and ends with
   **Validation** (what to run) and **Done when** (acceptance).
 - Steps inside a phase are ordered; do not reorder unless explicitly noted.
-- Where a step removes public API, mark it `#[deprecated]` first and remove in
-  Phase C.
+- Phase C marks the legacy surface `#[deprecated]` but does not remove it.
+  Internal usages of deprecated items inside the crate must be wrapped in
+  `#[allow(deprecated)]` so the crate builds clean.
 - Keep commits small and conventional: one step = one PR-sized commit.
 
 ---
@@ -537,10 +539,13 @@ Add an `AttributesSet` arm:
     enforced this, but defensive: skip if missing.)
   - Write each path/value into `shared_data` under `persons/<ref>/…` using
     `set_at_path`.
-  - **Temporary mirror-write**: also merge into the existing
+  - **Permanent mirror-write**: also merge into the existing
     `slot.details` blob using the suffix path. This keeps the legacy
-    `journey_person.details` column populated through Phase A/B. Removed
-    in step C4.
+    `journey_person.details` column populated for downstream consumers
+    that still read from it. The mirror-write is the bridge between the
+    new write surface and the legacy read surface and is retained for as
+    long as the legacy view fields exist (i.e. indefinitely under this
+    plan).
 
 #### A6.7 — Tests
 
@@ -698,58 +703,20 @@ fixtures of the old payload shape (add at least one fixture under
 
 ---
 
-### B2. Event up-caster for legacy events
-
-**Pre-flight.** Read the design doc's "Migration strategy" section. Skim
-`cqrs-es-crypto::repository.rs` for the read path.
-
-**Do.**
-
-- Add a thin layer between the event store and the aggregate that, on
-  read, translates:
-  - `JourneyEvent::Modified { step, data }` → `JourneyEvent::AttributesSet
-    { plaintext: flatten(data) prefixed by `"<step>/"`, secret_partitions:
-    vec![] }`.
-  - `JourneyEvent::PersonDetailsUpdated { person_ref, subject_id, data }`
-    → `JourneyEvent::AttributesSet { plaintext: empty, secret_partitions:
-    vec![SecretPartitionData { person_ref, subject_id, changes:
-    flatten(data) prefixed by `"persons/<ref>/"` }] }`.
-  - `JourneyEvent::StepProgressed { … }` → **dropped** (no longer needed;
-    `current_step` removal happens in Phase C, but the event is replay-only
-    harmless until then — see "Done when").
-  - Legacy ciphertext envelope shape (single-blob) → already handled by
-    the back-compat read path landed in A5.4; the up-caster operates on
-    already-decrypted `SerializedEvent`s, not on ciphertext.
-
-- Implement as a function `upcast_event(SerializedEvent) -> SerializedEvent`
-  invoked in a wrapping `PersistedEventRepository` adapter. Place under
-  `crates/journey_dynamics/src/event_upcaster.rs`.
-
-- Tests:
-
-  - Fixture round-trip: a recorded `Modified` event from before this PR
-    loads as `AttributesSet`.
-  - A recorded `PersonDetailsUpdated` event with a known DEK decrypts and
-    up-casts to `AttributesSet` with the right `secret` map.
-  - A recorded `PersonDetailsUpdated` event whose DEK has been deleted
-    redacts to the up-cast `AttributesSet` with the redacted marker on
-    `secret`.
-
-- Wire the up-caster into `state.rs` (`new_application_state`).
-
-**Validation.** `cargo test --workspace`.
-
-**Done when.** Replaying a journey created via `Capture` /
-`CapturePersonDetails` produces the same aggregate state through the
-up-caster as it does today via direct apply.
-
----
-
-### B3. Port `flight-booking` to `SetAttributes`
+### B2. Port `flight-booking` to `SetAttributes`
 
 **Pre-flight.** Read `examples/flight-booking/src/lib.rs`,
 `examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json`,
 `examples/flight-booking/schemas/flight-booking-schema.json`.
+
+> **Note on event up-casting.** Earlier drafts of this plan included an
+> event up-caster step here (B2). It has been removed: because the
+> aggregate keeps its legacy `apply` arms for `Modified`,
+> `PersonDetailsUpdated`, and `StepProgressed` (see Phase C, which only
+> deprecates these variants), historical events continue to replay
+> directly without translation. The up-caster is no longer on the critical
+> path. It can be reintroduced as an internal optimisation if and when the
+> legacy variants are eventually removed in a future release.
 
 **Do.**
 
@@ -795,7 +762,7 @@ the script under `examples/flight-booking/SCHEMA_USAGE.md`).
 
 ---
 
-### B4. HTTP nested-form sugar (optional)
+### B3. HTTP nested-form sugar (optional)
 
 **Pre-flight.** Read `command_extractor.rs`.
 
@@ -820,176 +787,237 @@ and reach the aggregate as the same command.
 
 ---
 
-### B5. Mark old surface deprecated; update docs
+### B4. Documentation refresh
 
 **Pre-flight.** Run `cargo doc` and grep for any remaining references to
-`Capture`, `CapturePersonDetails`, `current_step` in docs.
+`Capture`, `CapturePersonDetails`, `current_step` in docs (not in code —
+that's Phase C). Read
+[`PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](./PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md);
+it is the downstream-consumer-facing artefact and must be accurate by
+the end of this step.
 
 **Do.**
 
-- Add `#[deprecated(since = "0.3.0", note = "use SetAttributes")]` to
-  `JourneyCommand::Capture` and `JourneyCommand::CapturePersonDetails`
-  (already pending from A5).
 - Update `README.md` (workspace-level) and `examples/flight-booking/*.md`
-  to show the new flow.
+  to show the new flow as the recommended one; demote (but do not delete)
+  the legacy examples to a "Legacy API (deprecated)" subsection.
 - Update `docs/QUICK_START.md`.
+- Review `PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md` against the actual
+  shipped types and field names. Update any code snippets that drifted
+  during implementation (the guide was written ahead of code; expect
+  one or two name tweaks).
 - Add a `CHANGELOG.md` entry under "Unreleased" describing the
-  command/event additions and the deprecation.
+  command/event additions and linking to the migration guide. Defer
+  the deprecation entry to step C0.
+- From the workspace `README.md`, link to the migration guide above
+  the legacy examples so external readers find it before they copy
+  outdated code.
 
-**Validation.** `cargo build --workspace` (lints should warn about the
-deprecated usages in any leftover internal callers — clean those up).
+**Validation.** `cargo build --workspace` succeeds (no deprecation
+warnings yet — those land in Phase C). Manually skim the migration
+guide for stale code snippets.
 
-**Done when.** No internal code references the deprecated variants except
-in the up-caster.
+**Done when.** Docs prominently feature `SetAttributes`/`AttributesSet`,
+the migration guide is accurate against shipped code, and the legacy
+flow is documented but explicitly marked as deprecated-in-Phase-C.
 
 ---
 
-## Phase C — Remove the legacy model
+## Phase C — Deprecate the legacy surface
 
-> Do not begin Phase C until Phase B has soaked for at least one release
-> cycle. Each step below assumes Phase B is complete and no production
-> caller is still emitting `Capture` / `CapturePersonDetails`.
+> **No code is removed in this phase.** Every legacy command variant,
+> event variant, struct field, accessor, database column, and migration
+> stays in place and continues to work. Phase C only adds `#[deprecated]`
+> markers so external callers get compile-time nudges toward the new
+> surface.
+>
+> Internal usages of deprecated items inside `journey_dynamics` (apply
+> arms, view projections, tests for the legacy paths) must be wrapped in
+> `#[allow(deprecated)]` so the crate itself builds clean.
+>
+> Future removal of the legacy surface is **explicitly out of scope** for
+> this plan and belongs in a separate RFC once usage has been measured.
 
-### C1. Remove `Capture` and `CapturePersonDetails` commands
+### C0. Choose deprecation metadata and add a `CHANGELOG` entry
 
-**Pre-flight.** Grep for `JourneyCommand::Capture` and
-`JourneyCommand::CapturePersonDetails`.
+**Pre-flight.** Decide the `since` version (the next release that ships
+these deprecations) and the standard `note` wording.
 
 **Do.**
 
-- Delete the variants from `domain/commands.rs`.
-- Delete the matching `handle` arms in `domain/journey.rs`.
-- Delete the legacy aggregate tests (`modify_journey`,
-  `capture_form_data_*`, `test_capture_person_details_*`, etc.). Keep tests
-  whose behaviour is now covered by `set_attributes_*` cases.
+- Define a constant for the deprecation metadata to keep wording
+  consistent across the crate, e.g. in `domain/mod.rs`:
 
-**Validation.** `cargo test --workspace`.
+  ```rust
+  // Re-used by every #[deprecated(...)] in the crate.
+  // since = "<next-version>"
+  // note  = "use `SetAttributes` / `AttributesSet` (path-keyed attributes)"
+  ```
 
-**Done when.** No reference to the removed variants outside the
-event-upcaster.
+- Add a `CHANGELOG.md` entry under "Unreleased":
+
+  ```markdown
+  ### Deprecated
+
+  - `JourneyCommand::Capture` and `JourneyCommand::CapturePersonDetails`.
+    Use `JourneyCommand::SetAttributes` instead.
+  - `JourneyEvent::Modified`, `JourneyEvent::PersonDetailsUpdated`, and
+    `JourneyEvent::StepProgressed`. New writes should emit
+    `JourneyEvent::AttributesSet`. Legacy events continue to replay.
+  - `Journey::current_step()`, `JourneyView::current_step`, and
+    `PersonSlot.details` accessors / fields. Read from `shared_data`
+    under the relevant path-keyed attributes instead.
+
+  All deprecated items remain fully functional and will keep working in
+  this and future releases until an explicit removal RFC is accepted.
+  ```
+
+**Validation.** `cargo build --workspace` still succeeds.
+
+**Done when.** Wording is agreed; CHANGELOG entry exists; no behavioural
+changes yet.
 
 ---
 
-### C2. Remove `Modified`, `PersonDetailsUpdated`, `StepProgressed` event variants
+### C1. Mark `Capture` and `CapturePersonDetails` deprecated
 
-**Pre-flight.** Confirm the up-caster from B2 fully translates these.
+**Pre-flight.** Grep for internal usages of
+`JourneyCommand::Capture` / `JourneyCommand::CapturePersonDetails` in the
+workspace.
 
 **Do.**
 
-- Delete the three variants from `domain/events.rs`.
-- Delete the matching `apply` arms.
-- Update `View::update` to delete the matching arms.
-- The up-caster (`event_upcaster.rs`) keeps generating `AttributesSet`
-  *before* deserialisation into the enum, so removing the enum variants is
-  safe.
-- Drop the codec arms (or, if hand-written in A6, delete them).
-- Delete fixture round-trip tests that asserted these variants existed in
-  the enum; keep the up-cast tests that work at the
-  `SerializedEvent`-level.
+- Annotate the variants in `domain/commands.rs`:
 
-**Validation.** `cargo test --workspace`.
+  ```rust
+  #[deprecated(since = "<next-version>",
+               note  = "use SetAttributes (path-keyed attributes)")]
+  Capture { step: String, data: Value },
 
-**Done when.** The `JourneyEvent` enum has only:
-`Started`, `AttributesSet`, `PersonCaptured`, `WorkflowEvaluated`,
-`Completed`, `SubjectForgotten`.
+  #[deprecated(since = "<next-version>",
+               note  = "use SetAttributes (path-keyed attributes)")]
+  CapturePersonDetails { person_ref: String, data: Value },
+  ```
+
+- The aggregate's `handle` arms for these variants stay. Wrap the match
+  arms with `#[allow(deprecated)]` so the crate compiles without
+  warnings:
+
+  ```rust
+  #[allow(deprecated)]
+  JourneyCommand::Capture { step, data } => { /* unchanged */ }
+  ```
+
+- Keep the legacy aggregate tests (`modify_journey`, `capture_form_data_*`,
+  `test_capture_person_details_*`, etc.). Add `#![allow(deprecated)]` to
+  the test module.
+
+- Update the `command_extractor` and `route_handler` to keep accepting
+  the deprecated variants without warning by wrapping the relevant
+  match arms or `serde`-derived constructions in
+  `#[allow(deprecated)]`.
+
+**Validation.** `cargo test --workspace`; `cargo build --workspace`
+produces zero deprecation warnings from inside the crate. Any external
+consumer that constructs the deprecated variants directly will now see a
+warning.
+
+**Done when.** Both legacy variants are marked deprecated; the crate
+builds clean; their behaviour is unchanged.
 
 ---
 
-### C3. Remove `current_step` from aggregate, view, and database
+### C2. Mark `Modified`, `PersonDetailsUpdated`, `StepProgressed` deprecated
+
+**Pre-flight.** Note every site that pattern-matches on these variants:
+`Journey::apply`, `View::update`, the `pii_codec` arms, the
+`view_repository.rs` projector, and tests.
+
+**Do.**
+
+- Annotate the three variants in `domain/events.rs` with `#[deprecated]`
+  using the same `since` / `note`.
+- Wrap every internal pattern-match on them with `#[allow(deprecated)]`,
+  arm-by-arm. Concretely:
+
+  - `Journey::apply` keeps its `Modified` / `PersonDetailsUpdated` /
+    `StepProgressed` arms (they still need to replay historical events).
+  - `View::update` keeps its projections for these variants.
+  - The hand-written `PiiEventCodec` keeps its `PersonDetailsUpdated`
+    arm (this is what makes historical encrypted events still readable).
+  - The macro-derived codec branches for these variants stay.
+
+- Keep all fixture round-trip tests that exercise these variants. Add
+  `#![allow(deprecated)]` to the relevant test modules.
+
+- Aggregate behaviour stays exactly as today: a deprecated
+  `JourneyCommand::Capture` still produces a deprecated
+  `JourneyEvent::Modified`. Old downstream consumers that pattern-match
+  on `Modified` continue to receive them.
+
+**Validation.** `cargo test --workspace` and the Postgres integration
+tests still pass; the crate builds with zero deprecation warnings
+internally; external code that pattern-matches on the variants now sees
+warnings.
+
+**Done when.** The three variants are marked deprecated; replay,
+projection, encrypt/decrypt of historical events all still work.
+
+---
+
+### C3. Mark `current_step` accessors / fields deprecated
 
 **Pre-flight.** Search for `current_step`.
 
 **Do.**
 
-- Drop the field from `Journey`, `JourneyView`, `Default for Journey`,
-  `Journey::current_step()` accessor.
-- Drop the `current_step` column from `journey_view` via a new migration
-  `migrations/2026MMDDHHMMSS_drop_current_step.up.sql`:
+- `Journey::current_step()` accessor (`domain/journey.rs`): mark
+  `#[deprecated]`. Field stays.
+- `JourneyView::current_step` (`queries.rs`): mark the field
+  `#[deprecated]`. Column stays.
+- `Journey` struct field stays (no annotation — field deprecation on
+  private fields is moot).
+- Wrap internal reads/writes of `current_step` in `#[allow(deprecated)]`
+  inside the crate. External readers of the field on `JourneyView` see
+  the warning at compile time.
+- The `current_step` column in `journey_view` stays; the migrations that
+  created it are unchanged. No new migration in this step.
 
-  ```sql
-  ALTER TABLE journey_view DROP COLUMN current_step;
-  ```
+**Validation.** `cargo test --workspace` + Postgres integration tests;
+crate builds with zero deprecation warnings internally.
 
-  and matching `.down.sql`.
-
-- Update `view_repository.rs` `SELECT` lists and `INSERT/UPDATE` clauses.
-- Remove `current_step` from all serde-deserialised test fixtures (the
-  field is now absent; add `#[serde(default)]` on
-  `JourneyView::shared_data`-adjacent fields if needed).
-
-**Validation.** `cargo test --workspace` + Postgres integration tests.
-
-**Done when.** Grep for `current_step` returns zero hits in `src/` and
-`tests/`.
+**Done when.** `current_step` is accessible everywhere it is today but
+any external code reading the public field/accessor sees a deprecation
+warning.
 
 ---
 
-### C4. Remove `PersonSlot.details` and the legacy mirror-write in `apply`
+### C4. Mark `PersonSlot.details` deprecated
 
-**Pre-flight.** Review the temporary mirror-write added in A5.6.
-
-**Do.**
-
-- Delete `details: Value` from `PersonSlot`.
-- Delete the mirror-write branch in the `apply` `AttributesSet` arm — per-
-  person attributes now live exclusively under `persons/<ref>/…` in
-  `shared_data`.
-- Drop the `details` column from `journey_person` via a new migration:
-
-  ```sql
-  ALTER TABLE journey_person DROP COLUMN details;
-  ```
-
-- Update `PersonView`, `view_repository.rs`, and any projector code.
-- Update the up-caster (B2) so that `PersonDetailsUpdated`-derived
-  `AttributesSet` events project the secret partition into `shared_data`
-  under `persons/<ref>/…`, not into `slot.details`.
-
-**Validation.** `cargo test --workspace` + integration tests.
-
-**Done when.** `PersonSlot` carries only identity fields (`name`, `email`,
-`phone`, `subject_id`, `forgotten`).
-
----
-
-### C5. Drop the legacy `PersonDetailsUpdated` index
-
-**Pre-flight.** Confirm that no remaining caller queries
-`idx_events_person_details_updated_subject` (the up-caster turns these
-events into `AttributesSet` on read; the new GIN index from A8 covers
-those lookups instead).
+**Pre-flight.** Review the permanent mirror-write established in A6.6.
+Note that this step explicitly **does not** remove the mirror-write — the
+mirror-write is what keeps the deprecated field's value coherent with
+new commands.
 
 **Do.**
 
-- New migration:
+- Mark `PersonSlot::details` `#[deprecated]` in `domain/journey.rs`.
+- Mark `PersonView::details` `#[deprecated]` in `queries.rs`.
+- Wrap every internal read/write of `details` (in `apply`, in the
+  mirror-write inside `AttributesSet` apply, in the view projector, in
+  the legacy `PersonDetailsUpdated` arm) with `#[allow(deprecated)]`.
+- The mirror-write stays. The `journey_person.details` column stays. No
+  new migration.
+- Document in code comments that the canonical location for per-person
+  attributes is `shared_data` under `persons/<ref>/…`, and that
+  `slot.details` is a deprecated mirror retained for back-compat.
 
-  ```sql
-  DROP INDEX IF EXISTS idx_events_person_details_updated_subject;
-  ```
+**Validation.** `cargo test --workspace` + integration tests; the
+mirror-write test from A6.7 still passes.
 
-  Keep `idx_events_person_captured_subject` (the variant still exists).
-  Keep `idx_events_attributes_set_subjects` (added in A8).
-
-**Validation.** `postgres_subject_lookup_hook.rs` still finds journeys for
-a given subject across all relevant event types.
-
-**Done when.** The unused index is gone; lookups still work.
-
----
-
-### C6. Remove the up-caster (optional, only if no historical events remain)
-
-**Pre-flight.** Confirm with operators that no legacy events remain in
-production. If unsure, keep the up-caster indefinitely — it is cheap.
-
-**Do.**
-
-- Delete `event_upcaster.rs` and its wiring in `state.rs`.
-- Delete its tests.
-
-**Validation.** `cargo test --workspace`.
-
-**Done when.** No `event_upcaster` module exists.
+**Done when.** External access to `details` produces a deprecation
+warning; the field continues to be populated by both legacy commands and
+(via mirror-write) new commands.
 
 ---
 
@@ -1003,6 +1031,13 @@ production. If unsure, keep the up-caster indefinitely — it is cheap.
 - [ ] `cargo build -p journey_dynamics --bin journey_dynamics`
 - [ ] `cargo check -p flight-booking --all-targets`
 
+> **Clippy + deprecation.** Phase C steps add `#[deprecated]` markers.
+> Internal usages must be wrapped in `#[allow(deprecated)]` so
+> `clippy -- -D warnings` keeps passing. Resist the urge to use a
+> crate-wide `#![allow(deprecated)]` — the goal is for *external* callers
+> to see the warnings, so scoping the allows narrowly preserves the
+> nudge.
+
 ### At phase boundaries
 
 - [ ] Run `postgres_view_repository.rs` and
@@ -1013,10 +1048,18 @@ production. If unsure, keep the up-caster indefinitely — it is cheap.
 
 ### Things to defer (explicit non-goals of this plan)
 
+- **Removal of the legacy surface.** Phase C deprecates but never
+  removes. A future RFC may schedule removal of the legacy commands,
+  events, fields, columns, and migrations once usage telemetry confirms
+  it is safe. That work would include: removing the legacy variants,
+  dropping the `current_step` and `details` columns, deleting the
+  mirror-write, and — at that point only — introducing an event
+  up-caster to translate historical legacy events into `AttributesSet`
+  at read time.
 - **Snapshot encryption** (carried over from `cqrs-es-crypto`'s known
   limitations). Snapshots remain plaintext; do not store PII in aggregate
   state that gets snapshotted.
-- **JDM ergonomics for deeply-nested flat paths.** B3 confirms feasibility
+- **JDM ergonomics for deeply-nested flat paths.** B2 confirms feasibility
   for the depth used in flight-booking; richer ergonomics (e.g. `$path`
   selectors) are a separate workstream.
 - **Cross-event partition deduplication.** If the same subject appears in
@@ -1046,12 +1089,25 @@ production. If unsure, keep the up-caster indefinitely — it is cheap.
 | 4  | A6    | Aggregate semantics, error taxonomy, multi-subject handling. |
 | 5  | A7    | Hand-written multi-partition codec for `AttributesSet`.     |
 | 6  | A8    | API surface + subject-lookup migration.                     |
-| 7  | B1, B2 | Event versioning and up-caster correctness.                |
-| 8  | B3    | Example behaviour change; product review too.               |
-| 9  | B4, B5 | Docs.                                                      |
-| 10 | C1, C2 | Removal of legacy command/event variants.                  |
-| 11 | C3, C4, C5 | Schema migrations + dead-index cleanup.                |
-| 12 | C6 (if scheduled) | Final cleanup.                                  |
+| 7  | B1    | Event versioning (`phase` on `WorkflowEvaluated`).         |
+| 8  | B2    | Example behaviour change; product review too.               |
+| 9  | B3, B4 | Optional sugar + docs.                                     |
+| 10 | C0, C1, C2 | Deprecation markers on commands/events.                |
+| 11 | C3, C4 | Deprecation markers on fields/accessors.                   |
+
+---
+
+## Downstream-consumer artefacts
+
+For maintainers of code that depends on `journey_dynamics`, see
+[`PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](./PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md).
+It is the user-facing companion to this implementation plan: same
+change, opposite audience.
+
+Keep the guide in sync with the shipped types and field names as part
+of step B4. If a step in this plan changes a public name (a command
+variant, an event field, an accessor), update the migration guide in
+the same PR.
 
 ---
 
