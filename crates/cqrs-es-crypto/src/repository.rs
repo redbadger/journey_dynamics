@@ -1134,6 +1134,9 @@ mod tests {
                 if part.label == "default" {
                     let pii: Value = serde_json::from_slice(&part.payload)?;
                     if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                        // Strip legacy sentinel fields (no-op for new-format events).
+                        obj.remove("encrypted_pii");
+                        obj.remove("nonce");
                         obj.insert("secret".to_string(), pii["secret"].clone());
                     }
                 }
@@ -1151,6 +1154,9 @@ mod tests {
             }
             if labels.iter().any(|l| l == "default") {
                 if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                    // Strip legacy sentinel fields (no-op for new-format events).
+                    obj.remove("encrypted_pii");
+                    obj.remove("nonce");
                     obj.insert(
                         "secret".to_string(),
                         Value::String("[redacted]".to_string()),

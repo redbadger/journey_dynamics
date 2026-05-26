@@ -112,6 +112,8 @@ impl PiiEventCodec for TestPiiCodec {
             if part.label == "default" {
                 let pii: serde_json::Value = serde_json::from_slice(&part.payload)?;
                 if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                    obj.remove("encrypted_pii");
+                    obj.remove("nonce");
                     obj.insert("secret".to_string(), pii["secret"].clone());
                 }
             }
@@ -129,6 +131,8 @@ impl PiiEventCodec for TestPiiCodec {
         }
         if labels.iter().any(|l| l == "default") {
             if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                obj.remove("encrypted_pii");
+                obj.remove("nonce");
                 obj.insert(
                     "secret".to_string(),
                     serde_json::Value::String("[redacted]".to_string()),

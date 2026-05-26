@@ -464,6 +464,10 @@ fn extract_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 fn new_reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     let span = Span::call_site();
     let event_type = LitStr::new(&variant.event_type, span);
+    // Legacy sentinel field name and the always-present "nonce" field.
+    // Removing these is a no-op for new-format events (the fields were never
+    // written), and cleans them up for events read from the legacy on-disk shape.
+    let sentinel = LitStr::new(&variant.sentinel, span);
 
     let secret_strs: Vec<LitStr> = variant
         .secret_fields()
@@ -489,6 +493,9 @@ fn new_reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
                     if let ::core::option::Option::Some(__obj) =
                         event.payload[__key].as_object_mut()
                     {
+                        // Strip legacy sentinel fields (no-op for new-format events).
+                        __obj.remove({{ sentinel }});
+                        __obj.remove("nonce");
                         @if (is_single) {
                             __obj.insert(
                                 {{ single_secret_str.as_ref().unwrap() }}.to_string(),
@@ -515,6 +522,7 @@ fn new_reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 fn redact_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     let span = Span::call_site();
     let event_type = LitStr::new(&variant.event_type, span);
+    let sentinel = LitStr::new(&variant.sentinel, span);
     let secrets = secret_field_data(variant, span);
 
     zyn::zyn! {
@@ -524,6 +532,9 @@ fn redact_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
                 if let ::core::option::Option::Some(__obj) =
                     event.payload[__key].as_object_mut()
                 {
+                    // Strip legacy sentinel fields (no-op for new-format events).
+                    __obj.remove({{ sentinel }});
+                    __obj.remove("nonce");
                     @for (sf in secrets.iter()) {
                         __obj.insert(
                             {{ sf.name_str }}.to_string(),
