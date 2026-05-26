@@ -246,12 +246,20 @@ mod tests {
         assert!(pc.get("email").is_none(), "email must not be in plaintext");
         assert!(pc.get("phone").is_none(), "phone must not be in plaintext");
 
-        // Encryption envelope must be present.
+        // New partition envelope must be present.
         assert!(
-            pc.get("encrypted_pii").is_some(),
-            "encrypted_pii must be present"
+            pc.get("encrypted_partitions").is_some(),
+            "encrypted_partitions must be present"
         );
-        assert!(pc.get("nonce").is_some(), "nonce must be present");
+        assert!(pc.get("subjects").is_some(), "subjects must be present");
+        let partitions = pc["encrypted_partitions"].as_array().unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0]["label"].as_str().unwrap(), "default");
+        assert_eq!(
+            partitions[0]["subject_id"].as_str().unwrap(),
+            subject_id.to_string().as_str(),
+            "partition subject_id must match"
+        );
 
         // Non-PII fields remain in plaintext.
         assert_eq!(
@@ -324,6 +332,10 @@ mod tests {
         assert!(
             pc.get("encrypted_pii").is_none(),
             "encrypted_pii must not appear after decryption"
+        );
+        assert!(
+            pc.get("encrypted_partitions").is_none(),
+            "encrypted_partitions must be removed after decryption"
         );
     }
 
@@ -416,17 +428,19 @@ mod tests {
 
         // PII must NOT be stored in plaintext.
         assert!(
-            pd.get("data")
-                .is_none_or(|d| d.get("passportNumber").is_none()),
-            "passportNumber must not appear in plaintext"
+            pd.get("data").is_none(),
+            "data field must be absent (encrypted as a partition)"
         );
 
-        // Encryption envelope must be present.
+        // New partition envelope must be present.
         assert!(
-            pd.get("encrypted_data").is_some(),
-            "encrypted_data must be present"
+            pd.get("encrypted_partitions").is_some(),
+            "encrypted_partitions must be present"
         );
-        assert!(pd.get("nonce").is_some(), "nonce must be present");
+        assert!(pd.get("subjects").is_some(), "subjects must be present");
+        let partitions = pd["encrypted_partitions"].as_array().unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0]["label"].as_str().unwrap(), "default");
 
         // Non-PII fields remain in plaintext.
         assert_eq!(
@@ -496,6 +510,10 @@ mod tests {
         assert!(
             pd.get("encrypted_data").is_none(),
             "encrypted_data must not appear after decryption"
+        );
+        assert!(
+            pd.get("encrypted_partitions").is_none(),
+            "encrypted_partitions must be removed after decryption"
         );
     }
 
@@ -760,10 +778,10 @@ mod tests {
         repo.persist::<Journey>(&[ev1, ev2], None).await.unwrap();
 
         let raw = repo.inner().all_events();
-        let ct1 = raw[0].payload["PersonCaptured"]["encrypted_pii"]
+        let ct1 = raw[0].payload["PersonCaptured"]["encrypted_partitions"][0]["ciphertext"]
             .as_str()
             .unwrap();
-        let ct2 = raw[1].payload["PersonCaptured"]["encrypted_pii"]
+        let ct2 = raw[1].payload["PersonCaptured"]["encrypted_partitions"][0]["ciphertext"]
             .as_str()
             .unwrap();
 
@@ -784,10 +802,10 @@ mod tests {
         repo.persist::<Journey>(&[ev1, ev2], None).await.unwrap();
 
         let raw = repo.inner().all_events();
-        let ct1 = raw[0].payload["PersonDetailsUpdated"]["encrypted_data"]
+        let ct1 = raw[0].payload["PersonDetailsUpdated"]["encrypted_partitions"][0]["ciphertext"]
             .as_str()
             .unwrap();
-        let ct2 = raw[1].payload["PersonDetailsUpdated"]["encrypted_data"]
+        let ct2 = raw[1].payload["PersonDetailsUpdated"]["encrypted_partitions"][0]["ciphertext"]
             .as_str()
             .unwrap();
 

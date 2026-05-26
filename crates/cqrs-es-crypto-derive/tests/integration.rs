@@ -383,12 +383,15 @@ async fn multi_secret_pii_fields_are_encrypted_on_persist() {
     assert!(inner.get("name").is_none(), "name must be encrypted");
     assert!(inner.get("email").is_none(), "email must be encrypted");
 
-    // Default sentinel must be present.
+    // Partition envelope must be present.
     assert!(
-        inner.get("encrypted_pii").is_some(),
-        "encrypted_pii sentinel must be present"
+        inner.get("encrypted_partitions").is_some(),
+        "encrypted_partitions must be present"
     );
-    assert!(inner.get("nonce").is_some(), "nonce must be present");
+    assert!(inner.get("subjects").is_some(), "subjects must be present");
+    let parts = inner["encrypted_partitions"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["label"].as_str().unwrap(), "default");
 
     // Non-PII fields are kept in plaintext.
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
@@ -414,12 +417,15 @@ async fn single_secret_pii_field_is_encrypted_on_persist() {
     // PII field must not appear in plaintext.
     assert!(inner.get("data").is_none(), "data must be encrypted");
 
-    // Custom sentinel must be present.
+    // Partition envelope must be present.
     assert!(
-        inner.get("encrypted_data").is_some(),
-        "encrypted_data sentinel must be present"
+        inner.get("encrypted_partitions").is_some(),
+        "encrypted_partitions must be present"
     );
-    assert!(inner.get("nonce").is_some(), "nonce must be present");
+    assert!(inner.get("subjects").is_some(), "subjects must be present");
+    let parts = inner["encrypted_partitions"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["label"].as_str().unwrap(), "default");
 
     // Non-PII fields kept in plaintext.
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
@@ -458,10 +464,10 @@ async fn each_persist_produces_unique_ciphertext() {
         .unwrap();
 
     let raw = repo.inner().all_events();
-    let ct1 = raw[0].payload["MultiSecret"]["encrypted_pii"]
+    let ct1 = raw[0].payload["MultiSecret"]["encrypted_partitions"][0]["ciphertext"]
         .as_str()
         .unwrap();
-    let ct2 = raw[1].payload["MultiSecret"]["encrypted_pii"]
+    let ct2 = raw[1].payload["MultiSecret"]["encrypted_partitions"][0]["ciphertext"]
         .as_str()
         .unwrap();
 
@@ -474,8 +480,9 @@ async fn each_persist_produces_unique_ciphertext() {
 #[tokio::test]
 async fn aad_binds_ciphertext_to_event_position() {
     // Persist two events for the same subject at different sequence numbers.
-    // The AAD includes the aggregate_id and sequence, so even identical
-    // plaintexts at different positions must produce different ciphertexts.
+    // The per-partition AAD includes aggregate_id, sequence, subject_id, and
+    // label, so identical plaintexts at different positions produce different
+    // ciphertexts.
     let repo = make_repo();
     let aggregate_id = "aad-test";
     let subject_id = Uuid::new_v4();
@@ -491,10 +498,10 @@ async fn aad_binds_ciphertext_to_event_position() {
     .unwrap();
 
     let raw = repo.inner().all_events();
-    let ct1 = raw[0].payload["MultiSecret"]["encrypted_pii"]
+    let ct1 = raw[0].payload["MultiSecret"]["encrypted_partitions"][0]["ciphertext"]
         .as_str()
         .unwrap();
-    let ct2 = raw[1].payload["MultiSecret"]["encrypted_pii"]
+    let ct2 = raw[1].payload["MultiSecret"]["encrypted_partitions"][0]["ciphertext"]
         .as_str()
         .unwrap();
 
@@ -884,12 +891,12 @@ async fn custom_subject_field_name_is_preserved_on_persist() {
     assert!(inner.get("name").is_none(), "name must be encrypted");
     assert!(inner.get("email").is_none(), "email must be encrypted");
 
-    // Sentinel and nonce present.
+    // Partition envelope present.
     assert!(
-        inner.get("encrypted_pii").is_some(),
-        "encrypted_pii sentinel must be present"
+        inner.get("encrypted_partitions").is_some(),
+        "encrypted_partitions must be present"
     );
-    assert!(inner.get("nonce").is_some(), "nonce must be present");
+    assert!(inner.get("subjects").is_some(), "subjects must be present");
 
     // The subject field must appear under its actual name `customer_ref`,
     // NOT under a hardcoded `subject_id`.
@@ -1003,10 +1010,13 @@ async fn vec_secret_pii_field_is_encrypted_on_persist() {
         "phone_numbers must be encrypted away in the persisted payload"
     );
     assert!(
-        inner.get("encrypted_pii").is_some(),
-        "encrypted_pii sentinel must be present"
+        inner.get("encrypted_partitions").is_some(),
+        "encrypted_partitions must be present"
     );
-    assert!(inner.get("nonce").is_some(), "nonce must be present");
+    assert!(inner.get("subjects").is_some(), "subjects must be present");
+    let parts = inner["encrypted_partitions"].as_array().unwrap();
+    assert_eq!(parts.len(), 1);
+    assert_eq!(parts[0]["label"].as_str().unwrap(), "default");
 
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
     assert_eq!(

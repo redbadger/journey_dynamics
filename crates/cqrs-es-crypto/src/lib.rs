@@ -104,12 +104,17 @@ pub use key_store::{PostgresKeyStore, PostgresKeyStoreOptions};
 
 pub use rewrap::{RewrapStats, RewrapWorker, RewrapWorkerOptions};
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// ── Repository ────────────────────────────────────────────────────────
 
+// New partition-based types and trait.
 pub use repository::{
-    CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel, PiiEventCodec,
-    PiiFields,
+    CryptoShreddingEventRepository, DecryptedPartition, EncryptedPartition, EncryptedPiiExtract,
+    PiiCodecError, PiiEventCodec, SecretPartition,
 };
+
+// Deprecated legacy types (kept for one release cycle).
+#[allow(deprecated)]
+pub use repository::{EncryptedPiiSentinel, PiiFields};
 
 #[cfg(feature = "postgres")]
 pub use repository::PersistHook;

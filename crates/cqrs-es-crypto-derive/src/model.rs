@@ -104,6 +104,9 @@ impl PiiVariantModel {
     }
 
     /// Returns an iterator over fields with the [`PiiFieldRole::Plaintext`] role.
+    ///
+    /// Retained for the existing arm-level tests; not used by the main code-gen.
+    #[allow(dead_code)]
     pub fn plaintext_fields(&self) -> impl Iterator<Item = &PiiFieldModel> {
         self.fields
             .iter()

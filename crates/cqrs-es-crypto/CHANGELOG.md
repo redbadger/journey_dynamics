@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (breaking — write path)
+
+- The on-disk encrypted-event envelope is now a list of subject-scoped
+  partitions (`encrypted_partitions: [{subject_id, label, nonce, ciphertext}]`)
+  with a plaintext peer array (`subjects: [uuid, …]`), replacing the previous
+  single-ciphertext-per-event shape.
+- The `PiiEventCodec` trait surface changes from
+  `classify` / `extract_encrypted` / `reconstruct` / `redact` to
+  `extract_partitions` / `reconstruct` / `redact_partitions` /
+  `extract_encrypted_legacy`. See the README for the new shape.
+- The derive macro emits the new trait surface automatically. Existing
+  `#[derive(PiiCodec)]` callers compile unchanged, with the expanded code now
+  partition-aware.
+- AAD is now `aggregate_id || sequence || subject_id || label` per partition.
+  Legacy AAD (`<aggregate_id>:<sequence>`) is accepted on read only.
+
+### Added
+
+- `SecretPartition`, `EncryptedPartition`, `DecryptedPartition` public types.
+- `PiiCodecError` — error type returned by `PiiEventCodec` methods.
+- Per-partition independent decryption: a single event may have some partitions
+  decrypted and some redacted simultaneously.
+
+### Backward compatibility
+
+- Events written before this release decrypt and redact unchanged. The read path
+  detects the legacy single-ciphertext shape via `extract_encrypted_legacy` and
+  treats it as a one-partition vector with `label = "default"`.
+- No on-disk migration is required. New writes use the partitioned shape; old
+  writes stay in their original shape.
+
+### Deprecated
+
+- `PiiFields`, `EncryptedPiiSentinel` — kept for one release cycle.
+  Replace with `SecretPartition` / `extract_partitions`.
+
 ## [0.2.2] - 2026-05-24
 
 ### Fixed
