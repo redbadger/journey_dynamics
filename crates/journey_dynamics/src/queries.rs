@@ -1,3 +1,4 @@
+#![allow(deprecated)]
 use cqrs_es::{EventEnvelope, View, persist::GenericQuery};
 use postgres_es::PostgresViewRepository;
 use serde::{Deserialize, Serialize};
@@ -18,6 +19,14 @@ pub struct PersonView {
     pub email: Option<String>,
     pub phone: Option<String>,
     /// Free-form PII details — cleared to `{}` when the subject is forgotten.
+    ///
+    /// Deprecated: the canonical location for per-person attributes is
+    /// `shared_data` under `persons/<ref>/…`. This field is a back-compat
+    /// mirror; prefer reading from `JourneyView.shared_data`.
+    #[deprecated(
+        since = "0.3.0",
+        note = "read from shared_data under persons/<ref>/… instead"
+    )]
     pub details: serde_json::Value,
     /// `true` once a `SubjectForgotten` event has been applied for this subject.
     pub forgotten: bool,
@@ -43,7 +52,13 @@ pub struct JourneyView {
     /// Never encrypted. Fully intact after any shredding operation.
     pub shared_data: Value,
 
-    /// The current step in the journey workflow
+    /// The current step in the journey workflow.
+    ///
+    /// Deprecated: read `WorkflowEvaluated.phase` from `shared_data` instead.
+    #[deprecated(
+        since = "0.3.0",
+        note = "read WorkflowEvaluated.phase from shared_data instead"
+    )]
     pub current_step: Option<String>,
 
     /// The latest workflow decision state including available actions
@@ -90,7 +105,6 @@ pub struct WorkflowDecisionView {
 // This updates the view with events as they are committed.
 // The logic should be minimal here - the events should carry all necessary information.
 impl View<Journey> for JourneyView {
-    #[allow(deprecated)]
     fn update(&mut self, event: &EventEnvelope<Journey>) {
         match &event.payload {
             JourneyEvent::Started { id } => {
