@@ -46,6 +46,10 @@ pub enum JourneyEvent {
     },
     WorkflowEvaluated {
         suggested_actions: Vec<String>,
+        /// Phase label from the decision engine; `None` for events written
+        /// before schema version 1.1 (legacy `Capture` arm always writes `None`).
+        #[serde(default)]
+        phase: Option<String>,
     },
     StepProgressed {
         from_step: Option<String>,
@@ -88,6 +92,48 @@ impl DomainEvent for JourneyEvent {
     }
 
     fn event_version(&self) -> String {
-        "1.0".to_string()
+        match self {
+            // Bumped to 1.1 when `phase` was added (step B1).
+            // Old 1.0 payloads (no `phase`) deserialise to `phase: None`
+            // via `#[serde(default)]` on the field.
+            Self::WorkflowEvaluated { .. } => "1.1".to_string(),
+            _ => "1.0".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that a v1.0 `WorkflowEvaluated` payload (no `phase` field)
+    /// deserialises without error and produces `phase: None`.
+    #[test]
+    fn workflow_evaluated_v1_0_fixture_deserialises_to_phase_none() {
+        let json = r#"{"WorkflowEvaluated": {"suggested_actions": ["next"]}}"#;
+        let event: JourneyEvent = serde_json::from_str(json).unwrap();
+        match event {
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions,
+                phase,
+            } => {
+                assert_eq!(suggested_actions, vec!["next".to_string()]);
+                assert!(phase.is_none(), "phase must be None for v1.0 payload");
+            }
+            other => panic!("expected WorkflowEvaluated, got {other:?}"),
+        }
+    }
+
+    /// Verify that a v1.1 `WorkflowEvaluated` payload (with `phase`) round-trips.
+    #[test]
+    fn workflow_evaluated_v1_1_round_trips_phase() {
+        let event = JourneyEvent::WorkflowEvaluated {
+            suggested_actions: vec!["confirm".to_string()],
+            phase: Some("collecting_passengers".to_string()),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        let decoded: JourneyEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(event, decoded);
+        assert_eq!(event.event_version(), "1.1");
     }
 }

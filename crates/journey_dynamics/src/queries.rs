@@ -113,12 +113,13 @@ impl View<Journey> for JourneyView {
             | JourneyEvent::PersonDetailsUpdated { .. }
             | JourneyEvent::SubjectForgotten { .. } => {}
 
-            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
-                // TODO(path-keyed-step-B1): `phase` is not carried by this
-                // event yet; it will be added in step B1.
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions,
+                phase,
+            } => {
                 self.latest_workflow_decision = Some(WorkflowDecisionView {
                     suggested_actions: suggested_actions.clone(),
-                    phase: None,
+                    phase: phase.clone(),
                 });
             }
 
@@ -282,6 +283,7 @@ mod tests {
                     "next".to_string(),
                     "back".to_string(),
                 ],
+                phase: None,
             },
             metadata: HashMap::default(),
         };
@@ -421,6 +423,7 @@ mod tests {
             sequence: 4,
             payload: JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["confirmation".to_string(), "continue".to_string()],
+                phase: None,
             },
             metadata: HashMap::default(),
         });

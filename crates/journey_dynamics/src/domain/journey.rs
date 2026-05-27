@@ -185,6 +185,8 @@ impl Aggregate for Journey {
                 sink.write(
                     JourneyEvent::WorkflowEvaluated {
                         suggested_actions: decision.suggested_actions,
+                        // The legacy `Capture` arm never carries a phase label.
+                        phase: None,
                     },
                     self,
                 )
@@ -307,6 +309,7 @@ impl Aggregate for Journey {
                 sink.write(
                     JourneyEvent::WorkflowEvaluated {
                         suggested_actions: decision.suggested_actions,
+                        phase: decision.phase,
                     },
                     self,
                 )
@@ -420,14 +423,13 @@ impl Aggregate for Journey {
                 }
             }
 
-            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
-                // TODO(path-keyed-step-B1): `phase` is not carried by this
-                // event yet; it will be added in step B1 to avoid an
-                // event-up-caster in Phase A. Until then phase is always None
-                // after replay.
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions,
+                phase,
+            } => {
                 self.latest_workflow_decision = Some(WorkflowDecisionState {
                     suggested_actions,
-                    phase: None,
+                    phase,
                 });
             }
             JourneyEvent::StepProgressed { to_step, .. } => {
@@ -660,6 +662,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -708,6 +711,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -728,6 +732,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -745,6 +750,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: Some("form_data".to_string()),
@@ -765,6 +771,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: Some("form_data".to_string()),
@@ -850,6 +857,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -882,6 +890,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["form_3".to_string()],
+                    phase: None,
                 },
                 JourneyEvent::StepProgressed {
                     from_step: None,
@@ -1526,6 +1535,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["form_3".to_string()],
+                    phase: None,
                 },
             ]);
     }
@@ -1586,6 +1596,7 @@ mod tests {
                 },
                 JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec![],
+                    phase: None,
                 },
             ]);
     }

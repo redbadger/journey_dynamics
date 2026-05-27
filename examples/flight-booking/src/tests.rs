@@ -77,6 +77,7 @@ fn flight_booking_search_criteria() {
             },
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: None,
@@ -112,6 +113,7 @@ fn flight_booking_outbound_selection() {
             },
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: None,
@@ -178,6 +180,7 @@ fn flight_booking_outbound_selection() {
                     "return_flight_selection".to_string(),
                     "flight_search_results".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("search_criteria".to_string()),
@@ -225,6 +228,7 @@ fn flight_booking_return_selection() {
                     "return_flight_selection".to_string(),
                     "flight_search_results".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("search_criteria".to_string()),
@@ -305,6 +309,7 @@ fn flight_booking_return_selection() {
                     "passenger_details".to_string(),
                     "outbound_flight_selection".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("outbound_flight_selection".to_string()),
@@ -493,6 +498,7 @@ fn flight_booking_passenger_details_ready_signal() {
                     "passenger_details".to_string(),
                     "outbound_flight_selection".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("outbound_flight_selection".to_string()),
@@ -559,6 +565,7 @@ fn flight_booking_passenger_details_ready_signal() {
                     "seat_selection".to_string(),
                     "passenger_details".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("return_flight_selection".to_string()),
@@ -614,6 +621,7 @@ fn flight_booking_three_passengers_ready_signal() {
                     "seat_selection".to_string(),
                     "passenger_details".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("outbound_flight_selection".to_string()),
@@ -642,6 +650,7 @@ fn flight_booking_three_passengers_ready_signal() {
                     "seat_selection".to_string(),
                     "passenger_details".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("return_flight_selection".to_string()),
@@ -698,6 +707,7 @@ fn flight_booking_passenger_details_not_ready() {
                     "passenger_details".to_string(),
                     "outbound_flight_selection".to_string(),
                 ],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("outbound_flight_selection".to_string()),
@@ -718,6 +728,7 @@ fn flight_booking_passenger_details_not_ready() {
             },
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["passenger_details".to_string()],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: Some("return_flight_selection".to_string()),
@@ -773,6 +784,7 @@ fn flight_booking_payment_capture() {
             },
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["booking_confirmation".to_string()],
+                phase: None,
             },
             JourneyEvent::StepProgressed {
                 from_step: None,
@@ -850,6 +862,7 @@ fn flight_booking_modify_search_criteria() {
             },
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
+                phase: None,
             },
         ]);
 }
