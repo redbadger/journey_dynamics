@@ -179,43 +179,20 @@ impl GoRulesDecisionEngine {
     }
 }
 
-#[async_trait]
-impl DecisionEngine for GoRulesDecisionEngine {
-    async fn evaluate_next_steps(
+impl GoRulesDecisionEngine {
+    /// Evaluate the loaded JDM with `context` and extract a [`WorkflowDecision`].
+    async fn run(
         &self,
-        journey: &Journey,
-        current_step: &str,
-        new_data: &Value,
+        context: Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut captured_data = journey.shared_data().clone();
-        json_patch::merge(&mut captured_data, new_data);
-
-        // Build the evaluation context.
-        let mut context = Map::new();
-        // Include currentStep so the decision engine can route correctly.
-        context.insert(
-            "currentStep".to_string(),
-            Value::String(current_step.to_string()),
-        );
-        context.insert("capturedData".to_string(), captured_data);
-        let context = serde_json::to_value(&context).unwrap();
-
-        eprintln!("JDM Context: {context:#?}");
-
-        // Both clones are cheap Arc pointer copies.  Arc<ZenEngine> and
-        // Arc<DecisionContent> are Send + Sync so they can be moved into the
-        // spawn_pinned closure, whose own signature requires Send + 'static.
         let engine = Arc::clone(&self.engine);
         let jdm_content = Arc::clone(&self.decision_content);
 
-        // We serialise the response to serde_json::Value inside the closure so
-        // that the JoinHandle output type is Send, even though
-        // DecisionGraphResponse (which holds zen_engine::Variable) is not.
+        // Serialise the response inside the closure so the JoinHandle output
+        // type is Send (DecisionGraphResponse holds zen_engine::Variable which
+        // is !Send).
         let result: Value = spawn_pinned(move || async move {
-            // The DecisionContent was compiled once in new(), so the OpcodeCache
-            // is already populated inside the Arc.  No compile() call needed here.
             let decision = engine.create_decision(jdm_content);
-
             let response = decision
                 .evaluate_with_opts(
                     context.into(),
@@ -226,16 +203,13 @@ impl DecisionEngine for GoRulesDecisionEngine {
                 )
                 .await
                 .map_err(|e| e.to_string())?;
-
             serde_json::to_value(response).map_err(|e| e.to_string())
         })
         .await
-        // JoinError (task panicked or was cancelled)
         .map_err(|e| {
             Box::new(std::io::Error::other(e.to_string()))
                 as Box<dyn std::error::Error + Send + Sync>
         })?
-        // String error from inside the closure
         .map_err(|e| {
             Box::new(std::io::Error::other(e)) as Box<dyn std::error::Error + Send + Sync>
         })?;
@@ -244,9 +218,6 @@ impl DecisionEngine for GoRulesDecisionEngine {
         let unwrapped_map = result.as_object().unwrap();
         let take = unwrapped_map.take();
 
-        // Get suggested actions directly from the decision result.
-        // If the key is absent (e.g. no JDM route matched the current step),
-        // fall back to an empty list rather than propagating an error.
         let suggested_actions: Vec<String> = take
             .get("suggestedActions")
             .and_then(zen_engine::Variable::as_array)
@@ -258,8 +229,6 @@ impl DecisionEngine for GoRulesDecisionEngine {
             })
             .unwrap_or_default();
 
-        // Mirror the `suggested_actions` extraction: read `phase` if the JDM
-        // output contains it, otherwise fall back to `None`.
         let phase: Option<String> = take
             .get("phase")
             .and_then(zen_engine::Variable::as_str)
@@ -269,5 +238,46 @@ impl DecisionEngine for GoRulesDecisionEngine {
             suggested_actions,
             phase,
         })
+    }
+}
+
+#[async_trait]
+impl DecisionEngine for GoRulesDecisionEngine {
+    async fn evaluate_next_steps(
+        &self,
+        journey: &Journey,
+        current_step: &str,
+        new_data: &Value,
+    ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
+        let mut captured_data = journey.shared_data().clone();
+        json_patch::merge(&mut captured_data, new_data);
+
+        // Wrap in the legacy { currentStep, capturedData } envelope expected by
+        // JDMs that route on currentStep.
+        let mut context = Map::new();
+        context.insert(
+            "currentStep".to_string(),
+            Value::String(current_step.to_string()),
+        );
+        context.insert("capturedData".to_string(), captured_data);
+        let context = serde_json::to_value(&context).unwrap();
+
+        self.run(context).await
+    }
+
+    /// Evaluate the workflow after a `SetAttributes` command.
+    ///
+    /// Overrides the default implementation to pass the merged attribute bag
+    /// **at the top level** — no `currentStep` or `capturedData` wrapper.
+    /// The JDM receives `{ search: {...}, booking: {...}, persons: {...} }`
+    /// and derives the current phase purely from the data.
+    async fn evaluate_attributes(
+        &self,
+        journey: &Journey,
+        pending_changes: &BTreeMap<crate::domain::AttributePath, Value>,
+    ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
+        let mut data = journey.shared_data().clone();
+        json_patch::merge(&mut data, &crate::domain::rehydrate(pending_changes));
+        self.run(data).await
     }
 }

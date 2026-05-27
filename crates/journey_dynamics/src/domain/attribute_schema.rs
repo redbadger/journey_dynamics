@@ -2,8 +2,10 @@
 //! purposes, and a pure classification function that routes a flat change map
 //! into plaintext and per-subject secret buckets.
 
-use std::collections::BTreeMap;
+use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -22,6 +24,29 @@ pub enum PiiClass {
     Secret { subject: AttributePath },
 }
 
+// ── NamespacePattern ──────────────────────────────────────────────────────────
+
+/// A prefix-based classification rule for dynamic three-segment paths of the
+/// form `<namespace>/<ref>/<field>`.
+///
+/// For example, with `namespace = "persons"`:
+/// - `persons/passenger_0/firstName` → `Secret { subject: "persons/passenger_0" }`
+///   (if `"firstName"` is in `secret_fields`)
+/// - `persons/passenger_0/passengerType` → `Plaintext`
+///   (if `"passengerType"` is in `plaintext_fields`)
+///
+/// Any field not listed in either set is treated as unknown (or falls through
+/// to permissive mode if the schema is permissive).
+#[derive(Debug, Clone)]
+pub struct NamespacePattern {
+    /// First path segment, e.g. `"persons"`.
+    pub namespace: String,
+    /// Leaf field names classified as `Secret` under `<namespace>/<ref>`.
+    pub secret_fields: BTreeSet<String>,
+    /// Leaf field names classified as `Plaintext`.
+    pub plaintext_fields: BTreeSet<String>,
+}
+
 // ── AttributeSchema ───────────────────────────────────────────────────────────
 
 /// Schema that maps known attribute paths to their [`PiiClass`].
@@ -30,18 +55,23 @@ pub enum PiiClass {
 ///
 /// - **Explicit** (`new`): only the provided paths are known; anything else is
 ///   treated as unknown by [`classify`](Self::classify).
-/// - **Permissive** (`permissive`): every path is treated as `Plaintext`
-///   regardless of whether it is listed. Useful for tests and bootstrap
+/// - **Permissive** (`permissive`): every path not matched by an exact entry or
+///   namespace pattern is treated as `Plaintext`. Useful for tests and bootstrap
 ///   contexts where the caller does not yet have a real schema.
+///
+/// Namespace patterns (see [`NamespacePattern`]) can be layered on top of
+/// either mode via [`with_namespace_patterns`](Self::with_namespace_patterns).
 pub struct AttributeSchema {
     paths: BTreeMap<AttributePath, PiiClass>,
     json_schema: Option<Value>,
     /// When `true`, [`classify`](Self::classify) returns `Some(Plaintext)` for
-    /// any path not listed in `paths`.
+    /// any path not matched by an exact entry or namespace pattern.
     permissive: bool,
+    /// Prefix-based rules applied when the exact path lookup misses.
+    namespace_patterns: Vec<NamespacePattern>,
 }
 
-/// A static `Plaintext` sentinel returned by reference in permissive mode.
+/// A static `Plaintext` sentinel returned by reference in permissive/plaintext mode.
 static PLAINTEXT: PiiClass = PiiClass::Plaintext;
 
 impl AttributeSchema {
@@ -53,10 +83,11 @@ impl AttributeSchema {
             paths,
             json_schema,
             permissive: false,
+            namespace_patterns: Vec::new(),
         }
     }
 
-    /// Construct a permissive schema that classifies every path as
+    /// Construct a permissive schema that classifies every unmatched path as
     /// [`PiiClass::Plaintext`] and performs no JSON Schema validation.
     ///
     /// Suitable for tests and for the default binary bootstrap where a real
@@ -67,21 +98,65 @@ impl AttributeSchema {
             paths: BTreeMap::new(),
             json_schema: None,
             permissive: true,
+            namespace_patterns: Vec::new(),
         }
+    }
+
+    /// Attach namespace patterns to this schema.
+    ///
+    /// Patterns are tried in order after the exact-path lookup misses and
+    /// before the permissive fallback.
+    #[must_use]
+    pub fn with_namespace_patterns(mut self, patterns: Vec<NamespacePattern>) -> Self {
+        self.namespace_patterns = patterns;
+        self
     }
 
     /// Classify a single path.
     ///
-    /// Returns `None` when the path is not known and the schema is not
-    /// permissive.  In permissive mode always returns
-    /// `Some(&PiiClass::Plaintext)`.
+    /// Resolution order:
+    /// 1. Exact match in `paths`.
+    /// 2. Namespace pattern match for three-segment paths (`namespace/ref/field`).
+    /// 3. Permissive fallback — `Some(Plaintext)` if the schema is permissive.
+    /// 4. `None` — path is unknown.
+    ///
+    /// Returns a [`Cow`] so that statically-known classifications can be
+    /// borrowed while dynamically-constructed `Secret` values (whose subject
+    /// path is built at call time) are owned.
     #[must_use]
-    pub fn classify(&self, path: &AttributePath) -> Option<&PiiClass> {
-        if self.permissive {
-            Some(self.paths.get(path).unwrap_or(&PLAINTEXT))
-        } else {
-            self.paths.get(path)
+    pub fn classify<'a>(&'a self, path: &AttributePath) -> Option<Cow<'a, PiiClass>> {
+        // 1. Exact match.
+        if let Some(cls) = self.paths.get(path) {
+            return Some(Cow::Borrowed(cls));
         }
+
+        // 2. Namespace pattern: only applies to exactly three segments.
+        let segs: Vec<&str> = path.segments().collect();
+        if segs.len() == 3 {
+            for pattern in &self.namespace_patterns {
+                if segs[0] != pattern.namespace {
+                    continue;
+                }
+                let field = segs[2];
+                if pattern.plaintext_fields.contains(field) {
+                    return Some(Cow::Borrowed(&PLAINTEXT));
+                }
+                if pattern.secret_fields.contains(field) {
+                    // Build subject path dynamically: namespace/ref
+                    let subject_str = format!("{}/{}", segs[0], segs[1]);
+                    if let Ok(subject) = subject_str.parse::<AttributePath>() {
+                        return Some(Cow::Owned(PiiClass::Secret { subject }));
+                    }
+                }
+            }
+        }
+
+        // 3. Permissive fallback.
+        if self.permissive {
+            return Some(Cow::Borrowed(&PLAINTEXT));
+        }
+
+        None
     }
 
     /// Returns the JSON Schema value if one was provided.
@@ -93,6 +168,67 @@ impl AttributeSchema {
     /// Iterates over all explicitly registered paths.
     pub fn known_paths(&self) -> impl Iterator<Item = &AttributePath> {
         self.paths.keys()
+    }
+}
+
+// ── AttributeSchemaConfig ─────────────────────────────────────────────────────
+
+/// JSON-serialisable configuration for building an [`AttributeSchema`].
+///
+/// Intended for loading from a file pointed to by the
+/// `JOURNEY_ATTRIBUTE_SCHEMA_PATH` environment variable.
+///
+/// ```json
+/// {
+///   "permissive": true,
+///   "namespace_patterns": [
+///     {
+///       "namespace": "persons",
+///       "secret_fields": ["firstName", "lastName", "dateOfBirth", "passportNumber", "nationality"],
+///       "plaintext_fields": ["passengerType"]
+///     }
+///   ]
+/// }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttributeSchemaConfig {
+    /// If `true`, paths not matched by exact entries or namespace patterns are
+    /// treated as `Plaintext` (permissive mode).
+    #[serde(default)]
+    pub permissive: bool,
+    /// Dynamic namespace-based classification rules.
+    #[serde(default)]
+    pub namespace_patterns: Vec<NamespacePatternConfig>,
+}
+
+/// JSON-serialisable form of [`NamespacePattern`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NamespacePatternConfig {
+    pub namespace: String,
+    #[serde(default)]
+    pub secret_fields: BTreeSet<String>,
+    #[serde(default)]
+    pub plaintext_fields: BTreeSet<String>,
+}
+
+impl From<AttributeSchemaConfig> for AttributeSchema {
+    fn from(config: AttributeSchemaConfig) -> Self {
+        let base = if config.permissive {
+            Self::permissive()
+        } else {
+            Self::new(BTreeMap::new(), None)
+        };
+        base.with_namespace_patterns(
+            config
+                .namespace_patterns
+                .into_iter()
+                .map(|p| NamespacePattern {
+                    namespace: p.namespace,
+                    secret_fields: p.secret_fields,
+                    plaintext_fields: p.plaintext_fields,
+                })
+                .collect(),
+        )
     }
 }
 
@@ -133,19 +269,21 @@ pub fn classify_changes(
             None => {
                 unknown.push(path.clone());
             }
-            Some(PiiClass::Plaintext) => {
-                plaintext.insert(path.clone(), value.clone());
-            }
-            Some(PiiClass::Secret { subject }) => match subject_lookup(subject) {
-                None => {
-                    unknown.push(path.clone());
+            Some(cls) => match cls.as_ref() {
+                PiiClass::Plaintext => {
+                    plaintext.insert(path.clone(), value.clone());
                 }
-                Some(uuid) => {
-                    secret_by_subject
-                        .entry(uuid)
-                        .or_default()
-                        .insert(path.clone(), value.clone());
-                }
+                PiiClass::Secret { subject } => match subject_lookup(subject) {
+                    None => {
+                        unknown.push(path.clone());
+                    }
+                    Some(uuid) => {
+                        secret_by_subject
+                            .entry(uuid)
+                            .or_default()
+                            .insert(path.clone(), value.clone());
+                    }
+                },
             },
         }
     }
@@ -281,7 +419,6 @@ mod tests {
         let mut changes = BTreeMap::new();
         changes.insert(path("persons/0/passport"), json!("AB123456"));
 
-        // Lookup always returns None.
         let result = classify_changes(&schema, &changes, |_| None);
 
         assert!(result.plaintext.is_empty());
@@ -303,5 +440,117 @@ mod tests {
         assert_eq!(result.plaintext.len(), 2);
         assert!(result.secret_by_subject.is_empty());
         assert!(result.unknown.is_empty());
+    }
+
+    // ── namespace pattern ─────────────────────────────────────────────────
+
+    fn persons_namespace_schema() -> AttributeSchema {
+        let pattern = NamespacePattern {
+            namespace: "persons".to_string(),
+            secret_fields: ["firstName", "lastName", "passportNumber"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+            plaintext_fields: std::iter::once("passengerType")
+                .map(str::to_string)
+                .collect(),
+        };
+        AttributeSchema::permissive().with_namespace_patterns(vec![pattern])
+    }
+
+    fn lookup_passenger(subject_path: &AttributePath) -> Option<Uuid> {
+        match subject_path.as_str() {
+            "persons/passenger_0" => Some(subject_a()),
+            "persons/passenger_1" => Some(subject_b()),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn namespace_pattern_classifies_secret_field_as_secret() {
+        let schema = persons_namespace_schema();
+        let result = schema.classify(&path("persons/passenger_0/firstName"));
+        assert!(matches!(
+            result.as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "persons/passenger_0"
+        ));
+    }
+
+    #[test]
+    fn namespace_pattern_classifies_plaintext_field_as_plaintext() {
+        let schema = persons_namespace_schema();
+        let result = schema.classify(&path("persons/passenger_0/passengerType"));
+        assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
+    }
+
+    #[test]
+    fn namespace_pattern_unknown_field_falls_through_to_permissive() {
+        let schema = persons_namespace_schema();
+        // "role" is in neither secret_fields nor plaintext_fields,
+        // but the schema is permissive so it falls through to Plaintext.
+        let result = schema.classify(&path("persons/passenger_0/role"));
+        assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
+    }
+
+    #[test]
+    fn namespace_pattern_routes_secret_to_correct_subject() {
+        let schema = persons_namespace_schema();
+        let mut changes = BTreeMap::new();
+        changes.insert(path("persons/passenger_0/firstName"), json!("Alice"));
+        changes.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+
+        let result = classify_changes(&schema, &changes, lookup_passenger);
+
+        assert_eq!(result.plaintext.len(), 1);
+        assert_eq!(
+            result.plaintext[&path("persons/passenger_0/passengerType")],
+            json!("adult")
+        );
+        assert_eq!(result.secret_by_subject.len(), 1);
+        let slot = result.secret_by_subject.get(&subject_a()).unwrap();
+        assert_eq!(slot[&path("persons/passenger_0/firstName")], json!("Alice"));
+        assert!(result.unknown.is_empty());
+    }
+
+    #[test]
+    fn namespace_pattern_two_subjects_split_correctly() {
+        let schema = persons_namespace_schema();
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            path("persons/passenger_0/passportNumber"),
+            json!("AB111111"),
+        );
+        changes.insert(
+            path("persons/passenger_1/passportNumber"),
+            json!("CD222222"),
+        );
+
+        let result = classify_changes(&schema, &changes, lookup_passenger);
+
+        assert!(result.plaintext.is_empty());
+        assert_eq!(result.secret_by_subject.len(), 2);
+        assert!(result.unknown.is_empty());
+    }
+
+    #[test]
+    fn attribute_schema_config_round_trips_via_json() {
+        let config = AttributeSchemaConfig {
+            permissive: true,
+            namespace_patterns: vec![NamespacePatternConfig {
+                namespace: "persons".to_string(),
+                secret_fields: ["firstName", "lastName"]
+                    .iter()
+                    .map(|s| (*s).to_string())
+                    .collect(),
+                plaintext_fields: std::iter::once("passengerType")
+                    .map(str::to_string)
+                    .collect(),
+            }],
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: AttributeSchemaConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.permissive, config.permissive);
+        assert_eq!(decoded.namespace_patterns.len(), 1);
+        assert_eq!(decoded.namespace_patterns[0].namespace, "persons");
     }
 }

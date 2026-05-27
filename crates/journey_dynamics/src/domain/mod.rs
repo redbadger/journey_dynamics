@@ -6,5 +6,8 @@ pub mod journey;
 pub mod json_path;
 
 pub use attribute_path::{AttributePath, AttributePathError};
-pub use attribute_schema::{AttributeSchema, Classification, PiiClass, classify_changes};
+pub use attribute_schema::{
+    AttributeSchema, AttributeSchemaConfig, Classification, NamespacePattern,
+    NamespacePatternConfig, PiiClass, classify_changes,
+};
 pub use json_path::{flatten, get_at_path, rehydrate, set_at_path};

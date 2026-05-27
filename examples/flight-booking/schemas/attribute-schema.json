@@ -1,0 +1,10 @@
+{
+  "permissive": true,
+  "namespace_patterns": [
+    {
+      "namespace": "persons",
+      "secret_fields": ["firstName", "lastName", "dateOfBirth", "passportNumber", "nationality"],
+      "plaintext_fields": ["passengerType"]
+    }
+  ]
+}

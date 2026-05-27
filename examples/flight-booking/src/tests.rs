@@ -1,15 +1,18 @@
 #![allow(clippy::too_many_lines, deprecated)]
+use std::collections::BTreeMap;
+use std::sync::Arc;
+
 use cqrs_es::test::TestFramework;
 use serde_json::json;
-use std::sync::Arc;
 use uuid::Uuid;
 
 use journey_dynamics::{
     domain::{
         commands::JourneyCommand,
-        events::JourneyEvent,
+        events::{JourneyEvent, SecretPartitionData},
+        flatten,
         journey::{Journey, JourneyError, JourneyServices},
-        AttributeSchema,
+        AttributePath,
     },
     services::{decision_engine::GoRulesDecisionEngine, schema_validator::JsonSchemaValidator},
 };
@@ -26,301 +29,156 @@ fn create_journey_services() -> JourneyServices {
     JourneyServices::new(
         decision_engine,
         schema_validator,
-        Arc::new(AttributeSchema::permissive()),
+        Arc::new(crate::attribute_schema()),
     )
 }
 
-// ── Shared non-PII steps ─────────────────────────────────────────────────────
+/// Build a `SetAttributes` command from a nested JSON value by flattening it.
+fn set_attrs(data: &serde_json::Value) -> JourneyCommand {
+    JourneyCommand::SetAttributes {
+        changes: flatten(data),
+    }
+}
+
+/// Build an `AttributesSet` plaintext event from a nested JSON value.
+fn attrs_set(data: &serde_json::Value) -> JourneyEvent {
+    JourneyEvent::AttributesSet {
+        plaintext: flatten(data),
+        secret_partitions: vec![],
+    }
+}
+
+// ── Search criteria ───────────────────────────────────────────────────────────
 
 #[test]
 fn flight_booking_search_criteria() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
 
     JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
-        .when(JourneyCommand::Capture {
-            step: "search_criteria".to_string(),
-            data: json!({
-                "search": {
-                    "tripType": "round-trip",
-                    "origin": "LHR",
-                    "destination": "JFK",
-                    "departureDate": "2024-06-15",
-                    "returnDate": "2024-06-22",
-                    "passengers": {
-                        "total": 2,
-                        "adults": 2,
-                        "children": 0,
-                        "infants": 0
-                    }
-                }
-            }),
-        })
+        .when(set_attrs(&search))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "search_criteria".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    }
-                }),
-            },
+            attrs_set(&search),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: None,
-                to_step: "search_criteria".to_string(),
+                phase: Some("selecting_outbound".to_string()),
             },
         ]);
 }
+
+// ── Outbound flight selection ─────────────────────────────────────────────────
 
 #[test]
 fn flight_booking_outbound_selection() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let outbound = json!({
+        "booking": {
+            "selectedOutboundFlight": {
+                "flightId": "BA123",
+                "airline": "British Airways",
+                "price": 450.00,
+                "departure": "08:30",
+                "arrival": "11:45"
+            }
+        }
+    });
 
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "search_criteria".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    }
-                }),
-            },
+            attrs_set(&search),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: None,
-                to_step: "search_criteria".to_string(),
+                phase: Some("selecting_outbound".to_string()),
             },
         ])
-        .when(JourneyCommand::Capture {
-            step: "outbound_flight_selection".to_string(),
-            data: json!({
-                "search": {
-                    "tripType": "round-trip",
-                    "origin": "LHR",
-                    "destination": "JFK",
-                    "departureDate": "2024-06-15",
-                    "returnDate": "2024-06-22",
-                    "passengers": {
-                        "total": 2,
-                        "adults": 2,
-                        "children": 0,
-                        "infants": 0
-                    }
-                },
-                "booking": {
-                    "selectedOutboundFlight": {
-                        "flightId": "BA123",
-                        "airline": "British Airways",
-                        "price": 450.00,
-                        "departure": "08:30",
-                        "arrival": "11:45"
-                    }
-                }
-            }),
-        })
+        .when(set_attrs(&outbound))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "outbound_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        }
-                    }
-                }),
-            },
+            attrs_set(&outbound),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
                     "return_flight_selection".to_string(),
                     "flight_search_results".to_string(),
                 ],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: Some("search_criteria".to_string()),
-                to_step: "outbound_flight_selection".to_string(),
+                phase: Some("selecting_return".to_string()),
             },
         ]);
 }
+
+// ── Return flight selection ───────────────────────────────────────────────────
 
 #[test]
 fn flight_booking_return_selection() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let outbound_flight = json!({
+        "flightId": "BA123", "airline": "British Airways",
+        "price": 450.00, "departure": "08:30", "arrival": "11:45"
+    });
+    let return_flight = json!({
+        "flightId": "BA456", "airline": "British Airways",
+        "price": 480.00, "departure": "14:20", "arrival": "17:35"
+    });
+    let return_data = json!({ "booking": { "selectedReturnFlight": return_flight } });
 
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "outbound_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        }
-                    }
-                }),
+            attrs_set(&search),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["flight_search_results".to_string()],
+                phase: Some("selecting_outbound".to_string()),
             },
+            attrs_set(&json!({ "booking": { "selectedOutboundFlight": outbound_flight } })),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
                     "return_flight_selection".to_string(),
                     "flight_search_results".to_string(),
                 ],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: Some("search_criteria".to_string()),
-                to_step: "outbound_flight_selection".to_string(),
+                phase: Some("selecting_return".to_string()),
             },
         ])
-        .when(JourneyCommand::Capture {
-            step: "return_flight_selection".to_string(),
-            data: json!({
-                "search": {
-                    "tripType": "round-trip",
-                    "origin": "LHR",
-                    "destination": "JFK",
-                    "departureDate": "2024-06-15",
-                    "returnDate": "2024-06-22",
-                    "passengers": {
-                        "total": 2,
-                        "adults": 2,
-                        "children": 0,
-                        "infants": 0
-                    }
-                },
-                "booking": {
-                    "selectedOutboundFlight": {
-                        "flightId": "BA123",
-                        "airline": "British Airways",
-                        "price": 450.00,
-                        "departure": "08:30",
-                        "arrival": "11:45"
-                    },
-                    "selectedReturnFlight": {
-                        "flightId": "BA456",
-                        "airline": "British Airways",
-                        "price": 480.00,
-                        "departure": "14:20",
-                        "arrival": "17:35"
-                    }
-                }
-            }),
-        })
+        .when(set_attrs(&return_data))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "return_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        },
-                        "selectedReturnFlight": {
-                            "flightId": "BA456",
-                            "airline": "British Airways",
-                            "price": 480.00,
-                            "departure": "14:20",
-                            "arrival": "17:35"
-                        }
-                    }
-                }),
-            },
+            attrs_set(&return_data),
             JourneyEvent::WorkflowEvaluated {
-                suggested_actions: vec![
-                    "passenger_details".to_string(),
-                    "outbound_flight_selection".to_string(),
-                ],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: Some("outbound_flight_selection".to_string()),
-                to_step: "return_flight_selection".to_string(),
+                suggested_actions: vec!["passenger_details".to_string()],
+                phase: Some("collecting_passengers".to_string()),
             },
         ]);
 }
 
-// ── Person capture (PII) ─────────────────────────────────────────────────────
+// ── Person capture (PII) ──────────────────────────────────────────────────────
 
-/// Demonstrates the correct way to capture a passenger's identity fields.
 /// `CapturePerson` stores name/email/phone encrypted under that subject's DEK.
 /// No workflow evaluation is triggered (the decision engine sees only shared data).
 #[test]
@@ -346,8 +204,6 @@ fn flight_booking_capture_person() {
         }]);
 }
 
-/// Demonstrates the correct way to capture per-passenger PII details
-/// (passport number, date of birth, nationality).
 /// `CapturePersonDetails` requires a prior `CapturePerson` for the same `person_ref`.
 #[test]
 fn flight_booking_capture_person_details() {
@@ -390,8 +246,7 @@ fn flight_booking_capture_person_details() {
         }]);
 }
 
-/// `CapturePersonDetails` MUST be preceded by `CapturePerson` for the same `person_ref`.
-/// Calling it without a prior `CapturePerson` returns `PersonNotFound`.
+/// `CapturePersonDetails` without a prior `CapturePerson` returns `PersonNotFound`.
 #[test]
 fn flight_booking_capture_person_details_requires_prior_capture_person() {
     let id = Uuid::new_v4();
@@ -409,15 +264,13 @@ fn flight_booking_capture_person_details_requires_prior_capture_person() {
         .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
 }
 
-/// Two passengers with independent subject IDs in the same journey.
-/// Each `CapturePerson` + `CapturePersonDetails` pair is entirely independent.
+/// Two passengers with independent subject IDs.
 #[test]
 fn flight_booking_capture_two_passengers() {
     let id = Uuid::new_v4();
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
-    // Capture identity for passenger 0.
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
@@ -445,66 +298,63 @@ fn flight_booking_capture_two_passengers() {
         }]);
 }
 
-// ── Passenger-ready workflow signal ──────────────────────────────────────────
+// ── Passenger readiness ───────────────────────────────────────────────────────
 
-/// After collecting each passenger's PII via `CapturePerson` + `CapturePersonDetails`,
-/// the application sends a `Capture` with `booking.passengersReady` to signal the decision
-/// engine that passenger details are complete. The PII itself never flows through `Capture`.
+/// Once all passengers have `passengerType` set via `SetAttributes`, the JDM
+/// advances to `collecting_payment` without any application-computed signal.
 #[test]
 fn flight_booking_passenger_details_ready_signal() {
     let id = Uuid::new_v4();
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let outbound_flight = json!({
+        "flightId": "BA123", "airline": "British Airways",
+        "price": 450.00, "departure": "08:30", "arrival": "11:45"
+    });
+    let return_flight = json!({
+        "flightId": "BA456", "airline": "British Airways",
+        "price": 480.00, "departure": "14:20", "arrival": "17:35"
+    });
+    let passenger_types = json!({
+        "persons": {
+            "passenger_0": { "passengerType": "adult" },
+            "passenger_1": { "passengerType": "adult" }
+        }
+    });
+
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "return_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        },
-                        "selectedReturnFlight": {
-                            "flightId": "BA456",
-                            "airline": "British Airways",
-                            "price": 480.00,
-                            "departure": "14:20",
-                            "arrival": "17:35"
-                        }
-                    }
-                }),
+            attrs_set(&search),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["flight_search_results".to_string()],
+                phase: Some("selecting_outbound".to_string()),
             },
+            attrs_set(&json!({ "booking": { "selectedOutboundFlight": outbound_flight } })),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
-                    "passenger_details".to_string(),
-                    "outbound_flight_selection".to_string(),
+                    "return_flight_selection".to_string(),
+                    "flight_search_results".to_string(),
                 ],
-                phase: None,
+                phase: Some("selecting_return".to_string()),
             },
-            JourneyEvent::StepProgressed {
-                from_step: Some("outbound_flight_selection".to_string()),
-                to_step: "return_flight_selection".to_string(),
+            attrs_set(&json!({ "booking": { "selectedReturnFlight": return_flight } })),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["passenger_details".to_string()],
+                phase: Some("collecting_passengers".to_string()),
             },
-            // PII captured for passenger 0 (encrypted in the event store).
+            // PII captured for each passenger (encrypted at rest).
             JourneyEvent::PersonCaptured {
                 person_ref: "passenger_0".to_string(),
                 subject_id: subject_a,
@@ -512,17 +362,6 @@ fn flight_booking_passenger_details_ready_signal() {
                 email: "alice@example.com".to_string(),
                 phone: None,
             },
-            JourneyEvent::PersonDetailsUpdated {
-                person_ref: "passenger_0".to_string(),
-                subject_id: subject_a,
-                data: json!({
-                    "firstName":   "Alice",
-                    "lastName":    "Smith",
-                    "dateOfBirth": "1990-05-15",
-                    "passengerType": "adult"
-                }),
-            },
-            // PII captured for passenger 1 (encrypted under a different DEK).
             JourneyEvent::PersonCaptured {
                 person_ref: "passenger_1".to_string(),
                 subject_id: subject_b,
@@ -530,209 +369,143 @@ fn flight_booking_passenger_details_ready_signal() {
                 email: "bob@example.com".to_string(),
                 phone: None,
             },
-            JourneyEvent::PersonDetailsUpdated {
-                person_ref: "passenger_1".to_string(),
-                subject_id: subject_b,
-                data: json!({
-                    "firstName":   "Bob",
-                    "lastName":    "Jones",
-                    "dateOfBirth": "1988-11-20",
-                    "passengerType": "adult"
-                }),
-            },
         ])
-        // Non-PII signal: both passengers are ready. The decision engine uses this to
-        // advance the workflow — it never sees the encrypted PII fields above.
-        .when(JourneyCommand::Capture {
-            step: "passenger_details".to_string(),
-            data: json!({
-                "booking": {
-                    "passengersReady": 2
-                }
-            }),
-        })
+        // Signal passenger readiness by setting passengerType for both via SetAttributes.
+        // The JDM reads persons.*.passengerType directly — no application-computed count needed.
+        .when(set_attrs(&passenger_types))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "passenger_details".to_string(),
-                data: json!({
-                    "booking": {
-                        "passengersReady": 2
-                    }
-                }),
-            },
+            attrs_set(&passenger_types),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
                     "seat_selection".to_string(),
                     "passenger_details".to_string(),
                 ],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: Some("return_flight_selection".to_string()),
-                to_step: "passenger_details".to_string(),
+                phase: Some("collecting_payment".to_string()),
             },
         ]);
 }
 
-/// Three passengers: signal `passengersReady: 3` once all details are captured.
+/// Three passengers: all three must have `passengerType` set.
 #[test]
 fn flight_booking_three_passengers_ready_signal() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 3, "adults": 2, "children": 1, "infants": 0 }
+        }
+    });
+    let outbound_flight = json!({
+        "flightId": "BA123", "airline": "British Airways",
+        "price": 450.00, "departure": "08:30", "arrival": "11:45"
+    });
+    let return_flight = json!({
+        "flightId": "BA456", "airline": "British Airways",
+        "price": 480.00, "departure": "14:20", "arrival": "17:35"
+    });
+    let passenger_types = json!({
+        "persons": {
+            "passenger_0": { "passengerType": "adult" },
+            "passenger_1": { "passengerType": "adult" },
+            "passenger_2": { "passengerType": "child" }
+        }
+    });
 
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "return_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 3,
-                            "adults": 2,
-                            "children": 1,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        },
-                        "selectedReturnFlight": {
-                            "flightId": "BA456",
-                            "airline": "British Airways",
-                            "price": 480.00,
-                            "departure": "14:20",
-                            "arrival": "17:35"
-                        }
-                    }
-                }),
+            attrs_set(&search),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["flight_search_results".to_string()],
+                phase: Some("selecting_outbound".to_string()),
             },
+            attrs_set(&json!({ "booking": { "selectedOutboundFlight": outbound_flight } })),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
-                    "seat_selection".to_string(),
-                    "passenger_details".to_string(),
+                    "return_flight_selection".to_string(),
+                    "flight_search_results".to_string(),
                 ],
-                phase: None,
+                phase: Some("selecting_return".to_string()),
             },
-            JourneyEvent::StepProgressed {
-                from_step: Some("outbound_flight_selection".to_string()),
-                to_step: "return_flight_selection".to_string(),
+            attrs_set(&json!({ "booking": { "selectedReturnFlight": return_flight } })),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["passenger_details".to_string()],
+                phase: Some("collecting_passengers".to_string()),
             },
         ])
-        .when(JourneyCommand::Capture {
-            step: "passenger_details".to_string(),
-            data: json!({
-                "booking": {
-                    "passengersReady": 3
-                }
-            }),
-        })
+        .when(set_attrs(&passenger_types))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "passenger_details".to_string(),
-                data: json!({
-                    "booking": {
-                        "passengersReady": 3
-                    }
-                }),
-            },
+            attrs_set(&passenger_types),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
                     "seat_selection".to_string(),
                     "passenger_details".to_string(),
                 ],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: Some("return_flight_selection".to_string()),
-                to_step: "passenger_details".to_string(),
+                phase: Some("collecting_payment".to_string()),
             },
         ]);
 }
 
-/// When `passengersReady` is absent the decision engine keeps the workflow at
-/// `passenger_details` — prompting the user to complete passenger capture.
+/// Only one of two passengers has submitted their type — workflow stays at
+/// `collecting_passengers`.
 #[test]
 fn flight_booking_passenger_details_not_ready() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let outbound_flight = json!({
+        "flightId": "BA123", "airline": "British Airways",
+        "price": 450.00, "departure": "08:30", "arrival": "11:45"
+    });
+    let return_flight = json!({
+        "flightId": "BA456", "airline": "British Airways",
+        "price": 480.00, "departure": "14:20", "arrival": "17:35"
+    });
+    // Only one of two passengers has submitted their type.
+    let partial_passengers = json!({
+        "persons": { "passenger_0": { "passengerType": "adult" } }
+    });
 
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "return_flight_selection".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    },
-                    "booking": {
-                        "selectedOutboundFlight": {
-                            "flightId": "BA123",
-                            "airline": "British Airways",
-                            "price": 450.00,
-                            "departure": "08:30",
-                            "arrival": "11:45"
-                        },
-                        "selectedReturnFlight": {
-                            "flightId": "BA456",
-                            "airline": "British Airways",
-                            "price": 480.00,
-                            "departure": "14:20",
-                            "arrival": "17:35"
-                        }
-                    }
-                }),
+            attrs_set(&search),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["flight_search_results".to_string()],
+                phase: Some("selecting_outbound".to_string()),
             },
+            attrs_set(&json!({ "booking": { "selectedOutboundFlight": outbound_flight } })),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec![
-                    "passenger_details".to_string(),
-                    "outbound_flight_selection".to_string(),
+                    "return_flight_selection".to_string(),
+                    "flight_search_results".to_string(),
                 ],
-                phase: None,
+                phase: Some("selecting_return".to_string()),
             },
-            JourneyEvent::StepProgressed {
-                from_step: Some("outbound_flight_selection".to_string()),
-                to_step: "return_flight_selection".to_string(),
-            },
-        ])
-        // No passengersReady signal yet — workflow should stay at passenger_details.
-        .when(JourneyCommand::Capture {
-            step: "passenger_details".to_string(),
-            data: json!({
-                "booking": {}
-            }),
-        })
-        .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "passenger_details".to_string(),
-                data: json!({ "booking": {} }),
-            },
+            attrs_set(&json!({ "booking": { "selectedReturnFlight": return_flight } })),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["passenger_details".to_string()],
-                phase: None,
+                phase: Some("collecting_passengers".to_string()),
             },
-            JourneyEvent::StepProgressed {
-                from_step: Some("return_flight_selection".to_string()),
-                to_step: "passenger_details".to_string(),
+        ])
+        .when(set_attrs(&partial_passengers))
+        .then_expect_events(vec![
+            attrs_set(&partial_passengers),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["passenger_details".to_string()],
+                phase: Some("collecting_passengers".to_string()),
             },
         ]);
 }
@@ -742,53 +515,26 @@ fn flight_booking_passenger_details_not_ready() {
 #[test]
 fn flight_booking_payment_capture() {
     let id = Uuid::new_v4();
+    let search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let payment = json!({ "booking": { "paymentStatus": "completed" } });
 
     JourneyTester::with(create_journey_services())
-        .given(vec![
-            JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "search_criteria".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    }
-                }),
-            },
-        ])
-        .when(JourneyCommand::Capture {
-            step: "payment".to_string(),
-            data: json!({
-                "booking": {
-                    "paymentStatus": "completed"
-                }
-            }),
-        })
+        .given(vec![JourneyEvent::Started { id }, attrs_set(&search)])
+        .when(set_attrs(&payment))
         .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "payment".to_string(),
-                data: json!({
-                    "booking": {
-                        "paymentStatus": "completed"
-                    }
-                }),
-            },
+            attrs_set(&payment),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["booking_confirmation".to_string()],
-                phase: None,
-            },
-            JourneyEvent::StepProgressed {
-                from_step: None,
-                to_step: "payment".to_string(),
+                phase: Some("booking_confirmed".to_string()),
             },
         ]);
 }
@@ -798,97 +544,138 @@ fn flight_booking_payment_capture() {
 #[test]
 fn flight_booking_modify_search_criteria() {
     let id = Uuid::new_v4();
+    let original_search = json!({
+        "search": {
+            "tripType": "round-trip",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-15",
+            "returnDate": "2024-06-22",
+            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+        }
+    });
+    let updated_search = json!({
+        "search": {
+            "tripType": "one-way",
+            "origin": "LAX",
+            "destination": "NYC",
+            "departureDate": "2024-07-01",
+            "passengers": { "total": 1, "adults": 1, "children": 0, "infants": 0 }
+        }
+    });
 
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::Modified {
-                step: "search_criteria".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "round-trip",
-                        "origin": "LHR",
-                        "destination": "JFK",
-                        "departureDate": "2024-06-15",
-                        "returnDate": "2024-06-22",
-                        "passengers": {
-                            "total": 2,
-                            "adults": 2,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    }
-                }),
-            },
-            JourneyEvent::StepProgressed {
-                from_step: None,
-                to_step: "search_criteria".to_string(),
-            },
-        ])
-        .when(JourneyCommand::Capture {
-            step: "search_criteria".to_string(),
-            data: json!({
-                "search": {
-                    "tripType": "one-way",
-                    "origin": "LAX",
-                    "destination": "NYC",
-                    "departureDate": "2024-07-01",
-                    "passengers": {
-                        "total": 1,
-                        "adults": 1,
-                        "children": 0,
-                        "infants": 0
-                    }
-                }
-            }),
-        })
-        .then_expect_events(vec![
-            JourneyEvent::Modified {
-                step: "search_criteria".to_string(),
-                data: json!({
-                    "search": {
-                        "tripType": "one-way",
-                        "origin": "LAX",
-                        "destination": "NYC",
-                        "departureDate": "2024-07-01",
-                        "passengers": {
-                            "total": 1,
-                            "adults": 1,
-                            "children": 0,
-                            "infants": 0
-                        }
-                    }
-                }),
-            },
+            attrs_set(&original_search),
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["flight_search_results".to_string()],
-                phase: None,
+                phase: Some("selecting_outbound".to_string()),
+            },
+        ])
+        .when(set_attrs(&updated_search))
+        .then_expect_events(vec![
+            attrs_set(&updated_search),
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec!["flight_search_results".to_string()],
+                phase: Some("selecting_outbound".to_string()),
+            },
+        ]);
+}
+
+// ── Secret partitions — multi-subject demonstration ───────────────────────────
+
+/// Demonstrates that setting Secret person attributes (firstName, passportNumber)
+/// via `SetAttributes` produces one encrypted partition per subject.
+/// Requires prior `CapturePerson` so the subject lookup can resolve.
+#[test]
+fn flight_booking_set_person_secret_attributes() {
+    let id = Uuid::new_v4();
+    let subject_a = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+    let subject_b = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+
+    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
+
+    let mut expected_secret_a = BTreeMap::new();
+    expected_secret_a.insert(
+        path("persons/passenger_0/passportNumber"),
+        json!("GB111111"),
+    );
+    let mut expected_secret_b = BTreeMap::new();
+    expected_secret_b.insert(
+        path("persons/passenger_1/passportNumber"),
+        json!("GB222222"),
+    );
+
+    JourneyTester::with(create_journey_services())
+        .given(vec![
+            JourneyEvent::Started { id },
+            JourneyEvent::PersonCaptured {
+                person_ref: "passenger_0".to_string(),
+                subject_id: subject_a,
+                name: "Alice Smith".to_string(),
+                email: "alice@example.com".to_string(),
+                phone: None,
+            },
+            JourneyEvent::PersonCaptured {
+                person_ref: "passenger_1".to_string(),
+                subject_id: subject_b,
+                name: "Bob Jones".to_string(),
+                email: "bob@example.com".to_string(),
+                phone: None,
+            },
+        ])
+        .when(JourneyCommand::SetAttributes {
+            changes: {
+                let mut m = BTreeMap::new();
+                m.insert(
+                    path("persons/passenger_0/passportNumber"),
+                    json!("GB111111"),
+                );
+                m.insert(
+                    path("persons/passenger_1/passportNumber"),
+                    json!("GB222222"),
+                );
+                m
+            },
+        })
+        .then_expect_events(vec![
+            JourneyEvent::AttributesSet {
+                plaintext: BTreeMap::new(),
+                secret_partitions: vec![
+                    SecretPartitionData {
+                        person_ref: "passenger_0".to_string(),
+                        subject_id: subject_a,
+                        changes: expected_secret_a,
+                    },
+                    SecretPartitionData {
+                        person_ref: "passenger_1".to_string(),
+                        subject_id: subject_b,
+                        changes: expected_secret_b,
+                    },
+                ],
+            },
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec![],
+                phase: Some("collecting_search".to_string()),
             },
         ]);
 }
 
 // ── Schema validation ─────────────────────────────────────────────────────────
 
-/// Shared booking data with an invalid type is rejected by schema validation.
-/// Note: PII (passenger names, date of birth, passport numbers) is NOT validated here because
-/// it no longer flows through `Capture` — it goes through `CapturePersonDetails`.
+/// `SetAttributes` with data that violates the JSON Schema is rejected.
 #[test]
 fn test_invalid_booking_data_rejected_with_schema_validation() {
     let id = Uuid::new_v4();
 
-    // passengersReady must be an integer (or null); sending a string violates the schema.
+    // `paymentStatus` must be one of the PaymentStatus enum values; a free
+    // string violates the schema.
     JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
-        .when(JourneyCommand::Capture {
-            step: "passenger_details".to_string(),
-            data: json!({
-                "booking": {
-                    "passengersReady": "two"
-                }
-            }),
-        })
+        .when(set_attrs(&json!({ "booking": { "paymentStatus": "not_a_valid_status" } })))
         .then_expect_error(JourneyError::InvalidData(
-            "Schema validation failed: {\"passengersReady\":\"two\"} is not valid under any of the schemas listed in the 'anyOf' keyword"
+            "Schema validation failed: {\"paymentStatus\":\"not_a_valid_status\"} is not valid under any of the schemas listed in the 'anyOf' keyword"
                 .to_string(),
         ));
 }
