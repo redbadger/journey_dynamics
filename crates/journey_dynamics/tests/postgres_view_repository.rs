@@ -16,7 +16,8 @@ use std::collections::HashMap;
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
-    domain::events::JourneyEvent, queries::JourneyState,
+    domain::{AttributePath, events::JourneyEvent},
+    queries::JourneyState,
     view_repository::StructuredJourneyViewRepository,
 };
 use serde_json::json;
@@ -28,6 +29,8 @@ struct PostgresViewRepositoryContext {
     pool: Pool<Postgres>,
     journey_ids: Vec<Uuid>,
     subject_ids: Vec<Uuid>,
+    /// Aggregate IDs whose rows in the `events` table must be cleaned up.
+    event_aggregate_ids: Vec<String>,
 }
 
 impl AsyncTestContext for PostgresViewRepositoryContext {
@@ -51,6 +54,7 @@ impl AsyncTestContext for PostgresViewRepositoryContext {
             pool,
             journey_ids: Vec::new(),
             subject_ids: Vec::new(),
+            event_aggregate_ids: Vec::new(),
         }
     }
 
@@ -67,6 +71,15 @@ impl AsyncTestContext for PostgresViewRepositoryContext {
                 .bind(subject_id)
                 .execute(&self.pool)
                 .await;
+        }
+
+        for aggregate_id in self.event_aggregate_ids {
+            let _ = sqlx::query(
+                "DELETE FROM events WHERE aggregate_type = 'Journey' AND aggregate_id = $1",
+            )
+            .bind(aggregate_id)
+            .execute(&self.pool)
+            .await;
         }
     }
 }
@@ -94,6 +107,36 @@ impl PostgresViewRepositoryContext {
             .execute(&self.pool)
             .await
             .unwrap();
+    }
+
+    /// Insert a raw row into the `events` table and register the aggregate ID
+    /// for cleanup in `teardown`.
+    ///
+    /// This bypasses the CQRS framework so tests can write any payload shape
+    /// needed to exercise `find_journeys_by_subject`.
+    async fn insert_event(
+        &mut self,
+        aggregate_id: &str,
+        sequence: i64,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) {
+        // Track for teardown on first use of this aggregate_id.
+        if !self.event_aggregate_ids.contains(&aggregate_id.to_string()) {
+            self.event_aggregate_ids.push(aggregate_id.to_string());
+        }
+        sqlx::query(
+            "INSERT INTO events \
+             (aggregate_type, aggregate_id, sequence, event_type, event_version, payload, metadata) \
+             VALUES ('Journey', $1, $2, $3, '1.0', $4, '{}'::jsonb)",
+        )
+        .bind(aggregate_id)
+        .bind(sequence)
+        .bind(event_type)
+        .bind(payload)
+        .execute(&self.pool)
+        .await
+        .unwrap();
     }
 }
 
@@ -869,5 +912,202 @@ async fn test_delete_subject_lookup_does_not_affect_other_subjects(
     assert_eq!(
         count, 1,
         "subject_b must be unaffected by subject_a deletion"
+    );
+}
+
+// ── find_journeys_by_subject ──────────────────────────────────────────────
+
+/// `PersonCaptured` path — existing index.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_via_person_captured(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let aggregate_id = Uuid::new_v4().to_string();
+    let subject_id = Uuid::new_v4();
+
+    ctx.insert_event(
+        &aggregate_id,
+        1,
+        "PersonCaptured",
+        json!({
+            "PersonCaptured": {
+                "person_ref": "passenger_0",
+                "subject_id": subject_id.to_string(),
+                "name": "Alice Smith",
+                "email": "alice@example.com",
+                "phone": null
+            }
+        }),
+    )
+    .await;
+
+    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
+    assert_eq!(journeys, vec![aggregate_id]);
+}
+
+/// `AttributesSet` path — GIN index on `subjects` array (new in A8).
+///
+/// The `subjects` array is written by the crypto layer alongside
+/// `encrypted_partitions`; here we write the fully-formed stored payload
+/// directly to bypass the CQRS framework.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_via_attributes_set(ctx: &mut PostgresViewRepositoryContext) {
+    let repo = ctx.repo();
+    let aggregate_id = Uuid::new_v4().to_string();
+    let subject_id = Uuid::new_v4();
+
+    ctx.insert_event(
+        &aggregate_id,
+        1,
+        "AttributesSet",
+        json!({
+            "AttributesSet": {
+                "plaintext": { "search/origin": "LHR" },
+                "secret_partitions": [
+                    {
+                        "person_ref": "passenger_0",
+                        "subject_id": subject_id.to_string(),
+                        "changes": {}
+                    }
+                ],
+                // `subjects` is the plaintext index array added by the crypto layer.
+                "subjects": [subject_id.to_string()],
+                "encrypted_partitions": []
+            }
+        }),
+    )
+    .await;
+
+    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
+    assert_eq!(journeys, vec![aggregate_id]);
+}
+
+/// A journey with both `PersonCaptured` and `AttributesSet` for the same
+/// subject must appear exactly once (DISTINCT).
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_deduplicates_across_event_types(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let aggregate_id = Uuid::new_v4().to_string();
+    let subject_id = Uuid::new_v4();
+
+    ctx.insert_event(
+        &aggregate_id,
+        1,
+        "PersonCaptured",
+        json!({
+            "PersonCaptured": {
+                "person_ref": "passenger_0",
+                "subject_id": subject_id.to_string(),
+                "name": "Alice",
+                "email": "alice@example.com",
+                "phone": null
+            }
+        }),
+    )
+    .await;
+    ctx.insert_event(
+        &aggregate_id,
+        2,
+        "AttributesSet",
+        json!({
+            "AttributesSet": {
+                "plaintext": {},
+                "secret_partitions": [
+                    { "person_ref": "passenger_0", "subject_id": subject_id.to_string(), "changes": {} }
+                ],
+                "subjects": [subject_id.to_string()],
+                "encrypted_partitions": []
+            }
+        }),
+    )
+    .await;
+
+    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
+    assert_eq!(journeys.len(), 1, "same journey must appear only once");
+    assert_eq!(journeys[0], aggregate_id);
+}
+
+/// An unknown subject returns an empty list.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_returns_empty_for_unknown_subject(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let unknown = Uuid::new_v4();
+    let journeys = repo.find_journeys_by_subject(&unknown).await.unwrap();
+    assert!(journeys.is_empty(), "unknown subject must return empty vec");
+}
+
+// ── AttributesSet view projection ──────────────────────────────────────
+
+/// An `AttributesSet` event with only plaintext changes must merge those
+/// changes into `journey_view.shared_data`.
+///
+/// This verifies end-to-end that:
+/// 1. The `StructuredJourneyViewRepository::apply_event_in_tx` arm fires.
+/// 2. The rehydrated plaintext changes are persisted correctly.
+/// 3. The `GET /journeys/{id}` response would reflect the updated `shared_data`.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_attributes_set_plaintext_updates_shared_data(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
+
+    // Start the journey so journey_view row exists.
+    repo.dispatch(
+        &journey_id.to_string(),
+        &[EventEnvelope {
+            aggregate_id: journey_id.to_string(),
+            sequence: 1,
+            payload: JourneyEvent::Started { id: journey_id },
+            metadata: HashMap::default(),
+        }],
+    )
+    .await;
+
+    // Dispatch an AttributesSet event with plaintext path-keyed changes.
+    let mut plaintext = std::collections::BTreeMap::new();
+    plaintext.insert(
+        "search/origin".parse::<AttributePath>().unwrap(),
+        json!("LHR"),
+    );
+    plaintext.insert(
+        "search/destination".parse::<AttributePath>().unwrap(),
+        json!("JFK"),
+    );
+
+    repo.dispatch(
+        &journey_id.to_string(),
+        &[EventEnvelope {
+            aggregate_id: journey_id.to_string(),
+            sequence: 2,
+            payload: JourneyEvent::AttributesSet {
+                plaintext,
+                secret_partitions: vec![],
+            },
+            metadata: HashMap::default(),
+        }],
+    )
+    .await;
+
+    let view = repo.load(&journey_id).await.unwrap().unwrap();
+    assert_eq!(
+        view.shared_data["search"]["origin"],
+        json!("LHR"),
+        "origin must be stored at path search/origin"
+    );
+    assert_eq!(
+        view.shared_data["search"]["destination"],
+        json!("JFK"),
+        "destination must be stored at path search/destination"
     );
 }

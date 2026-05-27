@@ -77,3 +77,47 @@ impl From<serde_json::Error> for CommandExtractionError {
         Self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::domain::{AttributePath, commands::JourneyCommand};
+
+    /// The HTTP route deserialises the request body as [`JourneyCommand`] via
+    /// serde. Verify that the `SetAttributes` variant round-trips correctly so
+    /// that a POST body of the form
+    ///
+    /// ```json
+    /// { "SetAttributes": { "changes": { "search/origin": "LHR" } } }
+    /// ```
+    ///
+    /// is accepted at the existing `/journeys/{id}` endpoint without any change
+    /// to the extractor or routing code.
+    #[test]
+    fn set_attributes_deserializes_from_http_body() {
+        let body =
+            r#"{"SetAttributes":{"changes":{"search/origin":"LHR","search/destination":"JFK"}}}"#;
+        let cmd: JourneyCommand = serde_json::from_str(body).unwrap();
+
+        let JourneyCommand::SetAttributes { changes } = cmd else {
+            panic!("expected SetAttributes, got something else");
+        };
+
+        assert_eq!(changes.len(), 2);
+        let origin: AttributePath = "search/origin".parse().unwrap();
+        let dest: AttributePath = "search/destination".parse().unwrap();
+        assert_eq!(changes[&origin], json!("LHR"));
+        assert_eq!(changes[&dest], json!("JFK"));
+    }
+
+    /// Legacy `Capture` command must still deserialise so existing clients
+    /// are not broken.
+    #[allow(deprecated)]
+    #[test]
+    fn legacy_capture_still_deserializes() {
+        let body = r#"{"Capture":{"step":"search","data":{"origin":"LHR"}}}"#;
+        let cmd: JourneyCommand = serde_json::from_str(body).unwrap();
+        assert!(matches!(cmd, JourneyCommand::Capture { .. }));
+    }
+}
