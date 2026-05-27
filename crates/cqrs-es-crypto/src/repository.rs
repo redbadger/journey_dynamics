@@ -12,19 +12,29 @@
 //!
 //! # Write path
 //!
-//! For each event, [`PiiEventCodec::classify`] is called.  If it returns
-//! `Some(PiiFields)` the PII blob is encrypted with AES-256-GCM under the
-//! subject's DEK and the payload is replaced with the encrypted form.  Events
-//! for which `classify` returns `None` are forwarded to the inner repository
-//! unchanged.
+//! For each event, [`PiiEventCodec::extract_partitions`] is called.  It both
+//! extracts cleartext PII bytes **and** clears those fields from the payload in
+//! one pass.  An empty `Vec` means the event carries no PII and is forwarded
+//! unchanged.  Non-empty vecs produce one [`EncryptedPartition`] per subject,
+//! written into the payload's `encrypted_partitions` array alongside a plaintext
+//! `subjects` peer array used for indexing.
 //!
-//! # Read path
+//! # Read path (new shape)
 //!
-//! For each event, [`PiiEventCodec::extract_encrypted`] is called.  If it
-//! returns `Some(EncryptedPiiExtract)` the repository looks up the DEK:
-//! - DEK present  → decrypt and call [`PiiEventCodec::reconstruct`].
-//! - DEK absent   → call [`PiiEventCodec::redact`] (subject forgotten).
-//! - No sentinel  → event is plaintext / legacy, returned as-is.
+//! For each partition in `encrypted_partitions`, the repository looks up the DEK:
+//! - DEK present → AES-256-GCM decrypt → collect into [`DecryptedPartition`].
+//! - DEK absent  → collect label into redacted list.
+//!   After all partitions are processed: [`PiiEventCodec::reconstruct`] is called
+//!   with the decrypted partitions, then [`PiiEventCodec::redact_partitions`] is
+//!   called for any redacted labels.
+//!
+//! # Read path (legacy shape)
+//!
+//! Events written before the partitioned format carry a single inline ciphertext
+//! field.  [`PiiEventCodec::extract_encrypted_legacy`] detects that shape; if it
+//! returns `Some`, the repository decrypts with legacy AAD and forwards the
+//! result to `reconstruct` / `redact_partitions` as a one-partition vector with
+//! `label = "default"`.  Plain events (neither shape matches) are returned as-is.
 
 use std::collections::HashMap;
 use std::sync::Arc;

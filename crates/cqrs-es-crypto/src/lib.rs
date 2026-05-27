@@ -52,8 +52,8 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use cqrs_es_crypto::{
-//!     CryptoShreddingEventRepository, EncryptedPiiSentinel, FieldCipher,
-//!     PiiEventCodec, PiiFields, PostgresKeyStore, StaticKekProvider,
+//!     CryptoShreddingEventRepository, FieldCipher,
+//!     PiiEventCodec, PostgresKeyStore, StaticKekProvider,
 //! };
 //!
 //! // 1. Implement PiiEventCodec for your domain.
