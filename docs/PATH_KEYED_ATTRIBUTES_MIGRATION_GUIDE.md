@@ -393,7 +393,9 @@ for (person_ref, field) in [
     );
 }
 
-let schema = Arc::new(AttributeSchema::new(paths, json_schema_value));
+let schema = Arc::new(AttributeSchema::new(paths, Some(json_schema_value)));
+// Or pass None if you are not using JSON Schema structural validation:
+// let schema = Arc::new(AttributeSchema::new(paths, None));
 ```
 
 For experimentation, use `AttributeSchema::permissive()` — every path is
