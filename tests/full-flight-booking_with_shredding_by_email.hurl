@@ -32,20 +32,16 @@ header "Location" matches "/journeys/[a-f0-9-]+"
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "Capture": {
-        "step": "search_criteria",
-        "data": {
-            "search": {
-                "origin": "LHR",
-                "destination": "CDG",
-                "tripType": "one-way",
-                "departureDate": "2024-06-01",
-                "passengers": {
-                    "adults": 2,
-                    "children": 0,
-                    "infants": 0,
-                    "total": 2
-                }
+    "SetAttributes": {
+        "search": {
+            "tripType": "one-way",
+            "origin": "LHR",
+            "destination": "CDG",
+            "departureDate": "2024-06-01",
+            "passengers": {
+                "adults": 2,
+                "children": 0,
+                "infants": 0
             }
         }
     }
@@ -60,18 +56,15 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "Capture": {
-        "step": "flight_selection",
-        "data": {
-            "booking": {
-                "selectedFlight": {
-                    "flightId": "BA0303",
-                    "flightNumber": "BA0303",
-                    "departure": "2024-06-01T07:00:00",
-                    "arrival": "2024-06-01T09:20:00",
-                    "price": 189.99,
-                    "airline": "British Airways"
-                }
+    "SetAttributes": {
+        "booking": {
+            "selectedOutboundFlight": {
+                "flightId": "BA0303",
+                "flightNumber": "BA0303",
+                "departure": "2024-06-01T07:00:00",
+                "arrival": "2024-06-01T09:20:00",
+                "price": 189.99,
+                "airline": "British Airways"
             }
         }
     }
@@ -101,19 +94,22 @@ HTTP 204
 
 
 # ===========================================
-# Step 5: Capture lead passenger PII details (encrypted at rest)
+# Step 5: Capture lead passenger details
+# Secret fields encrypted under passenger_0's DEK.
+# passengerType lands in shared_data.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePersonDetails": {
-        "person_ref": "passenger_0",
-        "data": {
-            "firstName": "Clara",
-            "lastName": "Dupont",
-            "dateOfBirth": "1991-03-22",
-            "passportNumber": "FR987654321",
-            "passengerType": "adult"
+    "SetAttributes": {
+        "persons": {
+            "passenger_0": {
+                "firstName": "Clara",
+                "lastName": "Dupont",
+                "dateOfBirth": "1991-03-22",
+                "passportNumber": "FR987654321",
+                "passengerType": "adult"
+            }
         }
     }
 }
@@ -141,19 +137,22 @@ HTTP 204
 
 
 # ===========================================
-# Step 7: Capture second passenger PII details
+# Step 7: Capture second passenger details
+# After this step both passengers have passengerType in shared_data.
+# The JDM reads persons.*.passengerType directly — no explicit signal needed.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePersonDetails": {
-        "person_ref": "passenger_1",
-        "data": {
-            "firstName": "Henri",
-            "lastName": "Dubois",
-            "dateOfBirth": "1988-11-05",
-            "passportNumber": "FR123456789",
-            "passengerType": "adult"
+    "SetAttributes": {
+        "persons": {
+            "passenger_1": {
+                "firstName": "Henri",
+                "lastName": "Dubois",
+                "dateOfBirth": "1988-11-05",
+                "passportNumber": "FR123456789",
+                "passengerType": "adult"
+            }
         }
     }
 }
@@ -167,22 +166,19 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "Capture": {
-        "step": "payment",
-        "data": {
-            "booking": {
-                "paymentStatus": "completed",
-                "payment": {
-                    "method": "credit_card",
-                    "status": "completed",
-                    "transaction_id": "txn_email_erase_demo"
-                },
-                "pricing": {
-                    "basePrice": 379.98,
-                    "taxes": 95.00,
-                    "totalPrice": 474.98,
-                    "currency": "GBP"
-                }
+    "SetAttributes": {
+        "booking": {
+            "paymentStatus": "completed",
+            "payment": {
+                "method": "credit_card",
+                "status": "completed",
+                "transaction_id": "txn_email_erase_demo"
+            },
+            "pricing": {
+                "basePrice": 379.98,
+                "taxes": 95.00,
+                "totalPrice": 474.98,
+                "currency": "GBP"
             }
         }
     }

@@ -95,6 +95,9 @@ jobs:
         shell: bash
         env:
           HURL_host: http://localhost:3030
+          JOURNEY_DECISION_ENGINE_PATH: examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json
+          JOURNEY_DATA_SCHEMA_PATH: examples/flight-booking/schemas/flight-booking-schema.json
+          JOURNEY_ATTRIBUTE_SCHEMA_PATH: examples/flight-booking/schemas/attribute-schema.json
         run: |
           set -euxo pipefail
           export JOURNEY_KEK=$(openssl rand -base64 32)
@@ -105,7 +108,8 @@ jobs:
           hurl --test --variable host=http://localhost:3030 --report-html target/hurl-report \
             tests/error-cases.hurl \
             tests/full-flight-booking.hurl \
-            tests/full-flight-booking_with_shredding.hurl
+            tests/full-flight-booking_with_shredding.hurl \
+            tests/full-flight-booking_with_shredding_by_email.hurl
           kill $SERVER_PID
 
       - name: Upload Hurl Report

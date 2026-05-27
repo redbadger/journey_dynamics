@@ -35,10 +35,12 @@ test-review:
 clean-test-keys:
     psql "$DATABASE_URL" -c "DELETE FROM subject_encryption_keys WHERE kek_id LIKE 'test:%';"
 
-# Run the journey_dynamics binary with the flight-booking attribute schema.
+# Run the journey_dynamics binary with the flight-booking schemas and decision engine.
 # Requires DATABASE_URL and JOURNEY_KEK (or JOURNEY_KEK_PRIMARY) to be set,
 # e.g. via a .env file.
 run-flight-booking:
+    JOURNEY_DECISION_ENGINE_PATH=examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json \
+    JOURNEY_DATA_SCHEMA_PATH=examples/flight-booking/schemas/flight-booking-schema.json \
     JOURNEY_ATTRIBUTE_SCHEMA_PATH=examples/flight-booking/schemas/attribute-schema.json \
         cargo run -p journey_dynamics --bin journey_dynamics
 

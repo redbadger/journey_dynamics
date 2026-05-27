@@ -1,4 +1,4 @@
-#![allow(clippy::too_many_lines, deprecated)]
+#![allow(clippy::too_many_lines)]
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -60,7 +60,7 @@ fn flight_booking_search_criteria() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
 
@@ -88,7 +88,7 @@ fn flight_booking_outbound_selection() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let outbound = json!({
@@ -137,7 +137,7 @@ fn flight_booking_return_selection() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let outbound_flight = json!({
@@ -204,11 +204,32 @@ fn flight_booking_capture_person() {
         }]);
 }
 
-/// `CapturePersonDetails` requires a prior `CapturePerson` for the same `person_ref`.
+/// `SetAttributes` for person details encrypts secret fields and stores
+/// `passengerType` as plaintext under `persons/<ref>/passengerType`.
 #[test]
 fn flight_booking_capture_person_details() {
     let id = Uuid::new_v4();
     let subject_id = Uuid::new_v4();
+
+    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
+
+    let expected_secret = {
+        let mut m = BTreeMap::new();
+        m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
+        m.insert(path("persons/passenger_0/lastName"), json!("Smith"));
+        m.insert(path("persons/passenger_0/dateOfBirth"), json!("1990-05-15"));
+        m.insert(
+            path("persons/passenger_0/passportNumber"),
+            json!("GB123456789"),
+        );
+        m.insert(path("persons/passenger_0/nationality"), json!("GB"));
+        m
+    };
+    let expected_plaintext = {
+        let mut m = BTreeMap::new();
+        m.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+        m
+    };
 
     JourneyTester::with(create_journey_services())
         .given(vec![
@@ -221,45 +242,52 @@ fn flight_booking_capture_person_details() {
                 phone: None,
             },
         ])
-        .when(JourneyCommand::CapturePersonDetails {
-            person_ref: "passenger_0".to_string(),
-            data: json!({
-                "firstName":      "Alice",
-                "lastName":       "Smith",
-                "dateOfBirth":    "1990-05-15",
-                "passportNumber": "GB123456789",
-                "nationality":    "GB",
-                "passengerType":  "adult"
-            }),
+        .when(JourneyCommand::SetAttributes {
+            changes: {
+                let mut m = BTreeMap::new();
+                m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
+                m.insert(path("persons/passenger_0/lastName"), json!("Smith"));
+                m.insert(path("persons/passenger_0/dateOfBirth"), json!("1990-05-15"));
+                m.insert(
+                    path("persons/passenger_0/passportNumber"),
+                    json!("GB123456789"),
+                );
+                m.insert(path("persons/passenger_0/nationality"), json!("GB"));
+                m.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+                m
+            },
         })
-        .then_expect_events(vec![JourneyEvent::PersonDetailsUpdated {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            data: json!({
-                "firstName":      "Alice",
-                "lastName":       "Smith",
-                "dateOfBirth":    "1990-05-15",
-                "passportNumber": "GB123456789",
-                "nationality":    "GB",
-                "passengerType":  "adult"
-            }),
-        }]);
+        .then_expect_events(vec![
+            JourneyEvent::AttributesSet {
+                plaintext: expected_plaintext,
+                secret_partitions: vec![SecretPartitionData {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id,
+                    changes: expected_secret,
+                }],
+            },
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions: vec![],
+                phase: Some("collecting_search".to_string()),
+            },
+        ]);
 }
 
-/// `CapturePersonDetails` without a prior `CapturePerson` returns `PersonNotFound`.
+/// `SetAttributes` for a secret person field without a prior `CapturePerson`
+/// returns `PersonNotFound`.
 #[test]
 fn flight_booking_capture_person_details_requires_prior_capture_person() {
     let id = Uuid::new_v4();
+    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
 
     JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
-        .when(JourneyCommand::CapturePersonDetails {
-            person_ref: "passenger_0".to_string(),
-            data: json!({
-                "firstName":   "Alice",
-                "lastName":    "Smith",
-                "dateOfBirth": "1990-05-15"
-            }),
+        .when(JourneyCommand::SetAttributes {
+            changes: {
+                let mut m = BTreeMap::new();
+                m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
+                m
+            },
         })
         .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
 }
@@ -315,7 +343,7 @@ fn flight_booking_passenger_details_ready_signal() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let outbound_flight = json!({
@@ -396,7 +424,7 @@ fn flight_booking_three_passengers_ready_signal() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 3, "adults": 2, "children": 1, "infants": 0 }
+            "passengers": { "adults": 2, "children": 1, "infants": 0 }
         }
     });
     let outbound_flight = json!({
@@ -462,7 +490,7 @@ fn flight_booking_passenger_details_not_ready() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let outbound_flight = json!({
@@ -522,7 +550,7 @@ fn flight_booking_payment_capture() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let payment = json!({ "booking": { "paymentStatus": "completed" } });
@@ -551,7 +579,7 @@ fn flight_booking_modify_search_criteria() {
             "destination": "JFK",
             "departureDate": "2024-06-15",
             "returnDate": "2024-06-22",
-            "passengers": { "total": 2, "adults": 2, "children": 0, "infants": 0 }
+            "passengers": { "adults": 2, "children": 0, "infants": 0 }
         }
     });
     let updated_search = json!({
@@ -560,7 +588,7 @@ fn flight_booking_modify_search_criteria() {
             "origin": "LAX",
             "destination": "NYC",
             "departureDate": "2024-07-01",
-            "passengers": { "total": 1, "adults": 1, "children": 0, "infants": 0 }
+            "passengers": { "adults": 1, "children": 0, "infants": 0 }
         }
     });
 

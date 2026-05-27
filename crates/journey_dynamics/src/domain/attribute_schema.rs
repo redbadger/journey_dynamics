@@ -65,10 +65,16 @@ pub struct AttributeSchema {
     paths: BTreeMap<AttributePath, PiiClass>,
     json_schema: Option<Value>,
     /// When `true`, [`classify`](Self::classify) returns `Some(Plaintext)` for
-    /// any path not matched by an exact entry or namespace pattern.
+    /// any path not matched by an exact entry, namespace pattern, or prefix.
     permissive: bool,
     /// Prefix-based rules applied when the exact path lookup misses.
     namespace_patterns: Vec<NamespacePattern>,
+    /// Top-level path segments whose subtrees are unconditionally `Plaintext`.
+    /// Checked after namespace patterns and before the permissive fallback.
+    /// Example: `["search", "booking"]` classifies `search/origin`,
+    /// `booking/pricing/totalPrice`, etc. as plaintext without listing every
+    /// individual path.
+    plaintext_prefixes: Vec<String>,
 }
 
 /// A static `Plaintext` sentinel returned by reference in permissive/plaintext mode.
@@ -84,6 +90,7 @@ impl AttributeSchema {
             json_schema,
             permissive: false,
             namespace_patterns: Vec::new(),
+            plaintext_prefixes: Vec::new(),
         }
     }
 
@@ -99,16 +106,28 @@ impl AttributeSchema {
             json_schema: None,
             permissive: true,
             namespace_patterns: Vec::new(),
+            plaintext_prefixes: Vec::new(),
         }
     }
 
     /// Attach namespace patterns to this schema.
     ///
     /// Patterns are tried in order after the exact-path lookup misses and
-    /// before the permissive fallback.
+    /// before the plaintext-prefix and permissive steps.
     #[must_use]
     pub fn with_namespace_patterns(mut self, patterns: Vec<NamespacePattern>) -> Self {
         self.namespace_patterns = patterns;
+        self
+    }
+
+    /// Attach top-level plaintext-prefix rules to this schema.
+    ///
+    /// Any path whose first segment appears in `prefixes` is classified as
+    /// [`PiiClass::Plaintext`], regardless of depth. Checked after namespace
+    /// patterns and before the permissive fallback.
+    #[must_use]
+    pub fn with_plaintext_prefixes(mut self, prefixes: Vec<String>) -> Self {
+        self.plaintext_prefixes = prefixes;
         self
     }
 
@@ -117,8 +136,9 @@ impl AttributeSchema {
     /// Resolution order:
     /// 1. Exact match in `paths`.
     /// 2. Namespace pattern match for three-segment paths (`namespace/ref/field`).
-    /// 3. Permissive fallback — `Some(Plaintext)` if the schema is permissive.
-    /// 4. `None` — path is unknown.
+    /// 3. Plaintext prefix — `Some(Plaintext)` if the first segment is listed.
+    /// 4. Permissive fallback — `Some(Plaintext)` if the schema is permissive.
+    /// 5. `None` — path is unknown.
     ///
     /// Returns a [`Cow`] so that statically-known classifications can be
     /// borrowed while dynamically-constructed `Secret` values (whose subject
@@ -151,7 +171,14 @@ impl AttributeSchema {
             }
         }
 
-        // 3. Permissive fallback.
+        // 3. Plaintext prefix.
+        if let Some(first) = segs.first()
+            && self.plaintext_prefixes.iter().any(|p| p.as_str() == *first)
+        {
+            return Some(Cow::Borrowed(&PLAINTEXT));
+        }
+
+        // 4. Permissive fallback.
         if self.permissive {
             return Some(Cow::Borrowed(&PLAINTEXT));
         }
@@ -192,10 +219,15 @@ impl AttributeSchema {
 /// ```
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttributeSchemaConfig {
-    /// If `true`, paths not matched by exact entries or namespace patterns are
-    /// treated as `Plaintext` (permissive mode).
+    /// If `true`, paths not matched by exact entries, namespace patterns, or
+    /// prefix rules are treated as `Plaintext` (permissive mode).
     #[serde(default)]
     pub permissive: bool,
+    /// Top-level path segments whose entire subtrees are `Plaintext`.
+    /// e.g. `["search", "booking"]` covers `search/origin`,
+    /// `booking/pricing/totalPrice`, etc.
+    #[serde(default)]
+    pub plaintext_prefixes: Vec<String>,
     /// Dynamic namespace-based classification rules.
     #[serde(default)]
     pub namespace_patterns: Vec<NamespacePatternConfig>,
@@ -218,17 +250,18 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
         } else {
             Self::new(BTreeMap::new(), None)
         };
-        base.with_namespace_patterns(
-            config
-                .namespace_patterns
-                .into_iter()
-                .map(|p| NamespacePattern {
-                    namespace: p.namespace,
-                    secret_fields: p.secret_fields,
-                    plaintext_fields: p.plaintext_fields,
-                })
-                .collect(),
-        )
+        base.with_plaintext_prefixes(config.plaintext_prefixes)
+            .with_namespace_patterns(
+                config
+                    .namespace_patterns
+                    .into_iter()
+                    .map(|p| NamespacePattern {
+                        namespace: p.namespace,
+                        secret_fields: p.secret_fields,
+                        plaintext_fields: p.plaintext_fields,
+                    })
+                    .collect(),
+            )
     }
 }
 
@@ -536,6 +569,7 @@ mod tests {
     fn attribute_schema_config_round_trips_via_json() {
         let config = AttributeSchemaConfig {
             permissive: true,
+            plaintext_prefixes: vec!["search".to_string()],
             namespace_patterns: vec![NamespacePatternConfig {
                 namespace: "persons".to_string(),
                 secret_fields: ["firstName", "lastName"]

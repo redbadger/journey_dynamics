@@ -57,11 +57,18 @@ pub fn attribute_schema() -> AttributeSchema {
         .map(str::to_string)
         .collect();
 
-    AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
-        namespace: "persons".to_string(),
-        secret_fields,
-        plaintext_fields,
-    }])
+    AttributeSchema::new(std::collections::BTreeMap::new(), None)
+        .with_plaintext_prefixes(
+            ["search", "searchResults", "booking"]
+                .iter()
+                .map(|s| (*s).to_string())
+                .collect(),
+        )
+        .with_namespace_patterns(vec![NamespacePattern {
+            namespace: "persons".to_string(),
+            secret_fields,
+            plaintext_fields,
+        }])
 }
 
 /// Serialised form of [`attribute_schema()`] suitable for writing to the JSON
@@ -69,7 +76,11 @@ pub fn attribute_schema() -> AttributeSchema {
 #[must_use]
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
     AttributeSchemaConfig {
-        permissive: true,
+        permissive: false,
+        plaintext_prefixes: ["search", "searchResults", "booking"]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
         namespace_patterns: vec![NamespacePatternConfig {
             namespace: "persons".to_string(),
             secret_fields: [
@@ -104,14 +115,16 @@ pub struct SearchCriteria {
 // Booking data group - contains all booking-related information.
 //
 // NOTE: per-passenger PII (names, dates of birth, passport numbers, nationality) is
-// intentionally absent from this struct.  That data flows through `CapturePersonDetails`
-// and is encrypted at rest under each passenger's Data Encryption Key.  Only non-PII
-// workflow signals belong here.
+// intentionally absent from this struct.  That data flows through `SetAttributes`
+// under `persons/<ref>/<field>` and is encrypted at rest under each passenger's
+// Data Encryption Key.  Only non-PII workflow signals belong here.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BookingData {
     pub selected_outbound_flight: Option<FlightSelection>,
     pub selected_return_flight: Option<FlightSelection>,
+    pub selected_seats: Option<SelectedSeats>,
+    pub seat_upgrade_total: Option<f64>,
     pub pricing: Option<Pricing>,
     pub insurance: Option<Insurance>,
     pub payment: Option<Payment>,
@@ -120,6 +133,15 @@ pub struct BookingData {
     pub payment_status: Option<PaymentStatus>,
     pub is_international: Option<bool>,
     pub requires_visa: Option<bool>,
+}
+
+/// Seat assignments for outbound and (optionally) return legs.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SelectedSeats {
+    pub outbound: Option<Vec<String>>,
+    /// Renamed to avoid collision with the `return` keyword.
+    #[serde(rename = "return")]
+    pub return_seats: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -135,7 +157,6 @@ pub struct AirportCode(pub String);
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct PassengerCounts {
-    pub total: u32,
     pub adults: u32,
     pub children: u32,
     pub infants: u32,

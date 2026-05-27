@@ -9,7 +9,7 @@ use crate::SimpleLoggingQuery;
 use crate::{
     domain::journey::{Journey, JourneyServices},
     pii_codec::JourneyPiiCodec,
-    services::decision_engine::GoRulesDecisionEngine,
+    state::{load_attribute_schema, load_decision_engine, load_schema_validator},
     subject_lookup_hook::SubjectLookupHook,
     view_repository::StructuredJourneyViewRepository,
 };
@@ -48,17 +48,9 @@ pub fn cqrs_framework(
         Box::new((*journey_view_repo).clone()),
     ];
 
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../../../examples/flight-booking/jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
-    let schema_validator = Arc::new(
-        crate::services::schema_validator::JsonSchemaValidator::from_json_str(include_str!(
-            "../../../examples/flight-booking/schemas/flight-booking-schema.json"
-        ))
-        .expect("flight-booking JSON schema is invalid — this is a compile-time programming error"),
-    );
-
-    let attribute_schema = crate::state::load_attribute_schema();
+    let decision_engine = load_decision_engine();
+    let schema_validator = load_schema_validator();
+    let attribute_schema = load_attribute_schema();
     let services = JourneyServices::new(decision_engine, schema_validator, attribute_schema);
 
     let inner = PostgresEventRepository::new(pool.clone());

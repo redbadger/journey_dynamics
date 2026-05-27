@@ -11,6 +11,7 @@ use cqrs_es_crypto::{
 use crate::{
     config::{CryptoCqrs, cqrs_framework},
     domain::{AttributeSchema, AttributeSchemaConfig},
+    services::{decision_engine::GoRulesDecisionEngine, schema_validator::JsonSchemaValidator},
     view_repository::StructuredJourneyViewRepository,
 };
 
@@ -20,6 +21,42 @@ pub struct ApplicationState {
     pub cqrs: Arc<CryptoCqrs>,
     pub journey_query: Arc<StructuredJourneyViewRepository>,
     pub key_store: Arc<dyn KeyStore>,
+}
+
+/// Load a [`GoRulesDecisionEngine`] from the path named by
+/// `JOURNEY_DECISION_ENGINE_PATH`.
+///
+/// # Panics
+///
+/// Panics if `JOURNEY_DECISION_ENGINE_PATH` is not set or the file cannot be
+/// read or parsed.
+#[must_use]
+pub fn load_decision_engine() -> std::sync::Arc<GoRulesDecisionEngine> {
+    let path = std::env::var("JOURNEY_DECISION_ENGINE_PATH")
+        .expect("JOURNEY_DECISION_ENGINE_PATH environment variable must be set");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("JOURNEY_DECISION_ENGINE_PATH={path:?}: cannot read file: {e}"));
+    std::sync::Arc::new(GoRulesDecisionEngine::new(&content))
+}
+
+/// Load a [`JsonSchemaValidator`] from the path named by
+/// `JOURNEY_DATA_SCHEMA_PATH`.
+///
+/// # Panics
+///
+/// Panics if `JOURNEY_DATA_SCHEMA_PATH` is not set or the file cannot be read
+/// or parsed.
+#[must_use]
+pub fn load_schema_validator() -> std::sync::Arc<JsonSchemaValidator> {
+    let path = std::env::var("JOURNEY_DATA_SCHEMA_PATH")
+        .expect("JOURNEY_DATA_SCHEMA_PATH environment variable must be set");
+    let content = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("JOURNEY_DATA_SCHEMA_PATH={path:?}: cannot read file: {e}"));
+    std::sync::Arc::new(
+        JsonSchemaValidator::from_json_str(&content).unwrap_or_else(|e| {
+            panic!("JOURNEY_DATA_SCHEMA_PATH={path:?}: invalid JSON schema: {e}")
+        }),
+    )
 }
 
 /// Load an [`AttributeSchema`] from the path named by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
