@@ -2,6 +2,7 @@
 name = "journey_dynamics"
 version = "0.1.0"
 edition.workspace = true
+default-run = "journey_dynamics"
 
 [dependencies]
 async-trait = "0.1"
