@@ -355,6 +355,7 @@ impl Aggregate for Journey {
         }
     }
 
+    #[allow(deprecated)]
     fn apply(&mut self, event: Self::Event) {
         match event {
             JourneyEvent::Started { id } => {

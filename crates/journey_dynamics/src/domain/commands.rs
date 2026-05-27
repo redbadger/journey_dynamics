@@ -17,7 +17,7 @@ pub enum JourneyCommand {
     ///
     /// # Deprecated
     /// Use [`JourneyCommand::SetAttributes`] instead.
-    #[deprecated = "use SetAttributes"]
+    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
     Capture { step: String, data: Value },
 
     /// Set one or more journey attributes in a single command.
@@ -59,7 +59,7 @@ pub enum JourneyCommand {
     ///
     /// # Deprecated
     /// Use [`JourneyCommand::SetAttributes`] with path-keyed secret fields instead.
-    #[deprecated = "use SetAttributes"]
+    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
     CapturePersonDetails { person_ref: String, data: Value },
 
     /// Mark the journey as complete.

@@ -1,4 +1,4 @@
-#![allow(clippy::doc_markdown)]
+#![allow(clippy::doc_markdown, deprecated)]
 //! Integration tests for [`StructuredJourneyViewRepository`].
 //!
 //! These tests require a live PostgreSQL database.  The connection URL is read

@@ -90,6 +90,7 @@ pub struct WorkflowDecisionView {
 // This updates the view with events as they are committed.
 // The logic should be minimal here - the events should carry all necessary information.
 impl View<Journey> for JourneyView {
+    #[allow(deprecated)]
     fn update(&mut self, event: &EventEnvelope<Journey>) {
         match &event.payload {
             JourneyEvent::Started { id } => {
@@ -146,6 +147,7 @@ impl View<Journey> for JourneyView {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
     use std::collections::HashMap;
 
     use super::*;

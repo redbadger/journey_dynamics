@@ -1,3 +1,10 @@
+// ──────────────────────────────────────────────────────────────────────────────
+// Deprecation metadata — used verbatim in every #[deprecated(…)] in this crate.
+//
+//   since = "0.3.0"
+//   note  = "use `SetAttributes` / `AttributesSet` (path-keyed attributes)"
+// ──────────────────────────────────────────────────────────────────────────────
+
 pub mod attribute_path;
 pub mod attribute_schema;
 pub mod commands;

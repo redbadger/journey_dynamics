@@ -464,7 +464,7 @@ impl StructuredJourneyViewRepository {
         })
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap, deprecated)]
     async fn apply_event_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,

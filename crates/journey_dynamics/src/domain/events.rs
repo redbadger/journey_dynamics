@@ -28,6 +28,7 @@ pub enum JourneyEvent {
     Started {
         id: Uuid,
     },
+    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
     Modified {
         step: String,
         data: Value,
@@ -39,6 +40,7 @@ pub enum JourneyEvent {
         email: String,
         phone: Option<String>,
     },
+    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
     PersonDetailsUpdated {
         person_ref: String,
         subject_id: Uuid,
@@ -51,6 +53,10 @@ pub enum JourneyEvent {
         #[serde(default)]
         phase: Option<String>,
     },
+    #[deprecated(
+        since = "0.3.0",
+        note = "use WorkflowEvaluated.phase instead of tracking step progression"
+    )]
     StepProgressed {
         from_step: Option<String>,
         to_step: String,
@@ -76,6 +82,7 @@ pub enum JourneyEvent {
 }
 
 impl DomainEvent for JourneyEvent {
+    #[allow(deprecated)]
     fn event_type(&self) -> String {
         let event_type: &str = match self {
             Self::Started { .. } => "JourneyOpened",
