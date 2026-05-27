@@ -122,9 +122,10 @@ impl PiiVariantModel {
 
     /// Returns `true` when there is exactly one secret field.
     ///
-    /// When true, the codec passes the field's value directly as
-    /// `plaintext_pii` (not wrapped in an object).  When false, all secret
-    /// fields are bundled into a JSON object keyed by field name.
+    /// When true, the codec serialises that field's value directly as the
+    /// `SecretPartition::payload` bytes (not wrapped in an object).  When
+    /// false, all secret fields are bundled into a JSON object keyed by field
+    /// name before serialisation.
     pub fn is_single_secret(&self) -> bool {
         self.secret_fields().count() == 1
     }

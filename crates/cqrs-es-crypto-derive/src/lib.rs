@@ -140,7 +140,12 @@ fn secret_field_data(variant: &PiiVariantModel, span: Span) -> Vec<SecretFieldDa
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
-/// Generates one match arm for the `classify` method.
+/// Generates one match arm for the legacy `classify` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `classify_arm_*` unit tests exercise its output directly and those tests
+/// remain valuable documentation of the old `PiiFields` / `build_encrypted_payload`
+/// contract.
 ///
 /// For a variant with **multiple** secret fields the PII blob is a JSON object
 /// keyed by field name.  For a variant with exactly **one** secret field the
@@ -228,7 +233,10 @@ fn classify_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `extract_encrypted` method.
+/// Generates one match arm for the legacy `extract_encrypted` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `extract_arm_*` unit tests exercise its output directly.
 ///
 /// Returns `None` (via `?`) if:
 /// - the sentinel field is absent — this is a legacy plaintext event and must
@@ -269,11 +277,15 @@ fn extract_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `reconstruct` method.
+/// Generates one match arm for the legacy `reconstruct` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `reconstruct_arm_*` unit tests exercise its output directly.
 ///
 /// Reads plaintext fields (including the subject field) from the stored
 /// encrypted-form event, then merges them with the decrypted secret fields
-/// from `plaintext_pii` to produce a fully-reconstructed event payload.
+/// from the old `plaintext_pii` parameter to produce a fully-reconstructed
+/// event payload.
 ///
 /// - Multi-secret variants: each secret field is accessed as
 ///   `plaintext_pii["field_name"]`.
@@ -327,7 +339,10 @@ fn reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `redact` method.
+/// Generates one match arm for the legacy `redact` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `redact_arm_*` unit tests exercise its output directly.
 ///
 /// Reads plaintext fields (including the subject field) from the stored
 /// encrypted-form event, then emits static redaction placeholder values for
@@ -556,7 +571,9 @@ fn redact_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 /// (This is identical in logic to the old `extract_arm`.)
 #[zyn::element]
 fn extract_encrypted_legacy_arm(variant: PiiVariantModel) -> zyn::TokenStream {
-    // Delegate to the old extract_arm: the logic is identical.
+    // Replicates the old extract_arm logic (not delegated — code is duplicated
+    // here so the legacy extraction path has no dependency on the test-only
+    // `extract_arm` element).
     let span = Span::call_site();
     let event_type = LitStr::new(&variant.event_type, span);
     let sentinel = LitStr::new(&variant.sentinel, span);
