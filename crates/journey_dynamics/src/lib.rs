@@ -21,7 +21,9 @@ where
 {
     async fn dispatch(&self, aggregate_id: &str, events: &[EventEnvelope<A>]) {
         for event in events {
-            println!("{}-{}\n{:#?}", aggregate_id, event.sequence, &event.payload);
+            let json = serde_json::to_string_pretty(&event.payload)
+                .unwrap_or_else(|_| "failed to serialize event payload".to_string());
+            println!("{}-{}\n{}", aggregate_id, event.sequence, &json);
         }
     }
 }
