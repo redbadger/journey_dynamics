@@ -7,7 +7,10 @@ use sqlx::{Pool, Postgres};
 
 use crate::SimpleLoggingQuery;
 use crate::{
-    domain::journey::{Journey, JourneyServices},
+    domain::{
+        AttributeSchema,
+        journey::{Journey, JourneyServices},
+    },
     pii_codec::JourneyPiiCodec,
     services::decision_engine::GoRulesDecisionEngine,
     subject_lookup_hook::SubjectLookupHook,
@@ -58,7 +61,13 @@ pub fn cqrs_framework(
         .expect("flight-booking JSON schema is invalid — this is a compile-time programming error"),
     );
 
-    let services = JourneyServices::new(decision_engine, schema_validator);
+    // TODO(path-keyed-A6): wire a real AttributeSchema from the flight-booking
+    // schema definition; permissive treats every path as plaintext for now.
+    let services = JourneyServices::new(
+        decision_engine,
+        schema_validator,
+        Arc::new(AttributeSchema::permissive()),
+    );
 
     let inner = PostgresEventRepository::new(pool.clone());
     let codec = Arc::new(JourneyPiiCodec);

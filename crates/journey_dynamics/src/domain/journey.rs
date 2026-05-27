@@ -7,7 +7,14 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    domain::{commands::JourneyCommand, events::JourneyEvent},
+    domain::{
+        AttributePath, AttributeSchema,
+        attribute_schema::{PiiClass, classify_changes},
+        commands::JourneyCommand,
+        events::{JourneyEvent, SecretPartitionData},
+        json_path::set_at_path,
+        rehydrate,
+    },
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
 
@@ -65,7 +72,7 @@ impl Aggregate for Journey {
 
     const TYPE: &'static str = "Journey";
 
-    #[allow(clippy::too_many_lines)]
+    #[allow(clippy::too_many_lines, deprecated)]
     async fn handle(
         &mut self,
         command: Self::Command,
@@ -197,6 +204,117 @@ impl Aggregate for Journey {
                 Ok(())
             }
 
+            JourneyCommand::SetAttributes { changes } => {
+                if self.id == Uuid::default() {
+                    return Err(JourneyError::NotFound);
+                }
+                if JourneyState::Complete == self.state {
+                    return Err(JourneyError::AlreadyCompleted);
+                }
+                if changes.is_empty() {
+                    return Err(JourneyError::InvalidData("no changes".to_string()));
+                }
+
+                // Classify every path against the attribute schema.
+                // The subject_lookup resolves "persons/<ref>" → slot UUID.
+                let schema = services.attribute_schema();
+                let classification = {
+                    let persons = &self.persons;
+                    classify_changes(schema, &changes, |subject_path| {
+                        subject_path
+                            .as_str()
+                            .strip_prefix("persons/")
+                            .and_then(|person_ref| persons.get(person_ref))
+                            .map(|slot| slot.subject_id)
+                    })
+                };
+
+                // Reject paths that are not registered in the schema at all.
+                let truly_unknown: Vec<AttributePath> = classification
+                    .unknown
+                    .iter()
+                    .filter(|p| schema.classify(p).is_none())
+                    .cloned()
+                    .collect();
+                if !truly_unknown.is_empty() {
+                    return Err(JourneyError::UnknownAttributePath(truly_unknown));
+                }
+
+                // Reject secret paths whose person slot hasn't been created yet.
+                for path in &classification.unknown {
+                    if let Some(PiiClass::Secret { subject }) = schema.classify(path) {
+                        let person_ref = subject
+                            .as_str()
+                            .strip_prefix("persons/")
+                            .unwrap_or(subject.as_str())
+                            .to_string();
+                        return Err(JourneyError::PersonNotFound(person_ref));
+                    }
+                }
+
+                // Build one SecretPartitionData per subject, sorted by person_ref
+                // for deterministic event ordering.
+                // Reverse map: subject_id → person_ref (1-to-1: PersonRefConflict
+                // prevents two slots sharing the same subject_id).
+                let subject_to_ref: BTreeMap<Uuid, String> = self
+                    .persons
+                    .iter()
+                    .map(|(person_ref, slot)| (slot.subject_id, person_ref.clone()))
+                    .collect();
+
+                let mut secret_partitions: Vec<SecretPartitionData> = classification
+                    .secret_by_subject
+                    .into_iter()
+                    .map(|(subject_id, secret_changes)| {
+                        let person_ref = subject_to_ref
+                            .get(&subject_id)
+                            .cloned()
+                            .unwrap_or_else(|| subject_id.to_string());
+                        SecretPartitionData {
+                            person_ref,
+                            subject_id,
+                            changes: secret_changes,
+                        }
+                    })
+                    .collect();
+                secret_partitions.sort_by(|a, b| a.person_ref.cmp(&b.person_ref));
+
+                // Validate plaintext changes merged with current shared_data.
+                if !classification.plaintext.is_empty() {
+                    let mut merged_data = self.shared_data.clone();
+                    json_patch::merge(&mut merged_data, &rehydrate(&classification.plaintext));
+                    if let Err(e) = services.schema_validator().validate(&merged_data) {
+                        return Err(JourneyError::InvalidData(e.to_string()));
+                    }
+                }
+
+                // Evaluate the workflow with the full (plaintext + secret) change set.
+                let decision = services
+                    .decision_engine()
+                    .evaluate_attributes(self, &changes)
+                    .await
+                    .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
+
+                sink.write(
+                    JourneyEvent::AttributesSet {
+                        plaintext: classification.plaintext,
+                        secret_partitions,
+                    },
+                    self,
+                )
+                .await;
+
+                sink.write(
+                    JourneyEvent::WorkflowEvaluated {
+                        suggested_actions: decision.suggested_actions,
+                    },
+                    self,
+                )
+                .await;
+
+                Ok(())
+            }
+
             JourneyCommand::Complete => {
                 if self.id == Uuid::default() {
                     Err(JourneyError::NotFound)
@@ -271,6 +389,37 @@ impl Aggregate for Journey {
                     json_patch::merge(&mut slot.details, &data);
                 }
             }
+            JourneyEvent::AttributesSet {
+                plaintext,
+                secret_partitions,
+            } => {
+                // Apply plaintext changes directly into shared_data.
+                for (path, value) in &plaintext {
+                    set_at_path(&mut self.shared_data, path, value.clone());
+                }
+                // Apply secret changes.
+                for partition in &secret_partitions {
+                    // Write every change at its full path into shared_data.
+                    for (path, value) in &partition.changes {
+                        set_at_path(&mut self.shared_data, path, value.clone());
+                    }
+                    // Permanent mirror-write into slot.details using the suffix
+                    // path (the part after "persons/<ref>/").  This keeps the
+                    // legacy `journey_person.details` column populated for
+                    // downstream consumers that still read from it.
+                    if let Some(slot) = self.persons.get_mut(&partition.person_ref) {
+                        let prefix = format!("persons/{}/", partition.person_ref);
+                        for (path, value) in &partition.changes {
+                            let suffix =
+                                path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
+                            if let Ok(suffix_path) = suffix.parse::<AttributePath>() {
+                                set_at_path(&mut slot.details, &suffix_path, value.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
             JourneyEvent::WorkflowEvaluated { suggested_actions } => {
                 // TODO(path-keyed-step-B1): `phase` is not carried by this
                 // event yet; it will be added in step B1 to avoid an
@@ -314,21 +463,26 @@ pub enum JourneyError {
     PersonRefConflict(String),
     #[error("Person slot '{0}' does not exist — call CapturePerson first")]
     PersonNotFound(String),
+    #[error("Unknown attribute paths: {0:?}")]
+    UnknownAttributePath(Vec<AttributePath>),
 }
 
 pub struct JourneyServices {
     decision_engine: Arc<dyn DecisionEngine>,
     schema_validator: Arc<dyn SchemaValidator>,
+    attribute_schema: Arc<AttributeSchema>,
 }
 
 impl JourneyServices {
     pub fn new(
         decision_engine: Arc<dyn DecisionEngine>,
         schema_validator: Arc<dyn SchemaValidator>,
+        attribute_schema: Arc<AttributeSchema>,
     ) -> Self {
         Self {
             decision_engine,
             schema_validator,
+            attribute_schema,
         }
     }
 
@@ -340,6 +494,11 @@ impl JourneyServices {
     #[must_use]
     pub fn schema_validator(&self) -> &Arc<dyn SchemaValidator> {
         &self.schema_validator
+    }
+
+    #[must_use]
+    pub const fn attribute_schema(&self) -> &Arc<AttributeSchema> {
+        &self.attribute_schema
     }
 }
 
@@ -391,12 +550,17 @@ impl Default for Journey {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::too_many_lines)]
+    #![allow(deprecated)]
     use cqrs_es::test::TestFramework;
     use serde_json::json;
+    use std::collections::BTreeMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
     use super::*;
+    use crate::domain::{
+        AttributePath, AttributeSchema, attribute_schema::PiiClass, events::SecretPartitionData,
+    };
     use crate::services::decision_engine::SimpleDecisionEngine;
     use crate::services::schema_validator::JsonSchemaValidator;
 
@@ -427,6 +591,45 @@ mod tests {
         JourneyServices::new(
             Arc::new(SimpleDecisionEngine),
             create_test_schema_validator(),
+            Arc::new(AttributeSchema::permissive()),
+        )
+    }
+
+    /// A non-permissive attribute schema for tests that need explicit path
+    /// classification. Registers two paths:
+    /// - `search/origin` → Plaintext
+    /// - `persons/passenger_0/passport` → Secret (subject = `persons/passenger_0`)
+    /// - `persons/passenger_1/passport` → Secret (subject = `persons/passenger_1`)
+    fn explicit_attribute_schema() -> AttributeSchema {
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            "search/origin".parse::<AttributePath>().unwrap(),
+            PiiClass::Plaintext,
+        );
+        paths.insert(
+            "persons/passenger_0/passport"
+                .parse::<AttributePath>()
+                .unwrap(),
+            PiiClass::Secret {
+                subject: "persons/passenger_0".parse().unwrap(),
+            },
+        );
+        paths.insert(
+            "persons/passenger_1/passport"
+                .parse::<AttributePath>()
+                .unwrap(),
+            PiiClass::Secret {
+                subject: "persons/passenger_1".parse().unwrap(),
+            },
+        );
+        AttributeSchema::new(paths, None)
+    }
+
+    fn services_with_attribute_schema(schema: AttributeSchema) -> JourneyServices {
+        JourneyServices::new(
+            Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+            Arc::new(schema),
         )
     }
 
@@ -1160,6 +1363,254 @@ mod tests {
     }
 
     // ── Schema validation ────────────────────────────────────────────────────
+
+    // ── SetAttributes ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn set_attributes_requires_started() {
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "search/origin".parse::<AttributePath>().unwrap(),
+            json!("LHR"),
+        );
+
+        JourneyTester::with(services())
+            .given_no_previous_events()
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::NotFound);
+    }
+
+    #[test]
+    fn set_attributes_rejects_after_complete() {
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "search/origin".parse::<AttributePath>().unwrap(),
+            json!("LHR"),
+        );
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::AlreadyCompleted);
+    }
+
+    #[test]
+    fn set_attributes_rejects_empty_changes() {
+        let id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes {
+                changes: BTreeMap::new(),
+            })
+            .then_expect_error(JourneyError::InvalidData("no changes".to_string()));
+    }
+
+    #[test]
+    fn set_attributes_rejects_unknown_path() {
+        let id = Uuid::new_v4();
+        // Use the explicit (non-permissive) schema; `mystery/field` is not in it.
+        let unknown_path: AttributePath = "mystery/field".parse().unwrap();
+        let mut changes = BTreeMap::new();
+        changes.insert(unknown_path.clone(), json!("value"));
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::UnknownAttributePath(vec![unknown_path]));
+    }
+
+    #[test]
+    fn set_attributes_plaintext_merges_into_shared_data() {
+        // Test the apply() side directly: AttributesSet writes path-keyed values
+        // into shared_data via set_at_path.
+        let id = Uuid::new_v4();
+        let mut plaintext = BTreeMap::new();
+        plaintext.insert(
+            "search/origin".parse::<AttributePath>().unwrap(),
+            json!("LHR"),
+        );
+        plaintext.insert(
+            "search/destination".parse::<AttributePath>().unwrap(),
+            json!("JFK"),
+        );
+
+        let mut journey = Journey::default();
+        journey.apply(JourneyEvent::Started { id });
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext,
+            secret_partitions: vec![],
+        });
+
+        assert_eq!(journey.shared_data()["search"]["origin"], json!("LHR"));
+        assert_eq!(journey.shared_data()["search"]["destination"], json!("JFK"));
+    }
+
+    #[test]
+    fn set_attributes_secret_requires_person_captured() {
+        // The person slot must exist before a secret path targeting it is accepted.
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "persons/passenger_0/passport"
+                .parse::<AttributePath>()
+                .unwrap(),
+            json!("AB123456"),
+        );
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
+    }
+
+    #[test]
+    fn set_attributes_secret_writes_under_slot() {
+        // apply() should write secret changes both into shared_data (full path)
+        // and into slot.details (suffix path after "persons/<ref>/").
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        let passport_path: AttributePath = "persons/passenger_0/passport".parse().unwrap();
+        let mut secret_changes = BTreeMap::new();
+        secret_changes.insert(passport_path, json!("AB123456"));
+
+        let mut journey = Journey::default();
+        journey.apply(JourneyEvent::Started { id });
+        journey.apply(JourneyEvent::PersonCaptured {
+            person_ref: "passenger_0".to_string(),
+            subject_id,
+            name: "Alice Smith".to_string(),
+            email: "alice@example.com".to_string(),
+            phone: None,
+        });
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext: BTreeMap::new(),
+            secret_partitions: vec![SecretPartitionData {
+                person_ref: "passenger_0".to_string(),
+                subject_id,
+                changes: secret_changes,
+            }],
+        });
+
+        // Full path is visible in shared_data (persons is an object keyed by person_ref).
+        assert_eq!(
+            journey.shared_data()["persons"]["passenger_0"]["passport"],
+            json!("AB123456")
+        );
+        // Suffix path is mirrored into slot.details.
+        let slot = journey.persons().get("passenger_0").unwrap();
+        assert_eq!(slot.details["passport"], json!("AB123456"));
+    }
+
+    #[test]
+    fn set_attributes_emits_workflow_evaluated() {
+        // Passing `first_name` triggers SimpleDecisionEngine's form_3 action
+        // via the evaluate_attributes default impl (current_step = "").
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "first_name".parse::<AttributePath>().unwrap(),
+            json!("Alice"),
+        );
+        let expected_plaintext = changes.clone();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_events(vec![
+                JourneyEvent::AttributesSet {
+                    plaintext: expected_plaintext,
+                    secret_partitions: vec![],
+                },
+                JourneyEvent::WorkflowEvaluated {
+                    suggested_actions: vec!["form_3".to_string()],
+                },
+            ]);
+    }
+
+    #[test]
+    fn set_attributes_multi_subject_produces_one_partition_per_subject() {
+        // A single SetAttributes touching two subjects' secret paths must emit
+        // one SecretPartitionData per subject, sorted by person_ref.
+        let id = Uuid::new_v4();
+        let subject_id_0 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
+        let subject_id_1 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
+
+        let path_0: AttributePath = "persons/passenger_0/passport".parse().unwrap();
+        let path_1: AttributePath = "persons/passenger_1/passport".parse().unwrap();
+        let mut changes = BTreeMap::new();
+        changes.insert(path_0.clone(), json!("AB111111"));
+        changes.insert(path_1.clone(), json!("CD222222"));
+
+        let mut changes_0 = BTreeMap::new();
+        changes_0.insert(path_0, json!("AB111111"));
+        let mut changes_1 = BTreeMap::new();
+        changes_1.insert(path_1, json!("CD222222"));
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id: subject_id_0,
+                    name: "Alice Smith".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+                JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_1".to_string(),
+                    subject_id: subject_id_1,
+                    name: "Bob Jones".to_string(),
+                    email: "bob@example.com".to_string(),
+                    phone: None,
+                },
+            ])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_events(vec![
+                JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::new(),
+                    secret_partitions: vec![
+                        SecretPartitionData {
+                            person_ref: "passenger_0".to_string(),
+                            subject_id: subject_id_0,
+                            changes: changes_0,
+                        },
+                        SecretPartitionData {
+                            person_ref: "passenger_1".to_string(),
+                            subject_id: subject_id_1,
+                            changes: changes_1,
+                        },
+                    ],
+                },
+                JourneyEvent::WorkflowEvaluated {
+                    suggested_actions: vec![],
+                },
+            ]);
+    }
+
+    #[test]
+    fn set_attributes_invalid_data_against_json_schema() {
+        // Plaintext changes that violate the JSON Schema must be rejected with
+        // InvalidData. The permissive attribute schema classifies every path as
+        // Plaintext, so the JSON Schema validator is reached.
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        // The test schema requires `alpha` to be a number; a string fails.
+        changes.insert(
+            "alpha".parse::<AttributePath>().unwrap(),
+            json!("not_a_number"),
+        );
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::InvalidData(
+                "Schema validation failed: {\"alpha\":\"not_a_number\"} is not valid under any of the schemas listed in the 'oneOf' keyword"
+                    .to_string(),
+            ));
+    }
 
     #[test]
     fn test_capture_invalid_data_schema_validation_error() {

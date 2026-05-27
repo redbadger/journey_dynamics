@@ -1,4 +1,4 @@
-#![allow(clippy::too_many_lines)]
+#![allow(clippy::too_many_lines, deprecated)]
 use cqrs_es::test::TestFramework;
 use serde_json::json;
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use journey_dynamics::{
         commands::JourneyCommand,
         events::JourneyEvent,
         journey::{Journey, JourneyError, JourneyServices},
+        AttributeSchema,
     },
     services::{decision_engine::GoRulesDecisionEngine, schema_validator::JsonSchemaValidator},
 };
@@ -22,7 +23,11 @@ fn create_journey_services() -> JourneyServices {
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../schemas/flight-booking-schema.json")).unwrap();
     let schema_validator = Arc::new(JsonSchemaValidator::new(&schema).unwrap());
-    JourneyServices::new(decision_engine, schema_validator)
+    JourneyServices::new(
+        decision_engine,
+        schema_validator,
+        Arc::new(AttributeSchema::permissive()),
+    )
 }
 
 // ── Shared non-PII steps ─────────────────────────────────────────────────────
