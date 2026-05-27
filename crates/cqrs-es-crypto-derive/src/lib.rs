@@ -1,6 +1,6 @@
 //! Proc-macro crate for `#[derive(PiiCodec)]`.
 //!
-//! Generates a `{Name}PiiCodec` struct and a [`PiiEventCodec`] implementation
+//! Generates a `{Name}PiiCodec` struct and a `PiiEventCodec` implementation
 //! from an annotated event enum.
 //!
 //! # Usage
@@ -606,8 +606,7 @@ fn extract_encrypted_legacy_arm(variant: PiiVariantModel) -> zyn::TokenStream {
 
 // ── Derive entry point ────────────────────────────────────────────────────
 
-/// Derives a [`PiiEventCodec`](::cqrs_es_crypto::PiiEventCodec) implementation
-/// from an annotated event enum.
+/// Derives a `PiiEventCodec` implementation from an annotated event enum.
 ///
 /// See the [crate-level documentation](self) for the annotation syntax.
 #[zyn::derive("PiiCodec", attributes(pii))]

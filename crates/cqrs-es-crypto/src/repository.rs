@@ -111,7 +111,7 @@ pub enum PiiCodecError {
 
 // ── Legacy types (deprecated) ─────────────────────────────────────────────────
 
-/// Deprecated. Previously used on the write path by [`PiiEventCodec::classify`].
+/// Deprecated. Previously used on the write path by the now-removed `PiiEventCodec::classify`.
 ///
 /// Replaced by [`SecretPartition`] + [`PiiEventCodec::extract_partitions`].
 #[deprecated(
@@ -125,7 +125,7 @@ pub struct EncryptedPiiSentinel {
     pub nonce_b64: String,
 }
 
-/// Deprecated. Previously used on the write path by [`PiiEventCodec::classify`].
+/// Deprecated. Previously used on the write path by the now-removed `PiiEventCodec::classify`.
 ///
 /// Replaced by [`SecretPartition`] + [`PiiEventCodec::extract_partitions`].
 #[deprecated(
