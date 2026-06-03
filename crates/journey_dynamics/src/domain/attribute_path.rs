@@ -7,8 +7,12 @@
 //! - No empty segments (i.e. no `//`).
 //! - Every character must not be a Unicode control character (i.e.
 //!   [`char::is_control`] returns `false`). All printable Unicode — including
-//!   non-ASCII scripts — is accepted. In practice paths are identifiers like
-//!   `"search/origin"` or `"persons/0/name"`, so this is very permissive.
+//!   non-ASCII scripts — is accepted.
+//! - No segment may have leading or trailing whitespace (e.g. `"foo/ bar"` or
+//!   `"foo/ "` are rejected, but `"full name"` is fine).
+//!
+//!   In practice paths are identifiers like `"search/origin"` or
+//!   `"persons/0/name"`, so this is very permissive.
 
 use std::{fmt, str::FromStr};
 
@@ -53,6 +57,12 @@ impl AttributePath {
         // non-ASCII printable characters) are permitted.
         if let Some(bad) = s.chars().find(|c| c.is_control()) {
             return Err(AttributePathError::NonPrintableChar(bad));
+        }
+        // No segment may have leading or trailing whitespace.
+        if s.split('/')
+            .any(|seg| seg.starts_with(char::is_whitespace) || seg.ends_with(char::is_whitespace))
+        {
+            return Err(AttributePathError::SegmentEdgeWhitespace);
         }
 
         Ok(Self(s))
@@ -136,6 +146,9 @@ pub enum AttributePathError {
     #[error("attribute path must not contain empty segments ('//')")]
     EmptySegment,
 
+    #[error("attribute path segment must not have leading or trailing whitespace")]
+    SegmentEdgeWhitespace,
+
     #[error("attribute path contains non-printable character: {0:?}")]
     NonPrintableChar(char),
 }
@@ -213,6 +226,37 @@ mod tests {
 
         let p: AttributePath = "人物/0/名前".parse().unwrap();
         assert_eq!(p.as_str(), "人物/0/名前");
+    }
+
+    #[test]
+    fn rejects_segment_leading_whitespace() {
+        assert_eq!(
+            AttributePath::new(" foo/bar"),
+            Err(AttributePathError::SegmentEdgeWhitespace)
+        );
+        assert_eq!(
+            AttributePath::new("foo/ bar"),
+            Err(AttributePathError::SegmentEdgeWhitespace)
+        );
+    }
+
+    #[test]
+    fn rejects_segment_trailing_whitespace() {
+        assert_eq!(
+            AttributePath::new("foo /bar"),
+            Err(AttributePathError::SegmentEdgeWhitespace)
+        );
+        assert_eq!(
+            AttributePath::new("foo/ "),
+            Err(AttributePathError::SegmentEdgeWhitespace)
+        );
+    }
+
+    #[test]
+    fn allows_interior_whitespace_in_segment() {
+        // Space within a segment (not at the edges) is fine.
+        let p: AttributePath = "full name/first".parse().unwrap();
+        assert_eq!(p.as_str(), "full name/first");
     }
 
     #[test]
