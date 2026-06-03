@@ -81,6 +81,10 @@ pub enum JourneyState {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WorkflowDecisionView {
     pub suggested_actions: Vec<String>,
+    /// Phase label persisted from the decision engine output.
+    /// `None` until the `WorkflowEvaluated` event carries `phase` (step B1).
+    #[serde(default)]
+    pub phase: Option<String>,
 }
 
 // This updates the view with events as they are committed.
@@ -110,8 +114,11 @@ impl View<Journey> for JourneyView {
             | JourneyEvent::SubjectForgotten { .. } => {}
 
             JourneyEvent::WorkflowEvaluated { suggested_actions } => {
+                // TODO(path-keyed-step-B1): `phase` is not carried by this
+                // event yet; it will be added in step B1.
                 self.latest_workflow_decision = Some(WorkflowDecisionView {
                     suggested_actions: suggested_actions.clone(),
+                    phase: None,
                 });
             }
 

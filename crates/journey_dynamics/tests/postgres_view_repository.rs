@@ -183,6 +183,47 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
     assert!(view.latest_workflow_decision.is_some());
 }
 
+// Phase field persists as NULL (None) when the event does not carry it.
+// This will become meaningful in step B1 when `WorkflowEvaluated` gains
+// the `phase` field.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_workflow_decision_phase_is_none_before_step_b1(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let journey_id = ctx.track_journey(Uuid::new_v4());
+
+    repo.dispatch(
+        &journey_id.to_string(),
+        &[
+            EventEnvelope {
+                aggregate_id: journey_id.to_string(),
+                sequence: 1,
+                payload: JourneyEvent::Started { id: journey_id },
+                metadata: HashMap::default(),
+            },
+            EventEnvelope {
+                aggregate_id: journey_id.to_string(),
+                sequence: 2,
+                payload: JourneyEvent::WorkflowEvaluated {
+                    suggested_actions: vec!["next_step".to_string()],
+                },
+                metadata: HashMap::default(),
+            },
+        ],
+    )
+    .await;
+
+    let view = repo.load(&journey_id).await.unwrap().unwrap();
+    let decision = view
+        .latest_workflow_decision
+        .expect("decision should exist");
+    assert_eq!(decision.suggested_actions, vec!["next_step"]);
+    // Phase is NULL / None until step B1 adds it to the event.
+    assert!(decision.phase.is_none());
+}
+
 // ── load_all ─────────────────────────────────────────────────────────────
 
 #[test_context(PostgresViewRepositoryContext)]
