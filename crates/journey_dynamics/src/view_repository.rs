@@ -369,7 +369,7 @@ impl StructuredJourneyViewRepository {
                 OR
                 (event_type = 'AttributesSet'
                  AND payload -> 'AttributesSet' -> 'subjects'
-                     @> jsonb_build_array($1::text))
+                     @> jsonb_build_array($1))
               )
             ",
         )
