@@ -5,9 +5,10 @@
 //! - Non-empty.
 //! - No leading or trailing `/`.
 //! - No empty segments (i.e. no `//`).
-//! - Every character must satisfy [`char::is_ascii_graphic`] or be a plain
-//!   ASCII space. In practice paths are identifiers like `"search/origin"` or
-//!   `"persons/0/name"`, so this is very permissive.
+//! - Every character must not be a Unicode control character (i.e.
+//!   [`char::is_control`] returns `false`). All printable Unicode — including
+//!   non-ASCII scripts — is accepted. In practice paths are identifiers like
+//!   `"search/origin"` or `"persons/0/name"`, so this is very permissive.
 
 use std::{fmt, str::FromStr};
 
@@ -48,11 +49,9 @@ impl AttributePath {
         if s.contains("//") {
             return Err(AttributePathError::EmptySegment);
         }
-        // Every character must be printable (graphic ASCII or ASCII space).
-        if let Some(bad) = s
-            .chars()
-            .find(|c| !c.is_ascii_graphic() && !c.is_ascii_whitespace())
-        {
+        // Reject Unicode control characters; all other code-points (including
+        // non-ASCII printable characters) are permitted.
+        if let Some(bad) = s.chars().find(|c| c.is_control()) {
             return Err(AttributePathError::NonPrintableChar(bad));
         }
 
@@ -204,6 +203,29 @@ mod tests {
             AttributePath::new("foo/"),
             Err(AttributePathError::TrailingSlash)
         );
+    }
+
+    #[test]
+    fn unicode_segment_roundtrip() {
+        // Non-ASCII scripts should be accepted.
+        let p: AttributePath = "lugares/origen".parse().unwrap();
+        assert_eq!(p.as_str(), "lugares/origen");
+
+        let p: AttributePath = "人物/0/名前".parse().unwrap();
+        assert_eq!(p.as_str(), "人物/0/名前");
+    }
+
+    #[test]
+    fn rejects_control_character() {
+        // Tab and newline are control characters and must be rejected.
+        assert!(matches!(
+            AttributePath::new("a\tb"),
+            Err(AttributePathError::NonPrintableChar('\t'))
+        ));
+        assert!(matches!(
+            AttributePath::new("a\nb"),
+            Err(AttributePathError::NonPrintableChar('\n'))
+        ));
     }
 
     #[test]
