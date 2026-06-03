@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
+
 use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
+
+use super::AttributePath;
 
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
@@ -10,7 +14,23 @@ pub enum JourneyCommand {
     /// Capture non-PII shared data for a step.
     /// The `data` field MUST NOT contain PII — use `CapturePerson` or
     /// `CapturePersonDetails` for any personally identifiable information.
+    ///
+    /// # Deprecated
+    /// Use [`JourneyCommand::SetAttributes`] instead.
+    #[deprecated = "use SetAttributes"]
     Capture { step: String, data: Value },
+
+    /// Set one or more journey attributes in a single command.
+    ///
+    /// `changes` is a flat map of [`AttributePath`] to value. A single
+    /// `SetAttributes` may touch attributes for **multiple subjects** (e.g.
+    /// two passengers' passport numbers in one form submission). The
+    /// aggregate classifies each path as plaintext or secret, validates
+    /// plaintext changes against the JSON Schema, and encrypts secret
+    /// changes under the appropriate subject's DEK.
+    SetAttributes {
+        changes: BTreeMap<AttributePath, Value>,
+    },
 
     /// Register or update a person's identity fields in a named slot.
     ///
@@ -36,6 +56,10 @@ pub enum JourneyCommand {
     /// for the same `person_ref`. The `data` is merged (JSON merge-patch)
     /// into the slot's `details` field and encrypted under the subject's
     /// DEK by the crypto layer.
+    ///
+    /// # Deprecated
+    /// Use [`JourneyCommand::SetAttributes`] with path-keyed secret fields instead.
+    #[deprecated = "use SetAttributes"]
     CapturePersonDetails { person_ref: String, data: Value },
 
     /// Mark the journey as complete.

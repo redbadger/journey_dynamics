@@ -10,7 +10,10 @@
 use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
 use journey_dynamics::SimpleLoggingQuery;
 use journey_dynamics::domain::commands::JourneyCommand;
-use journey_dynamics::domain::journey::{Journey, JourneyServices};
+use journey_dynamics::domain::{
+    AttributeSchema,
+    journey::{Journey, JourneyServices},
+};
 use journey_dynamics::services::decision_engine::SimpleDecisionEngine;
 use journey_dynamics::services::schema_validator::NoOpValidator;
 use std::sync::Arc;
@@ -25,7 +28,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let query = SimpleLoggingQuery {};
     let decision_engine = Arc::new(SimpleDecisionEngine);
     let schema_validator = Arc::new(NoOpValidator);
-    let services = JourneyServices::new(decision_engine, schema_validator);
+    let services = JourneyServices::new(
+        decision_engine,
+        schema_validator,
+        Arc::new(AttributeSchema::permissive()),
+    );
     let cqrs = CqrsFramework::new(event_store.clone(), vec![Box::new(query)], services);
 
     // Create a new journey

@@ -4,8 +4,10 @@ use sqlx::{Pool, Postgres, Row};
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
+use serde_json::json;
+
 use crate::{
-    domain::{events::JourneyEvent, journey::Journey},
+    domain::{AttributePath, events::JourneyEvent, journey::Journey, rehydrate, set_at_path},
     queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
 };
 
@@ -674,6 +676,64 @@ impl StructuredJourneyViewRepository {
                 .bind(journey_id)
                 .execute(&mut **tx)
                 .await?;
+            }
+
+            JourneyEvent::AttributesSet {
+                plaintext,
+                secret_partitions,
+            } => {
+                // Rehydrate plaintext changes into a nested JSON value for the
+                // shared_data column update.
+                let mut data_update = rehydrate(plaintext);
+                // Also write full-path secret changes into shared_data (as the
+                // aggregate does), so the read model has a unified view of all
+                // non-identity attributes.
+                for partition in secret_partitions {
+                    for (path, value) in &partition.changes {
+                        set_at_path(&mut data_update, path, value.clone());
+                    }
+                }
+
+                sqlx::query(
+                    r"
+                    UPDATE journey_view
+                    SET shared_data = shared_data || $2,
+                        version     = $3,
+                        updated_at  = CURRENT_TIMESTAMP
+                    WHERE id = $1
+                    ",
+                )
+                .bind(journey_id)
+                .bind(&data_update)
+                .bind(event.sequence as i64)
+                .execute(&mut **tx)
+                .await?;
+
+                // Mirror secret changes into journey_person.details using the
+                // suffix path (the part after "persons/<ref>/").
+                for partition in secret_partitions {
+                    let prefix = format!("persons/{}/", partition.person_ref);
+                    let mut details_update = json!({});
+                    for (path, value) in &partition.changes {
+                        let suffix = path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
+                        if let Ok(suffix_path) = suffix.parse::<AttributePath>() {
+                            set_at_path(&mut details_update, &suffix_path, value.clone());
+                        }
+                    }
+                    sqlx::query(
+                        r"
+                        UPDATE journey_person
+                        SET details    = details || $3,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE journey_id = $1 AND person_ref = $2
+                        ",
+                    )
+                    .bind(journey_id)
+                    .bind(&partition.person_ref)
+                    .bind(&details_update)
+                    .execute(&mut **tx)
+                    .await?;
+                }
             }
         }
 

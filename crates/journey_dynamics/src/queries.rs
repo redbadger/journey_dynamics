@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::domain::{events::JourneyEvent, journey::Journey};
+use crate::domain::{events::JourneyEvent, journey::Journey, rehydrate};
 
 /// Person data for a single slot within a journey.
 /// One row per `(journey_id, person_ref)` in the `journey_person` table.
@@ -131,6 +131,13 @@ impl View<Journey> for JourneyView {
 
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
+            }
+
+            JourneyEvent::AttributesSet { plaintext, .. } => {
+                // Merge plaintext changes into shared_data.
+                // Secret partitions are projected to journey_person by
+                // StructuredJourneyViewRepository; no state change needed here.
+                json_patch::merge(&mut self.shared_data, &rehydrate(plaintext));
             }
         }
     }

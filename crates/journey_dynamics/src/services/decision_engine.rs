@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     future::Future,
     sync::{Arc, OnceLock},
     thread::available_parallelism,
@@ -12,7 +13,10 @@ use zen_engine::{
     DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions, model::DecisionContent,
 };
 
-use crate::domain::journey::{Journey, JourneyState};
+use crate::domain::{
+    AttributePath,
+    journey::{Journey, JourneyState},
+};
 
 // ---------------------------------------------------------------------------
 // Thread-pinned worker pool
@@ -64,6 +68,23 @@ pub trait DecisionEngine: Send + Sync {
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>>;
+
+    /// Evaluate the workflow after a `SetAttributes` command.
+    ///
+    /// The default implementation rehydrates `pending_changes` into a nested
+    /// JSON tree, merges it with the journey's current `shared_data`, and
+    /// delegates to [`Self::evaluate_next_steps`] with an empty step string.
+    /// Phase B will provide a more refined implementation for the `GoRules`
+    /// engine that reads flat attribute paths directly.
+    async fn evaluate_attributes(
+        &self,
+        journey: &Journey,
+        pending_changes: &BTreeMap<AttributePath, Value>,
+    ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
+        let mut merged = journey.shared_data().clone();
+        json_patch::merge(&mut merged, &crate::domain::rehydrate(pending_changes));
+        self.evaluate_next_steps(journey, "", &merged).await
+    }
 }
 
 // ---------------------------------------------------------------------------
