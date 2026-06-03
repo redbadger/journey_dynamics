@@ -157,8 +157,14 @@ fn flatten_into(value: &Value, result: &mut BTreeMap<AttributePath, Value>, pref
             // joined by "/", so it is always a valid AttributePath. The
             // fallible parse is a safety net for degenerate JSON keys (e.g.
             // empty-string keys) that would violate the invariant.
-            if let Ok(path) = prefix.parse::<AttributePath>() {
-                result.insert(path, leaf.clone());
+            match prefix.parse::<AttributePath>() {
+                Ok(path) => {
+                    result.insert(path, leaf.clone());
+                }
+                Err(e) => debug_assert!(
+                    false,
+                    "prefix {prefix:?} should always be a valid AttributePath: {e}"
+                ),
             }
         }
     }
