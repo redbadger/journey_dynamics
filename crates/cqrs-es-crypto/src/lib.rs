@@ -1,4 +1,4 @@
-//! `cqrs-es-crypto` — transparent PII encryption and GDPR crypto-shredding for [`cqrs-es`].
+//! `cqrs-es-crypto` — transparent PII encryption and GDPR crypto-shredding for [`cqrs-es`](https://docs.rs/cqrs-es).
 //!
 //! # Overview
 //!
@@ -20,8 +20,7 @@
 //! - **`stream_all_events`** is not supported: [`CryptoShreddingEventRepository`]
 //!   returns an error if called, because the [`cqrs_es::persist::ReplayStream`] API
 //!   does not expose raw [`cqrs_es::persist::SerializedEvent`] items for interception.
-//!   Use [`CryptoShreddingEventRepository::get_events`] or
-//!   [`CryptoShreddingEventRepository::stream_events`] per aggregate instead.
+//!   Use `get_events` or `stream_events` on [`CryptoShreddingEventRepository`] per aggregate instead.
 //! - **Snapshots** are not encrypted. If your aggregate state contains PII, snapshots
 //!   will store it in plaintext and crypto-shredding will not redact it.
 //!
@@ -52,8 +51,8 @@
 //! ```rust,ignore
 //! use std::sync::Arc;
 //! use cqrs_es_crypto::{
-//!     CryptoShreddingEventRepository, EncryptedPiiSentinel, FieldCipher,
-//!     PiiEventCodec, PiiFields, PostgresKeyStore, StaticKekProvider,
+//!     CryptoShreddingEventRepository, FieldCipher,
+//!     PiiEventCodec, PostgresKeyStore, StaticKekProvider,
 //! };
 //!
 //! // 1. Implement PiiEventCodec for your domain.
@@ -104,12 +103,17 @@ pub use key_store::{PostgresKeyStore, PostgresKeyStoreOptions};
 
 pub use rewrap::{RewrapStats, RewrapWorker, RewrapWorkerOptions};
 
-// ── Repository ────────────────────────────────────────────────────────────────
+// ── Repository ────────────────────────────────────────────────────────
 
+// New partition-based types and trait.
 pub use repository::{
-    CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel, PiiEventCodec,
-    PiiFields,
+    CryptoShreddingEventRepository, DecryptedPartition, EncryptedPartition, EncryptedPiiExtract,
+    PiiCodecError, PiiEventCodec, SecretPartition,
 };
+
+// Deprecated legacy types (kept for one release cycle).
+#[allow(deprecated)]
+pub use repository::{EncryptedPiiSentinel, PiiFields};
 
 #[cfg(feature = "postgres")]
 pub use repository::PersistHook;

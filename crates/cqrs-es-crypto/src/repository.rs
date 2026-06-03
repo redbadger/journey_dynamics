@@ -12,19 +12,29 @@
 //!
 //! # Write path
 //!
-//! For each event, [`PiiEventCodec::classify`] is called.  If it returns
-//! `Some(PiiFields)` the PII blob is encrypted with AES-256-GCM under the
-//! subject's DEK and the payload is replaced with the encrypted form.  Events
-//! for which `classify` returns `None` are forwarded to the inner repository
-//! unchanged.
+//! For each event, [`PiiEventCodec::extract_partitions`] is called.  It both
+//! extracts cleartext PII bytes **and** clears those fields from the payload in
+//! one pass.  An empty `Vec` means the event carries no PII and is forwarded
+//! unchanged.  Non-empty vecs produce one [`EncryptedPartition`] per subject,
+//! written into the payload's `encrypted_partitions` array alongside a plaintext
+//! `subjects` peer array used for indexing.
 //!
-//! # Read path
+//! # Read path (new shape)
 //!
-//! For each event, [`PiiEventCodec::extract_encrypted`] is called.  If it
-//! returns `Some(EncryptedPiiExtract)` the repository looks up the DEK:
-//! - DEK present  → decrypt and call [`PiiEventCodec::reconstruct`].
-//! - DEK absent   → call [`PiiEventCodec::redact`] (subject forgotten).
-//! - No sentinel  → event is plaintext / legacy, returned as-is.
+//! For each partition in `encrypted_partitions`, the repository looks up the DEK:
+//! - DEK present → AES-256-GCM decrypt → collect into [`DecryptedPartition`].
+//! - DEK absent  → collect label into redacted list.
+//!   After all partitions are processed: [`PiiEventCodec::reconstruct`] is called
+//!   with the decrypted partitions, then [`PiiEventCodec::redact_partitions`] is
+//!   called for any redacted labels.
+//!
+//! # Read path (legacy shape)
+//!
+//! Events written before the partitioned format carry a single inline ciphertext
+//! field.  [`PiiEventCodec::extract_encrypted_legacy`] detects that shape; if it
+//! returns `Some`, the repository decrypts with legacy AAD and forwards the
+//! result to `reconstruct` / `redact_partitions` as a one-partition vector with
+//! `label = "default"`.  Plain events (neither shape matches) are returned as-is.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,8 +56,68 @@ use async_trait::async_trait;
 
 // ── PiiEventCodec — types ─────────────────────────────────────────────────────
 
-/// The base64-encoded ciphertext and nonce that the repository passes to
-/// [`PiiFields::build_encrypted_payload`] after a successful encryption.
+// ── New partition types ───────────────────────────────────────────────────────
+
+/// A cleartext partition produced on the **write path** by
+/// [`PiiEventCodec::extract_partitions`].
+///
+/// One partition per data subject per event. Most events have zero (plain) or
+/// one (single-subject PII). Multi-subject events (e.g. "set passport details
+/// for two passengers") emit one per subject.
+pub struct SecretPartition {
+    /// Subject whose DEK encrypts this partition.
+    pub subject_id: Uuid,
+    /// Within-event routing label. Opaque to the crypto layer.
+    /// Conventional values: `"default"` (derive macro), a field name, or a
+    /// journey-local slot name (e.g. `"passenger_0"`).
+    pub label: String,
+    /// Cleartext bytes (typically `serde_json::to_vec(pii_value)`) to encrypt.
+    pub payload: Vec<u8>,
+}
+
+/// An encrypted partition as stored in the event payload's
+/// `encrypted_partitions` array.
+pub struct EncryptedPartition {
+    /// Subject whose DEK was used to encrypt this partition.
+    pub subject_id: Uuid,
+    /// Routing label — passed to [`PiiEventCodec::reconstruct`] /
+    /// [`PiiEventCodec::redact_partitions`] on the read path.
+    pub label: String,
+    /// Raw 96-bit AES-GCM nonce bytes.
+    pub nonce: Vec<u8>,
+    /// Raw AES-256-GCM ciphertext (including 16-byte tag).
+    pub ciphertext: Vec<u8>,
+}
+
+/// A decrypted partition produced on the **read path** after a successful DEK
+/// lookup and AES-256-GCM decryption.
+pub struct DecryptedPartition {
+    /// Subject whose DEK decrypted this partition.
+    pub subject_id: Uuid,
+    /// Routing label from the stored [`EncryptedPartition`].
+    pub label: String,
+    /// Cleartext bytes — deserialise these back to the original PII value.
+    pub payload: Vec<u8>,
+}
+
+/// Error type returned by [`PiiEventCodec`] methods.
+#[derive(Debug, thiserror::Error)]
+pub enum PiiCodecError {
+    #[error("JSON error: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("codec error: {0}")]
+    Other(Box<dyn std::error::Error + Send + Sync>),
+}
+
+// ── Legacy types (deprecated) ─────────────────────────────────────────────────
+
+/// Deprecated. Previously used on the write path by the now-removed `PiiEventCodec::classify`.
+///
+/// Replaced by [`SecretPartition`] + [`PiiEventCodec::extract_partitions`].
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `SecretPartition` and `extract_partitions`"
+)]
 pub struct EncryptedPiiSentinel {
     /// Base64-encoded AES-256-GCM ciphertext (including the 16-byte tag).
     pub ciphertext_b64: String,
@@ -55,30 +125,27 @@ pub struct EncryptedPiiSentinel {
     pub nonce_b64: String,
 }
 
-/// Instructions returned by [`PiiEventCodec::classify`] for a single event on
-/// the **write path**.
+/// Deprecated. Previously used on the write path by the now-removed `PiiEventCodec::classify`.
+///
+/// Replaced by [`SecretPartition`] + [`PiiEventCodec::extract_partitions`].
+#[deprecated(
+    since = "0.3.0",
+    note = "Use `SecretPartition` and `extract_partitions`"
+)]
 pub struct PiiFields {
     /// The data-subject identifier — used to look up or create the DEK.
     pub subject_id: Uuid,
-
-    /// The JSON blob of PII fields to encrypt.  The entire value is serialised
-    /// to bytes, encrypted, and base64-encoded.  On the read path this same
-    /// JSON structure is returned to [`PiiEventCodec::reconstruct`] as
-    /// `plaintext_pii`.
+    /// The JSON blob of PII fields to encrypt.
     pub plaintext_pii: Value,
-
-    /// Builds the payload that will be persisted.
-    ///
-    /// The closure receives the [`EncryptedPiiSentinel`] containing the
-    /// base64-encoded ciphertext and nonce and returns the complete
-    /// `serde_json::Value` to store.  Non-PII fields (e.g. `person_ref`,
-    /// `subject_id`) should be preserved by the closure; only the sensitive
-    /// fields should be replaced by the sentinel values.
+    /// Builds the complete encrypted payload to persist.
+    #[allow(deprecated)]
     pub build_encrypted_payload: Box<dyn FnOnce(EncryptedPiiSentinel) -> Value + Send>,
 }
 
-/// Encrypted PII extracted from a stored event by [`PiiEventCodec::extract_encrypted`]
-/// on the **read path**.
+/// Encrypted PII extracted from a stored event on the legacy **read path**.
+///
+/// Returned by [`PiiEventCodec::extract_encrypted_legacy`] to support events
+/// written before the partitioned-ciphertext format was introduced.
 pub struct EncryptedPiiExtract {
     /// The data-subject identifier — used to look up the DEK.
     pub subject_id: Uuid,
@@ -92,67 +159,84 @@ pub struct EncryptedPiiExtract {
 
 /// Describes how to locate and transform PII within a serialised event payload.
 ///
-/// Implementors encode the domain-specific knowledge of:
-/// - which event types carry PII,
-/// - where the subject ID lives,
-/// - which fields are sensitive and how they are structured,
-/// - how to reassemble the payload after encryption or when redacting.
+/// # Write path
 ///
-/// The trait is split into two sides:
+/// [`extract_partitions`](Self::extract_partitions) is called on the
+/// unencrypted event before it is persisted. The codec extracts cleartext bytes
+/// for each subject's PII slice **and** removes those fields from the event
+/// payload in the same pass. An empty `Vec` means "pass through unchanged".
 ///
-/// - **Write path**: [`classify`](PiiEventCodec::classify) — called on the
-///   unencrypted event before it is persisted.
-/// - **Read path**: [`extract_encrypted`](PiiEventCodec::extract_encrypted),
-///   [`reconstruct`](PiiEventCodec::reconstruct), and
-///   [`redact`](PiiEventCodec::redact) — called on the stored (encrypted) event
-///   when it is loaded.
+/// # Read path (new shape)
+///
+/// [`reconstruct`](Self::reconstruct) and
+/// [`redact_partitions`](Self::redact_partitions) are called after the
+/// repository has decrypted (or failed to decrypt) each partition. The codec
+/// writes cleartext and/or sentinel values back into the event in-place.
+///
+/// # Read path (legacy shape)
+///
+/// Events written before the partitioned format was introduced carry a single
+/// inline ciphertext field. [`extract_encrypted_legacy`](Self::extract_encrypted_legacy)
+/// detects that shape and returns the bytes; the default implementation returns
+/// `None` (suitable for new codecs that never wrote legacy events).
 pub trait PiiEventCodec: Send + Sync {
-    /// **Write path.** Inspect an unencrypted event and return encryption
-    /// instructions, or `None` if this event type carries no PII and should be
+    /// **Write path.** Extract PII partitions from the event AND clear the PII
+    /// fields from `event.payload` in one pass.
+    ///
+    /// Returns one [`SecretPartition`] per subject whose data appears in this
+    /// event. An empty `Vec` means the event carries no PII and should be
     /// stored verbatim.
-    fn classify(&self, event: &SerializedEvent) -> Option<PiiFields>;
-
-    /// **Read path.** Extract encrypted PII metadata from a stored (encrypted)
-    /// event payload.
-    ///
-    /// Returns:
-    /// - `Some(EncryptedPiiExtract)` when the event type carries PII **and** the
-    ///   payload contains encryption sentinels.
-    /// - `None` when the event type carries no PII, or when no sentinels are
-    ///   present (legacy / plaintext event — pass through unchanged).
-    fn extract_encrypted(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract>;
-
-    /// **Read path.** Rebuild the event payload from decrypted PII bytes.
-    ///
-    /// `event` is the stored encrypted-form event (useful for extracting
-    /// plaintext fields such as `person_ref` or `subject_id`).
-    /// `plaintext_pii` is the JSON value that was originally supplied as
-    /// [`PiiFields::plaintext_pii`] during encryption.
     ///
     /// # Errors
     ///
-    /// Returns an error if the payload cannot be reassembled from the decrypted
-    /// PII (e.g. a required field is missing or malformed).
+    /// Returns [`PiiCodecError`] if PII bytes cannot be serialised.
+    fn extract_partitions(
+        &self,
+        event: &mut SerializedEvent,
+    ) -> Result<Vec<SecretPartition>, PiiCodecError>;
+
+    /// **Read path.** Reattach decrypted partitions into the event payload,
+    /// routing each partition's payload by its `label`.
+    ///
+    /// On entry `event.payload` already has the encrypted form (with
+    /// `encrypted_partitions` / `subjects` removed by the repository).
+    /// The codec writes the decrypted values back in-place.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PiiCodecError`] if a partition payload cannot be deserialised.
     fn reconstruct(
         &self,
-        event: &SerializedEvent,
-        plaintext_pii: &Value,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
+        event: &mut SerializedEvent,
+        partitions: Vec<DecryptedPartition>,
+    ) -> Result<(), PiiCodecError>;
 
-    /// **Read path.** Rebuild the event payload with redacted placeholders.
+    /// **Read path.** Write codec-defined sentinel values for partitions whose
+    /// DEK has been deleted (crypto-shredding).
     ///
-    /// Called when the DEK for this subject has been deleted (crypto-shredding).
-    /// The PII is permanently irrecoverable; the implementation should return a
-    /// payload that clearly signals redaction (e.g. `"[redacted]"` strings or
-    /// `null` / empty-object values) while preserving non-PII plaintext fields.
+    /// `labels` contains the routing labels of the partitions that could not
+    /// be decrypted. The codec replaces those fields with redaction sentinels
+    /// (e.g. `"[redacted]"`, `null`, `{}`) while leaving other fields intact.
     ///
     /// # Errors
     ///
-    /// Returns an error if the redacted payload cannot be constructed.
-    fn redact(
+    /// Returns [`PiiCodecError`] if the sentinels cannot be written.
+    fn redact_partitions(
         &self,
-        event: &SerializedEvent,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>>;
+        event: &mut SerializedEvent,
+        labels: &[String],
+    ) -> Result<(), PiiCodecError>;
+
+    /// **Legacy read path.** Detect and extract the old single-ciphertext
+    /// format (written before the partitioned scheme was introduced).
+    ///
+    /// The default returns `None`, which is correct for any codec that never
+    /// wrote events in the pre-partition format. The derive macro overrides
+    /// this with the old `extract_encrypted` logic so that legacy events stored
+    /// on disk continue to decrypt transparently.
+    fn extract_encrypted_legacy(&self, _event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
+        None
+    }
 }
 
 // ── CryptoShreddingEventRepository ───────────────────────────────────────────
@@ -273,7 +357,7 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 }
 
 impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
-    // ── Write helpers ─────────────────────────────────────────────────────────
+    // ── Write helpers ──────────────────────────────────────────────────────────
 
     async fn encrypt_events(
         &self,
@@ -282,25 +366,45 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         let mut out = Vec::with_capacity(events.len());
         for event in events {
             let mut event = event.clone();
-            if let Some(pii) = self.codec.classify(&event) {
-                let dek = self
-                    .key_store
-                    .get_or_create_key(&pii.subject_id)
-                    .await
-                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+            let partitions = self
+                .codec
+                .extract_partitions(&mut event)
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
 
-                // AAD = "<aggregate_id>:<sequence>" — binds ciphertext to this
-                // event position, preventing transplant attacks.
-                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
-                let plaintext = serde_json::to_vec(&pii.plaintext_pii)?;
-                let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
+            if !partitions.is_empty() {
+                let event_type = event.event_type.clone();
+                let mut enc_parts = Vec::with_capacity(partitions.len());
+                let mut subjects = Vec::with_capacity(partitions.len());
 
-                let sentinel = EncryptedPiiSentinel {
-                    ciphertext_b64: BASE64.encode(&encrypted.ciphertext),
-                    nonce_b64: BASE64.encode(&encrypted.nonce),
-                };
+                for part in partitions {
+                    let dek = self
+                        .key_store
+                        .get_or_create_key(&part.subject_id)
+                        .await
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    // Per-partition AAD: aggregate_id:sequence:subject_id:label
+                    let aad = format!(
+                        "{}:{}:{}:{}",
+                        event.aggregate_id, event.sequence, part.subject_id, part.label
+                    )
+                    .into_bytes();
+                    let encrypted = self.cipher.encrypt(&dek, &part.payload, &aad);
+                    subjects.push(part.subject_id.to_string());
+                    enc_parts.push(serde_json::json!({
+                        "subject_id": part.subject_id.to_string(),
+                        "label":      part.label,
+                        "nonce":      BASE64.encode(&encrypted.nonce),
+                        "ciphertext": BASE64.encode(&encrypted.ciphertext),
+                    }));
+                }
 
-                event.payload = (pii.build_encrypted_payload)(sentinel);
+                if let Some(inner) = event.payload[event_type.as_str()].as_object_mut() {
+                    inner.insert("subjects".to_string(), serde_json::json!(subjects));
+                    inner.insert(
+                        "encrypted_partitions".to_string(),
+                        serde_json::json!(enc_parts),
+                    );
+                }
             }
             out.push(event);
         }
@@ -309,20 +413,35 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 
     // ── Read helpers ──────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_lines)]
     async fn decrypt_events(
         &self,
         events: Vec<SerializedEvent>,
     ) -> Result<Vec<SerializedEvent>, PersistenceError> {
-        // ── Pass 1: collect the unique subject IDs that need a DEK. ──────────
-        //
-        // Fetching all DEKs up front — before decrypting any event — means that
-        // if a crypto-shred arrives mid-loop, every event for that subject is
-        // consistently redacted rather than producing a torn read (some events
-        // decrypted, later ones redacted). It also reduces round-trips from
-        // O(events) to O(unique subjects).
+        // ── Pass 1: pre-fetch DEKs (consistent reads, O(subjects) round-trips). ──
         let mut dek_cache: HashMap<Uuid, Option<crate::cipher::KeyMaterial>> = HashMap::new();
         for event in &events {
-            if let Some(extract) = self.codec.extract_encrypted(event) {
+            let event_type = event.event_type.as_str();
+            // New shape: encrypted_partitions array present.
+            if let Some(arr) = event.payload[event_type]["encrypted_partitions"].as_array() {
+                for p in arr {
+                    if let Some(s) = p["subject_id"].as_str() {
+                        if let Ok(id) = Uuid::parse_str(s) {
+                            if let std::collections::hash_map::Entry::Vacant(e) =
+                                dek_cache.entry(id)
+                            {
+                                let dek = self
+                                    .key_store
+                                    .get_key(&id)
+                                    .await
+                                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                                e.insert(dek);
+                            }
+                        }
+                    }
+                }
+            // Legacy shape: single inline ciphertext.
+            } else if let Some(extract) = self.codec.extract_encrypted_legacy(event) {
                 if let std::collections::hash_map::Entry::Vacant(e) =
                     dek_cache.entry(extract.subject_id)
                 {
@@ -336,34 +455,106 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             }
         }
 
-        // ── Pass 2: decrypt using the cached DEKs. ───────────────────────────
+        // ── Pass 2: decrypt / redact using cached DEKs. ─────────────────────────
         let mut out = Vec::with_capacity(events.len());
-        for event in events {
-            let mut event = event;
-            if let Some(extract) = self.codec.extract_encrypted(&event) {
-                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
+        for mut event in events {
+            let event_type = event.event_type.clone();
 
-                event.payload = match dek_cache.get(&extract.subject_id).and_then(Option::as_ref) {
+            // Snapshot the encrypted_partitions array before mutating payload.
+            let enc_parts_snapshot: Option<Vec<serde_json::Value>> = event.payload
+                [event_type.as_str()]["encrypted_partitions"]
+                .as_array()
+                .cloned();
+
+            if let Some(enc_parts) = enc_parts_snapshot {
+                // ── New shape ───────────────────────────────────────────────────
+                // Remove envelope fields before calling reconstruct.
+                if let Some(inner) = event.payload[event_type.as_str()].as_object_mut() {
+                    inner.remove("encrypted_partitions");
+                    inner.remove("subjects");
+                }
+
+                let mut decrypted: Vec<DecryptedPartition> = Vec::new();
+                let mut redacted_labels: Vec<String> = Vec::new();
+
+                for p in &enc_parts {
+                    let subject_id = p["subject_id"]
+                        .as_str()
+                        .and_then(|s| Uuid::parse_str(s).ok())
+                        .ok_or_else(|| {
+                            PersistenceError::UnknownError(
+                                "missing or invalid subject_id in encrypted_partition".into(),
+                            )
+                        })?;
+                    let label = p["label"].as_str().unwrap_or("default").to_string();
+                    let nonce = BASE64
+                        .decode(p["nonce"].as_str().unwrap_or(""))
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    let ciphertext = BASE64
+                        .decode(p["ciphertext"].as_str().unwrap_or(""))
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    let aad = format!(
+                        "{}:{}:{}:{}",
+                        event.aggregate_id, event.sequence, subject_id, label
+                    )
+                    .into_bytes();
+
+                    match dek_cache.get(&subject_id).and_then(Option::as_ref) {
+                        Some(dek) => {
+                            let ep = EncryptedPayload { ciphertext, nonce };
+                            let bytes = self
+                                .cipher
+                                .decrypt(dek, &ep, &aad)
+                                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                            decrypted.push(DecryptedPartition {
+                                subject_id,
+                                label,
+                                payload: bytes,
+                            });
+                        }
+                        None => redacted_labels.push(label),
+                    }
+                }
+
+                self.codec
+                    .reconstruct(&mut event, decrypted)
+                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                if !redacted_labels.is_empty() {
+                    self.codec
+                        .redact_partitions(&mut event, &redacted_labels)
+                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                }
+            } else if let Some(extract) = self.codec.extract_encrypted_legacy(&event) {
+                // ── Legacy shape ───────────────────────────────────────────────
+                // Legacy AAD: "aggregate_id:sequence" (the pre-partition format).
+                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
+                match dek_cache.get(&extract.subject_id).and_then(Option::as_ref) {
                     Some(dek) => {
-                        let encrypted_payload = EncryptedPayload {
+                        let ep = EncryptedPayload {
                             ciphertext: extract.ciphertext,
                             nonce: extract.nonce,
                         };
-                        let plaintext_bytes = self
+                        let bytes = self
                             .cipher
-                            .decrypt(dek, &encrypted_payload, &aad)
+                            .decrypt(dek, &ep, &aad)
                             .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-                        let plaintext_pii: Value = serde_json::from_slice(&plaintext_bytes)?;
+                        let partition = DecryptedPartition {
+                            subject_id: extract.subject_id,
+                            label: "default".to_string(),
+                            payload: bytes,
+                        };
                         self.codec
-                            .reconstruct(&event, &plaintext_pii)
-                            .map_err(PersistenceError::UnknownError)?
+                            .reconstruct(&mut event, vec![partition])
+                            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
                     }
-                    None => self
-                        .codec
-                        .redact(&event)
-                        .map_err(PersistenceError::UnknownError)?,
-                };
+                    None => {
+                        self.codec
+                            .redact_partitions(&mut event, &["default".to_string()])
+                            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                    }
+                }
             }
+            // else: plain event — push as-is.
             out.push(event);
         }
         Ok(out)
@@ -402,19 +593,40 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
         let mut out = Vec::with_capacity(events.len());
         for event in events {
             let mut event = event.clone();
-            if let Some(pii) = self.codec.classify(&event) {
-                let dek = self.get_or_create_key_in_tx(&pii.subject_id, tx).await?;
+            let partitions = self
+                .codec
+                .extract_partitions(&mut event)
+                .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
 
-                let aad = format!("{}:{}", event.aggregate_id, event.sequence).into_bytes();
-                let plaintext = serde_json::to_vec(&pii.plaintext_pii)?;
-                let encrypted = self.cipher.encrypt(&dek, &plaintext, &aad);
+            if !partitions.is_empty() {
+                let event_type = event.event_type.clone();
+                let mut enc_parts = Vec::with_capacity(partitions.len());
+                let mut subjects = Vec::with_capacity(partitions.len());
 
-                let sentinel = EncryptedPiiSentinel {
-                    ciphertext_b64: BASE64.encode(&encrypted.ciphertext),
-                    nonce_b64: BASE64.encode(&encrypted.nonce),
-                };
+                for part in partitions {
+                    let dek = self.get_or_create_key_in_tx(&part.subject_id, tx).await?;
+                    let aad = format!(
+                        "{}:{}:{}:{}",
+                        event.aggregate_id, event.sequence, part.subject_id, part.label
+                    )
+                    .into_bytes();
+                    let encrypted = self.cipher.encrypt(&dek, &part.payload, &aad);
+                    subjects.push(part.subject_id.to_string());
+                    enc_parts.push(serde_json::json!({
+                        "subject_id": part.subject_id.to_string(),
+                        "label":      part.label,
+                        "nonce":      BASE64.encode(&encrypted.nonce),
+                        "ciphertext": BASE64.encode(&encrypted.ciphertext),
+                    }));
+                }
 
-                event.payload = (pii.build_encrypted_payload)(sentinel);
+                if let Some(inner) = event.payload[event_type.as_str()].as_object_mut() {
+                    inner.insert("subjects".to_string(), serde_json::json!(subjects));
+                    inner.insert(
+                        "encrypted_partitions".to_string(),
+                        serde_json::json!(enc_parts),
+                    );
+                }
             }
             out.push(event);
         }
@@ -817,8 +1029,8 @@ mod tests {
     use crate::key_store::{InMemoryKeyStore, KeyStore};
 
     use super::{
-        CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel,
-        InMemoryEventRepository, PiiEventCodec, PiiFields,
+        CryptoShreddingEventRepository, DecryptedPartition, EncryptedPiiExtract,
+        InMemoryEventRepository, PiiCodecError, PiiEventCodec, SecretPartition,
     };
 
     // ── TestEvent + TestAggregate ─────────────────────────────────────────────
@@ -874,59 +1086,103 @@ mod tests {
 
     // ── TestPiiCodec ──────────────────────────────────────────────────────────
 
-    /// A codec that treats `"TestPii"` events as PII-bearing and all others as
-    /// plain.
+    /// Codec for `TestPii` events (new partitioned write, legacy read support).
     ///
-    /// Payload shape (unencrypted):
+    /// New on-disk shape (`encrypted_partitions`):
     /// ```json
-    /// { "TestPii": { "subject_id": "<uuid>", "secret": "<string>" } }
+    /// { "TestPii": { "subject_id": "<uuid>",
+    ///                "subjects": ["<uuid>"],
+    ///                "encrypted_partitions": [{"subject_id","label","nonce","ciphertext"}] } }
     /// ```
     ///
-    /// Payload shape (encrypted):
+    /// Legacy on-disk shape (back-compat read only):
     /// ```json
     /// { "TestPii": { "subject_id": "<uuid>", "encrypted_pii": "<b64>", "nonce": "<b64>" } }
     /// ```
     struct TestPiiCodec;
 
     impl PiiEventCodec for TestPiiCodec {
-        fn classify(&self, event: &SerializedEvent) -> Option<PiiFields> {
+        fn extract_partitions(
+            &self,
+            event: &mut SerializedEvent,
+        ) -> Result<Vec<SecretPartition>, PiiCodecError> {
             if event.event_type != "TestPii" {
-                return None;
+                return Ok(vec![]);
             }
-
-            let subject_id_str = event.payload["TestPii"]["subject_id"].as_str()?.to_string();
-            let subject_id = Uuid::parse_str(&subject_id_str).ok()?;
-            let plaintext_pii = serde_json::json!({
-                "secret": event.payload["TestPii"]["secret"].clone(),
-            });
-
-            Some(PiiFields {
+            let subject_id_str = match event.payload["TestPii"]["subject_id"].as_str() {
+                Some(s) => s.to_string(),
+                None => return Ok(vec![]),
+            };
+            let Ok(subject_id) = Uuid::parse_str(&subject_id_str) else {
+                return Ok(vec![]);
+            };
+            let secret = event.payload["TestPii"]["secret"].clone();
+            if secret.is_null() {
+                return Ok(vec![]);
+            }
+            // Clear PII from payload.
+            if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                obj.remove("secret");
+            }
+            let pii = serde_json::json!({ "secret": secret });
+            Ok(vec![SecretPartition {
                 subject_id,
-                plaintext_pii,
-                build_encrypted_payload: Box::new(
-                    move |EncryptedPiiSentinel {
-                              ciphertext_b64,
-                              nonce_b64,
-                          }| {
-                        serde_json::json!({
-                            "TestPii": {
-                                "subject_id":    subject_id_str,
-                                "encrypted_pii": ciphertext_b64,
-                                "nonce":         nonce_b64,
-                            }
-                        })
-                    },
-                ),
-            })
+                label: "default".to_string(),
+                payload: serde_json::to_vec(&pii)?,
+            }])
         }
 
-        fn extract_encrypted(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
+        fn reconstruct(
+            &self,
+            event: &mut SerializedEvent,
+            partitions: Vec<DecryptedPartition>,
+        ) -> Result<(), PiiCodecError> {
+            if event.event_type != "TestPii" {
+                return Ok(());
+            }
+            for part in partitions {
+                if part.label == "default" {
+                    let pii: Value = serde_json::from_slice(&part.payload)?;
+                    if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                        // Strip legacy sentinel fields (no-op for new-format events).
+                        obj.remove("encrypted_pii");
+                        obj.remove("nonce");
+                        obj.insert("secret".to_string(), pii["secret"].clone());
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn redact_partitions(
+            &self,
+            event: &mut SerializedEvent,
+            labels: &[String],
+        ) -> Result<(), PiiCodecError> {
+            if event.event_type != "TestPii" {
+                return Ok(());
+            }
+            if labels.iter().any(|l| l == "default") {
+                if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                    // Strip legacy sentinel fields (no-op for new-format events).
+                    obj.remove("encrypted_pii");
+                    obj.remove("nonce");
+                    obj.insert(
+                        "secret".to_string(),
+                        Value::String("[redacted]".to_string()),
+                    );
+                }
+            }
+            Ok(())
+        }
+
+        /// Legacy read: detect old `encrypted_pii` sentinel shape.
+        fn extract_encrypted_legacy(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
             if event.event_type != "TestPii" {
                 return None;
             }
-            // No sentinel → legacy plaintext event, pass through.
+            // No legacy sentinel → not a legacy event.
             event.payload["TestPii"].get("encrypted_pii")?;
-
             let subject_id =
                 Uuid::parse_str(event.payload["TestPii"]["subject_id"].as_str()?).ok()?;
             let ciphertext = BASE64
@@ -935,39 +1191,11 @@ mod tests {
             let nonce = BASE64
                 .decode(event.payload["TestPii"]["nonce"].as_str()?)
                 .ok()?;
-
             Some(EncryptedPiiExtract {
                 subject_id,
                 ciphertext,
                 nonce,
             })
-        }
-
-        fn reconstruct(
-            &self,
-            event: &SerializedEvent,
-            plaintext_pii: &Value,
-        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-            let subject_id = event.payload["TestPii"]["subject_id"].clone();
-            Ok(serde_json::json!({
-                "TestPii": {
-                    "subject_id": subject_id,
-                    "secret":     plaintext_pii["secret"].clone(),
-                }
-            }))
-        }
-
-        fn redact(
-            &self,
-            event: &SerializedEvent,
-        ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-            let subject_id = event.payload["TestPii"]["subject_id"].clone();
-            Ok(serde_json::json!({
-                "TestPii": {
-                    "subject_id": subject_id,
-                    "secret":     "[redacted]",
-                }
-            }))
         }
     }
 
@@ -1082,20 +1310,22 @@ mod tests {
 
         let inner = &raw[0].payload["TestPii"];
         assert!(
-            inner.get("encrypted_pii").is_some(),
-            "persisted payload must contain encrypted_pii sentinel"
+            inner.get("encrypted_partitions").is_some(),
+            "persisted payload must contain encrypted_partitions array"
         );
         assert!(
-            inner.get("nonce").is_some(),
-            "persisted payload must contain nonce sentinel"
+            inner.get("subjects").is_some(),
+            "persisted payload must contain subjects array"
         );
         assert!(
             inner.get("secret").is_none(),
             "plaintext secret must not appear in the persisted payload"
         );
-        // subject_id is kept in plaintext for DEK lookup on the read path.
+        let partitions = inner["encrypted_partitions"].as_array().unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0]["label"].as_str().unwrap(), "default");
         assert_eq!(
-            inner["subject_id"].as_str().unwrap(),
+            partitions[0]["subject_id"].as_str().unwrap(),
             subject_id.to_string()
         );
     }
@@ -1113,8 +1343,12 @@ mod tests {
             .unwrap();
 
         let raw = repo.inner.all_events();
-        let ct1 = raw[0].payload["TestPii"]["encrypted_pii"].as_str().unwrap();
-        let ct2 = raw[1].payload["TestPii"]["encrypted_pii"].as_str().unwrap();
+        let ct1 = raw[0].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"]
+            .as_str()
+            .unwrap();
+        let ct2 = raw[1].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"]
+            .as_str()
+            .unwrap();
         assert_ne!(
             ct1, ct2,
             "distinct encryptions must produce distinct ciphertexts"
@@ -1369,13 +1603,10 @@ mod tests {
         }
     }
 
-    // ── AAD binding ───────────────────────────────────────────────────────────
+    // ── AAD binding ──────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn test_aad_binds_ciphertext_to_event_position() {
-        // Directly tamper with the stored event's aggregate_id / sequence to
-        // verify that decryption fails (wrong AAD).  This proves the repository
-        // actually passes the event position as additional authenticated data.
         let repo = make_repo();
         let aggregate_id = "agg-aad-bind";
         let subject_id = Uuid::new_v4();
@@ -1394,6 +1625,156 @@ mod tests {
         assert!(
             result.is_err(),
             "decryption must fail when the event position has been tampered with"
+        );
+    }
+
+    // ── Legacy back-compat ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_legacy_shape_decrypts_via_back_compat() {
+        // Simulate an event written by the pre-partition codebase: the ciphertext
+        // is stored inline as `encrypted_pii`/`nonce` with AAD
+        // "aggregate_id:sequence". Verify it decrypts cleanly through the new
+        // repository without any on-disk migration.
+        let (repo, key_store) = make_repo_with_parts();
+        let aggregate_id = "agg-legacy-compat";
+        let subject_id = Uuid::new_v4();
+
+        // Manually create a DEK and encrypt with the old AAD scheme.
+        let dek = key_store.get_or_create_key(&subject_id).await.unwrap();
+        let cipher = crate::cipher::FieldCipher::new();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({ "secret": "legacy_hunter2" })).unwrap();
+        let old_aad = format!("{aggregate_id}:1").into_bytes();
+        let encrypted = cipher.encrypt(&dek, &plaintext, &old_aad);
+
+        let legacy_payload = serde_json::json!({
+            "TestPii": {
+                "subject_id":    subject_id.to_string(),
+                "encrypted_pii": BASE64.encode(&encrypted.ciphertext),
+                "nonce":         BASE64.encode(&encrypted.nonce),
+            }
+        });
+        repo.inner
+            .persist::<TestAggregate>(
+                &[SerializedEvent::new(
+                    aggregate_id.to_string(),
+                    1,
+                    "Test".to_string(),
+                    "TestPii".to_string(),
+                    "1.0".to_string(),
+                    legacy_payload,
+                    serde_json::json!({}),
+                )],
+                None,
+            )
+            .await
+            .unwrap();
+
+        let events = repo
+            .get_events::<TestAggregate>(aggregate_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            events[0].payload["TestPii"]["secret"].as_str().unwrap(),
+            "legacy_hunter2",
+            "legacy-shape event must decrypt to original plaintext"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_shape_redacts_when_key_deleted() {
+        let (repo, key_store) = make_repo_with_parts();
+        let aggregate_id = "agg-legacy-redact";
+        let subject_id = Uuid::new_v4();
+
+        let dek = key_store.get_or_create_key(&subject_id).await.unwrap();
+        let cipher = crate::cipher::FieldCipher::new();
+        let plaintext =
+            serde_json::to_vec(&serde_json::json!({ "secret": "will_be_shredded" })).unwrap();
+        let old_aad = format!("{aggregate_id}:1").into_bytes();
+        let encrypted = cipher.encrypt(&dek, &plaintext, &old_aad);
+
+        let legacy_payload = serde_json::json!({
+            "TestPii": {
+                "subject_id":    subject_id.to_string(),
+                "encrypted_pii": BASE64.encode(&encrypted.ciphertext),
+                "nonce":         BASE64.encode(&encrypted.nonce),
+            }
+        });
+        repo.inner
+            .persist::<TestAggregate>(
+                &[SerializedEvent::new(
+                    aggregate_id.to_string(),
+                    1,
+                    "Test".to_string(),
+                    "TestPii".to_string(),
+                    "1.0".to_string(),
+                    legacy_payload,
+                    serde_json::json!({}),
+                )],
+                None,
+            )
+            .await
+            .unwrap();
+
+        key_store.delete_key(&subject_id).await.unwrap();
+
+        let events = repo
+            .get_events::<TestAggregate>(aggregate_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            events[0].payload["TestPii"]["secret"].as_str().unwrap(),
+            "[redacted]",
+            "legacy-shape event must redact when DEK is deleted"
+        );
+    }
+
+    // ── Partition AAD swap detection ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_partition_aad_swap_detection() {
+        // Write two events for different subjects using the same aggregate.
+        // Then swap their partition ciphertexts in the inner store.
+        // Each partition's AAD includes its own subject_id + label, so the
+        // swapped ciphertexts fail GCM authentication.
+        let repo = make_repo();
+        let aggregate_id = "agg-aad-swap";
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+
+        repo.persist::<TestAggregate>(
+            &[
+                pii_event(aggregate_id, 1, subject_a),
+                pii_event(aggregate_id, 2, subject_b),
+            ],
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Swap the ciphertext bytes between the two events' partitions.
+        {
+            let mut events = repo.inner.events.lock().expect("mutex poisoned");
+            let ct0 = events[0].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let ct1 = events[1].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            events[0].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"] =
+                serde_json::json!(ct1);
+            events[1].payload["TestPii"]["encrypted_partitions"][0]["ciphertext"] =
+                serde_json::json!(ct0);
+        }
+
+        let result = repo.get_events::<TestAggregate>(aggregate_id).await;
+        assert!(
+            result.is_err(),
+            "decryption must fail when partition ciphertexts are swapped between events"
         );
     }
 }

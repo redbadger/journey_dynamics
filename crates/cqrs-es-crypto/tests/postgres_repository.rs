@@ -15,9 +15,9 @@ use cqrs_es::{
     persist::{PersistedEventRepository, PersistenceError, SerializedEvent},
 };
 use cqrs_es_crypto::{
-    CryptoShreddingEventRepository, EncryptedPiiExtract, EncryptedPiiSentinel, FieldCipher,
-    InMemoryEventRepository, KekProvider, KeyStore, PersistHook, PiiEventCodec, PiiFields,
-    PostgresKeyStore, StaticKekProvider,
+    CryptoShreddingEventRepository, DecryptedPartition, EncryptedPiiExtract, FieldCipher,
+    InMemoryEventRepository, KekProvider, KeyStore, PersistHook, PiiCodecError, PiiEventCodec,
+    PostgresKeyStore, SecretPartition, StaticKekProvider,
 };
 use uuid::Uuid;
 
@@ -71,44 +71,82 @@ impl cqrs_es::Aggregate for TestAggregate {
 struct TestPiiCodec;
 
 impl PiiEventCodec for TestPiiCodec {
-    fn classify(&self, event: &SerializedEvent) -> Option<PiiFields> {
+    fn extract_partitions(
+        &self,
+        event: &mut SerializedEvent,
+    ) -> Result<Vec<SecretPartition>, PiiCodecError> {
         if event.event_type != "TestPii" {
-            return None;
+            return Ok(vec![]);
         }
-
-        let subject_id_str = event.payload["TestPii"]["subject_id"].as_str()?.to_string();
-        let subject_id = Uuid::parse_str(&subject_id_str).ok()?;
-        let plaintext_pii = serde_json::json!({
-            "secret": event.payload["TestPii"]["secret"].clone(),
-        });
-
-        Some(PiiFields {
+        let subject_id_str = match event.payload["TestPii"]["subject_id"].as_str() {
+            Some(s) => s.to_string(),
+            None => return Ok(vec![]),
+        };
+        let Ok(subject_id) = Uuid::parse_str(&subject_id_str) else {
+            return Ok(vec![]);
+        };
+        let secret = event.payload["TestPii"]["secret"].clone();
+        if secret.is_null() {
+            return Ok(vec![]);
+        }
+        if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+            obj.remove("secret");
+        }
+        let pii = serde_json::json!({ "secret": secret });
+        Ok(vec![SecretPartition {
             subject_id,
-            plaintext_pii,
-            build_encrypted_payload: Box::new(
-                move |EncryptedPiiSentinel {
-                          ciphertext_b64,
-                          nonce_b64,
-                      }| {
-                    serde_json::json!({
-                        "TestPii": {
-                            "subject_id":    subject_id_str,
-                            "encrypted_pii": ciphertext_b64,
-                            "nonce":         nonce_b64,
-                        }
-                    })
-                },
-            ),
-        })
+            label: "default".to_string(),
+            payload: serde_json::to_vec(&pii)?,
+        }])
     }
 
-    fn extract_encrypted(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
+    fn reconstruct(
+        &self,
+        event: &mut SerializedEvent,
+        partitions: Vec<DecryptedPartition>,
+    ) -> Result<(), PiiCodecError> {
+        if event.event_type != "TestPii" {
+            return Ok(());
+        }
+        for part in partitions {
+            if part.label == "default" {
+                let pii: serde_json::Value = serde_json::from_slice(&part.payload)?;
+                if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                    obj.remove("encrypted_pii");
+                    obj.remove("nonce");
+                    obj.insert("secret".to_string(), pii["secret"].clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn redact_partitions(
+        &self,
+        event: &mut SerializedEvent,
+        labels: &[String],
+    ) -> Result<(), PiiCodecError> {
+        if event.event_type != "TestPii" {
+            return Ok(());
+        }
+        if labels.iter().any(|l| l == "default") {
+            if let Some(obj) = event.payload["TestPii"].as_object_mut() {
+                obj.remove("encrypted_pii");
+                obj.remove("nonce");
+                obj.insert(
+                    "secret".to_string(),
+                    serde_json::Value::String("[redacted]".to_string()),
+                );
+            }
+        }
+        Ok(())
+    }
+
+    fn extract_encrypted_legacy(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
         if event.event_type != "TestPii" {
             return None;
         }
-        // No sentinel → legacy plaintext event, pass through.
         event.payload["TestPii"].get("encrypted_pii")?;
-
         let subject_id = Uuid::parse_str(event.payload["TestPii"]["subject_id"].as_str()?).ok()?;
         let ciphertext = BASE64
             .decode(event.payload["TestPii"]["encrypted_pii"].as_str()?)
@@ -116,39 +154,11 @@ impl PiiEventCodec for TestPiiCodec {
         let nonce = BASE64
             .decode(event.payload["TestPii"]["nonce"].as_str()?)
             .ok()?;
-
         Some(EncryptedPiiExtract {
             subject_id,
             ciphertext,
             nonce,
         })
-    }
-
-    fn reconstruct(
-        &self,
-        event: &SerializedEvent,
-        plaintext_pii: &serde_json::Value,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        let subject_id = event.payload["TestPii"]["subject_id"].clone();
-        Ok(serde_json::json!({
-            "TestPii": {
-                "subject_id": subject_id,
-                "secret":     plaintext_pii["secret"].clone(),
-            }
-        }))
-    }
-
-    fn redact(
-        &self,
-        event: &SerializedEvent,
-    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        let subject_id = event.payload["TestPii"]["subject_id"].clone();
-        Ok(serde_json::json!({
-            "TestPii": {
-                "subject_id": subject_id,
-                "secret":     "[redacted]",
-            }
-        }))
     }
 }
 
@@ -331,7 +341,13 @@ async fn test_hook_receives_unencrypted_events() {
     );
     assert!(
         seen[0].payload["TestPii"].get("encrypted_pii").is_none(),
-        "hook must not see encrypted_pii sentinel"
+        "hook must not see old encrypted_pii sentinel"
+    );
+    assert!(
+        seen[0].payload["TestPii"]
+            .get("encrypted_partitions")
+            .is_none(),
+        "hook must not see encrypted_partitions (encrypt happens after hook is called)"
     );
 
     cleanup(&pool, &aggregate_id).await;

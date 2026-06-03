@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-05-27
+
+### Changed
+
+- **Breaking.** The generated `PiiEventCodec` implementation now emits the
+  partition-based methods introduced by `cqrs-es-crypto` 0.3.0:
+  `extract_partitions`, `reconstruct`, `redact_partitions`, and
+  `extract_encrypted_legacy`. The previous `classify`, `extract_encrypted`,
+  `reconstruct`, and `redact` methods are no longer generated.
+- The existing `#[pii(...)]` annotation syntax is unchanged — derive
+  invocations written for 0.2.x continue to compile without modification.
+- The macro now emits `extract_partitions` returning a single
+  `SecretPartition` with `label = "default"` (length 0 when
+  `subject_id` is absent), and a matching `reconstruct` that writes decoded
+  field(s) back by label. `extract_encrypted_legacy` handles the pre-0.3.0
+  on-disk shape transparently on the read path.
+
 ## [0.2.2] - 2026-05-24
 
 Companion bump to track `cqrs-es-crypto` 0.2.2. No changes to the
@@ -107,7 +124,8 @@ macro is unchanged.
 - Span-accurate `compile_error!` diagnostics for all invalid annotation combinations
   (missing `event_type`, unannotated fields, missing subject, missing secret, etc.).
 
-[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.2...HEAD
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.3.0...HEAD
+[0.3.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.2...cqrs-es-crypto-derive-v0.3.0
 [0.2.2]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.1...cqrs-es-crypto-derive-v0.2.2
 [0.2.1]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.2.0...cqrs-es-crypto-derive-v0.2.1
 [0.2.0]: https://github.com/redbadger/journey_dynamics/compare/cqrs-es-crypto-derive-v0.1.4...cqrs-es-crypto-derive-v0.2.0

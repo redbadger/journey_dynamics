@@ -28,7 +28,7 @@
 //!
 //! 1. Introduce a new KEK version alongside the current one.
 //! 2. Promote the new version to primary — new DEKs are wrapped under it immediately.
-//! 3. Re-wrap existing DEKs lazily on read and via the background [`RewrapWorker`].
+//! 3. Re-wrap existing DEKs lazily on read and via the background [`RewrapWorker`](crate::rewrap::RewrapWorker).
 //! 4. Once the database contains zero rows for the old `kek_id`, retire it at the vault.
 //!
 //! See `docs/KEK_ROTATION_DESIGN.md` for the full design.

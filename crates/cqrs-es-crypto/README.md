@@ -139,105 +139,119 @@ For cases where the derive macro does not fit — non-standard payload shapes,
 runtime-determined event types, or custom redaction logic — implement
 `PiiEventCodec` directly.
 
-The trait has four methods split across two paths:
+### The trait
+
+```rust
+pub trait PiiEventCodec: Send + Sync {
+    /// Identify partitions to encrypt. Empty vec = pure-plaintext event.
+    /// The codec also removes the PII fields from `event.payload` in the
+    /// same pass.
+    fn extract_partitions(&self, event: &mut SerializedEvent)
+        -> Result<Vec<SecretPartition>, PiiCodecError>;
+
+    /// Reattach decrypted partitions to the event payload by `label`.
+    fn reconstruct(&self, event: &mut SerializedEvent,
+        partitions: Vec<DecryptedPartition>) -> Result<(), PiiCodecError>;
+
+    /// Write codec-defined sentinel values for partitions whose DEK was deleted.
+    fn redact_partitions(&self, event: &mut SerializedEvent,
+        labels: &[String]) -> Result<(), PiiCodecError>;
+
+    /// Detect the pre-partition on-disk shape (default: None).
+    /// Override this to read events written before this version of the crate.
+    fn extract_encrypted_legacy(&self, _event: &SerializedEvent)
+        -> Option<EncryptedPiiExtract> { None }
+}
+```
 
 **Write path:**
-- `classify(&self, event) -> Option<PiiFields>` — inspect an unencrypted event
-  and return encryption instructions, or `None` to pass through unchanged.
+- `extract_partitions(event)` — inspect an unencrypted event, extract cleartext
+  bytes for each subject's PII slice AND remove those fields from the payload,
+  then return one `SecretPartition` per subject. An empty `Vec` means the event
+  is stored verbatim.
 
-**Read path:**
-- `extract_encrypted(&self, event) -> Option<EncryptedPiiExtract>` — detect a
-  stored encrypted event and extract its subject ID and ciphertext.
-- `reconstruct(&self, event, plaintext_pii) -> Result<Value, _>` — rebuild the
-  event payload from decrypted PII.
-- `redact(&self, event) -> Result<Value, _>` — rebuild the event payload with
-  redacted placeholders (called when the DEK has been deleted).
+**Read path (new shape):**
+- `reconstruct(event, partitions)` — given the decrypted partitions, write each
+  one's cleartext back into the event under whatever fields the codec manages.
+- `redact_partitions(event, labels)` — for each label whose DEK was deleted,
+  write the codec-defined sentinel values (e.g. `"[redacted]"`, `null`, `{}`).
+
+**Read path (legacy shape):**
+- `extract_encrypted_legacy(event)` — default returns `None`; override to
+  detect the pre-partition single-ciphertext shape that was written by an older
+  version of this crate. The repository decrypts and passes the result to
+  `reconstruct` (or `redact_partitions`) as a single partition with
+  `label = "default"`.
 
 ```rust
 use cqrs_es::persist::SerializedEvent;
 use cqrs_es_crypto::{
-    EncryptedPiiExtract, EncryptedPiiSentinel, PiiEventCodec, PiiFields,
+    DecryptedPartition, PiiCodecError, PiiEventCodec, SecretPartition,
 };
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde_json::Value;
 use uuid::Uuid;
 
 pub struct MyCodec;
 
 impl PiiEventCodec for MyCodec {
-    fn classify(&self, event: &SerializedEvent) -> Option<PiiFields> {
-        if event.event_type != "UserRegistered" { return None; }
-
-        let subject_id = Uuid::parse_str(
-            event.payload["UserRegistered"]["user_id"].as_str()?
-        ).ok()?;
-        let user_id_str = subject_id.to_string();
-
-        Some(PiiFields {
+    fn extract_partitions(
+        &self,
+        event: &mut SerializedEvent,
+    ) -> Result<Vec<SecretPartition>, PiiCodecError> {
+        if event.event_type != "UserRegistered" { return Ok(vec![]); }
+        let Some(user_id_str) = event.payload["UserRegistered"]["user_id"].as_str() else {
+            return Ok(vec![]);
+        };
+        let Ok(subject_id) = Uuid::parse_str(user_id_str) else {
+            return Ok(vec![]);
+        };
+        let pii = serde_json::json!({
+            "email": event.payload["UserRegistered"]["email"].clone(),
+            "name":  event.payload["UserRegistered"]["name"].clone(),
+        });
+        // Clear PII from the payload before the repository persists it.
+        if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
+            obj.remove("email");
+            obj.remove("name");
+        }
+        Ok(vec![SecretPartition {
             subject_id,
-            plaintext_pii: serde_json::json!({
-                "email": event.payload["UserRegistered"]["email"],
-                "name":  event.payload["UserRegistered"]["name"],
-            }),
-            build_encrypted_payload: Box::new(
-                move |EncryptedPiiSentinel { ciphertext_b64, nonce_b64 }| {
-                    serde_json::json!({
-                        "UserRegistered": {
-                            "user_id":       user_id_str,
-                            "encrypted_pii": ciphertext_b64,
-                            "nonce":         nonce_b64,
-                        }
-                    })
-                }
-            ),
-        })
-    }
-
-    fn extract_encrypted(&self, event: &SerializedEvent) -> Option<EncryptedPiiExtract> {
-        if event.event_type != "UserRegistered" { return None; }
-        event.payload["UserRegistered"].get("encrypted_pii")?; // sentinel check
-
-        let subject_id = Uuid::parse_str(
-            event.payload["UserRegistered"]["user_id"].as_str()?
-        ).ok()?;
-        Some(EncryptedPiiExtract {
-            subject_id,
-            ciphertext: BASE64.decode(
-                event.payload["UserRegistered"]["encrypted_pii"].as_str()?
-            ).ok()?,
-            nonce: BASE64.decode(
-                event.payload["UserRegistered"]["nonce"].as_str()?
-            ).ok()?,
-        })
+            label: "default".to_string(),
+            payload: serde_json::to_vec(&pii)?,
+        }])
     }
 
     fn reconstruct(
         &self,
-        event: &SerializedEvent,
-        plaintext_pii: &Value,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let user_id = event.payload["UserRegistered"]["user_id"].clone();
-        Ok(serde_json::json!({
-            "UserRegistered": {
-                "user_id": user_id,
-                "email":   plaintext_pii["email"],
-                "name":    plaintext_pii["name"],
+        event: &mut SerializedEvent,
+        partitions: Vec<DecryptedPartition>,
+    ) -> Result<(), PiiCodecError> {
+        if event.event_type != "UserRegistered" { return Ok(()); }
+        for part in partitions {
+            if part.label == "default" {
+                let pii: Value = serde_json::from_slice(&part.payload)?;
+                if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
+                    obj.insert("email".into(), pii["email"].clone());
+                    obj.insert("name".into(),  pii["name"].clone());
+                }
             }
-        }))
+        }
+        Ok(())
     }
 
-    fn redact(
+    fn redact_partitions(
         &self,
-        event: &SerializedEvent,
-    ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-        let user_id = event.payload["UserRegistered"]["user_id"].clone();
-        Ok(serde_json::json!({
-            "UserRegistered": {
-                "user_id": user_id,
-                "email":   "[redacted]",
-                "name":    "[redacted]",
+        event: &mut SerializedEvent,
+        labels: &[String],
+    ) -> Result<(), PiiCodecError> {
+        if event.event_type != "UserRegistered" { return Ok(()); }
+        if labels.iter().any(|l| l == "default") {
+            if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
+                obj.insert("email".into(), Value::String("[redacted]".into()));
+                obj.insert("name".into(),  Value::String("[redacted]".into()));
             }
-        }))
+        }
+        Ok(())
     }
 }
 ```
@@ -260,20 +274,25 @@ KEK (Key Encryption Key)       — one per deployment, loaded from the environme
   wrapped in the `subject_encryption_keys` table. Deleting this row
   permanently destroys the ability to recover any PII for that subject —
   **this is crypto-shredding**.
-- **AAD** — Every encryption binds the ciphertext to its event position using
-  `"<aggregate_id>:<sequence>"` as additional authenticated data. This prevents
-  a valid ciphertext from being transplanted into a different event.
+- **AAD** — Every encrypted partition binds its ciphertext to its event position
+  AND its subject and label using
+  `"<aggregate_id>:<sequence>:<subject_id>:<label>"` as additional authenticated
+  data. This prevents a partition from being transplanted across events, subjects,
+  or labels within an event.
 
 ### Write path
 
 ```
 persist(events)
   └── for each event
-        ├── PiiEventCodec::classify → None            → store verbatim
-        └── PiiEventCodec::classify → Some(PiiFields)
-              ├── KeyStore::get_or_create_key(subject_id)
-              ├── AES-256-GCM encrypt(plaintext_pii, aad)
-              └── PiiFields::build_encrypted_payload(sentinel) → store
+        ├── PiiEventCodec::extract_partitions → []          → store verbatim
+        └── PiiEventCodec::extract_partitions → [p₀, p₁ …]
+              └── for each partition pᵢ
+                    ├── KeyStore::get_or_create_key(pᵢ.subject_id)
+                    ├── AES-256-GCM encrypt(pᵢ.payload,
+                    │                       aad = agg||seq||sub||label)
+                    └── append EncryptedPartition to event.encrypted_partitions
+              └── repository adds event.subjects = [p₀.subject_id, …]
 ```
 
 ### Read path
@@ -281,17 +300,59 @@ persist(events)
 ```
 get_events / get_last_events / stream_events
   └── for each stored event
-        ├── PiiEventCodec::extract_encrypted → None          → return verbatim
-        └── PiiEventCodec::extract_encrypted → Some(extract)
-              ├── KeyStore::get_key(subject_id)
-              │     ├── Some(dek) → AES-256-GCM decrypt → PiiEventCodec::reconstruct
-              │     └── None      → PiiEventCodec::redact  (subject forgotten)
+        ├── no encrypted_partitions → check extract_encrypted_legacy
+        │     ├── None  → return verbatim (plain event)
+        │     └── Some  → decrypt with legacy AAD → reconstruct / redact_partitions
+        └── encrypted_partitions: [e₀, e₁ …]
+              ├── for each eᵢ
+              │     ├── KeyStore::get_key(eᵢ.subject_id)
+              │     │     ├── Some(dek) → AES-256-GCM decrypt → DecryptedPartition
+              │     │     └── None      → add eᵢ.label to redacted list
+              ├── PiiEventCodec::reconstruct(event, decrypted_partitions)
+              ├── PiiEventCodec::redact_partitions(event, redacted_labels)
               └── return updated event
 ```
 
-Legacy events written before the crypto layer was introduced (no sentinel fields
-in the payload) are returned verbatim — the read path detects the absence of
-sentinel fields via `extract_encrypted` returning `None`.
+---
+
+## Multi-subject events
+
+A single event may carry PII belonging to more than one data subject — for
+example, a "set passport details for passengers A and B" form submission. To
+support this without losing per-subject crypto-shredding, every encrypted event
+is stored as a **list of subject-scoped partitions**.
+
+```
+event payload
+ ├── plaintext fields …
+ ├── subjects:             ["<uuid-A>", "<uuid-B>"]   (plaintext)
+ └── encrypted_partitions: [
+       { subject_id: "<uuid-A>", label: "passenger_0", nonce, ciphertext },
+       { subject_id: "<uuid-B>", label: "passenger_1", nonce, ciphertext },
+     ]
+```
+
+Each partition is encrypted independently. Shredding subject A's DEK redacts
+A's partition only; B's partition decrypts normally in the same event.
+
+Most events carry a single partition (`label = "default"`) or none — this is
+what `#[derive(PiiCodec)]` emits for single-subject variants. Multi-subject
+events are written by hand-written codecs that return multiple `SecretPartition`
+entries from `extract_partitions`.
+
+### Per-partition AAD
+
+Each partition's AAD is `aggregate_id || sequence || subject_id || label`,
+making partitions non-fungible across events, subjects within an event, and
+labels within an event.
+
+### Backward compatibility
+
+Events written before this version carry a single inline ciphertext field
+(e.g. `encrypted_pii`) with legacy AAD `"aggregate_id:sequence"`. The read path
+detects this shape via `extract_encrypted_legacy` and translates it to a
+one-partition vector with `label = "default"` before calling `reconstruct`.
+No on-disk migration is required.
 
 ---
 
@@ -383,9 +444,14 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
   bytes from memory when dropped. `KeyMaterial` (DEK) is also zeroized on drop.
 - Each `FieldCipher::encrypt` call generates a fresh random 96-bit nonce; nonce
   reuse under normal operation is not possible.
-- The AAD scheme (`"<aggregate_id>:<sequence>"`) ensures a ciphertext from one
-  event position cannot be injected into a different position and pass
-  authentication.
+- Per-partition AAD (`"<aggregate_id>:<sequence>:<subject_id>:<label>"`) makes
+  each partition non-fungible across events, subjects within an event, and labels
+  within an event. Legacy AAD (`"<aggregate_id>:<sequence>"`) is accepted on read
+  for back-compat but never produced on write.
+- Partitions are encrypted independently; one subject's compromised DEK does not
+  expose any other partition in the same event.
+- Crypto-shredding remains per-subject: deleting a DEK redacts every partition
+  encrypted under it, leaving other subjects' partitions in the same event intact.
 - `PostgresKeyStore::get_or_create_key` uses `INSERT … ON CONFLICT DO NOTHING`
   to handle concurrent DEK-creation races safely.
 - `PostgresKeyStore::rewrap_key` uses a compare-and-swap `UPDATE … WHERE kek_id = $old`

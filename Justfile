@@ -43,8 +43,12 @@ test-hurl:
         tests/full-flight-booking_with_shredding.hurl \
         tests/full-flight-booking_with_shredding_by_email.hurl
 
+# Check documentation compiles cleanly (no-deps, warnings as errors)
+docs:
+    RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
+
 # Lint, build, test, and run hurl tests (needs a running server)
-ci: lint build test test-hurl
+ci: lint docs build test test-hurl
 
 # Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io
 publish:

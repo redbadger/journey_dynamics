@@ -1,6 +1,6 @@
 //! Proc-macro crate for `#[derive(PiiCodec)]`.
 //!
-//! Generates a `{Name}PiiCodec` struct and a [`PiiEventCodec`] implementation
+//! Generates a `{Name}PiiCodec` struct and a `PiiEventCodec` implementation
 //! from an annotated event enum.
 //!
 //! # Usage
@@ -72,11 +72,15 @@ use crate::model::{PiiVariantModel, RedactValue};
 /// For a field named `person_ref`:
 /// - `name_str` → `"person_ref"` (emitted as a token wherever the JSON key is needed)
 /// - `binding`  → `person_ref_str` (the local `let` variable in the generated arm)
+// Retained for the existing arm-level unit tests (`classify_arm_*`,
+// `reconstruct_arm_*`, `redact_arm_*`); not called from `pii_codec` itself.
+#[allow(dead_code)]
 struct PlaintextFieldData {
     name_str: LitStr,
     binding: Ident,
 }
 
+#[allow(dead_code)]
 fn plaintext_field_data(variant: &PiiVariantModel, span: Span) -> Vec<PlaintextFieldData> {
     variant
         .plaintext_fields()
@@ -136,7 +140,12 @@ fn secret_field_data(variant: &PiiVariantModel, span: Span) -> Vec<SecretFieldDa
 
 // ── Elements ──────────────────────────────────────────────────────────────────
 
-/// Generates one match arm for the `classify` method.
+/// Generates one match arm for the legacy `classify` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `classify_arm_*` unit tests exercise its output directly and those tests
+/// remain valuable documentation of the old `PiiFields` / `build_encrypted_payload`
+/// contract.
 ///
 /// For a variant with **multiple** secret fields the PII blob is a JSON object
 /// keyed by field name.  For a variant with exactly **one** secret field the
@@ -224,7 +233,10 @@ fn classify_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `extract_encrypted` method.
+/// Generates one match arm for the legacy `extract_encrypted` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `extract_arm_*` unit tests exercise its output directly.
 ///
 /// Returns `None` (via `?`) if:
 /// - the sentinel field is absent — this is a legacy plaintext event and must
@@ -265,11 +277,15 @@ fn extract_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `reconstruct` method.
+/// Generates one match arm for the legacy `reconstruct` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `reconstruct_arm_*` unit tests exercise its output directly.
 ///
 /// Reads plaintext fields (including the subject field) from the stored
 /// encrypted-form event, then merges them with the decrypted secret fields
-/// from `plaintext_pii` to produce a fully-reconstructed event payload.
+/// from the old `plaintext_pii` parameter to produce a fully-reconstructed
+/// event payload.
 ///
 /// - Multi-secret variants: each secret field is accessed as
 ///   `plaintext_pii["field_name"]`.
@@ -323,7 +339,10 @@ fn reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-/// Generates one match arm for the `redact` method.
+/// Generates one match arm for the legacy `redact` method (pre-A5 API).
+///
+/// **Not used by the current code-gen.** Retained here because the
+/// `redact_arm_*` unit tests exercise its output directly.
 ///
 /// Reads plaintext fields (including the subject field) from the stored
 /// encrypted-form event, then emits static redaction placeholder values for
@@ -365,10 +384,229 @@ fn redact_arm(variant: PiiVariantModel) -> zyn::TokenStream {
     }
 }
 
-// ── Derive entry point ────────────────────────────────────────────────────────
+// ── New arm generators (partition-based trait) ─────────────────────────────────
 
-/// Derives a [`PiiEventCodec`](::cqrs_es_crypto::PiiEventCodec) implementation
-/// from an annotated event enum.
+/// Generates one match arm for `extract_partitions`.
+///
+/// Reads each `#[pii(secret)]` field from the payload, bundles them into a
+/// cleartext bytes payload, removes them from the event, and returns a single
+/// [`SecretPartition`](::cqrs_es_crypto::SecretPartition) with
+/// `label = "default"`.
+///
+/// Returns `Ok(vec![])` when `subject_id` is absent, so events without a
+/// known subject are stored verbatim.
+#[zyn::element]
+fn extract_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
+    let span = Span::call_site();
+    let event_type = LitStr::new(&variant.event_type, span);
+    let subject_str = LitStr::new(&variant.subject_field().ident.to_string(), span);
+
+    let secret_strs: Vec<LitStr> = variant
+        .secret_fields()
+        .map(|f| LitStr::new(&f.ident.to_string(), span))
+        .collect();
+
+    let is_single = variant.is_single_secret();
+    let single_secret_str = is_single.then(|| {
+        LitStr::new(
+            &variant.secret_fields().next().unwrap().ident.to_string(),
+            span,
+        )
+    });
+
+    zyn::zyn! {
+        {{ event_type }} => {
+            let __key = {{ event_type }};
+            let __subject_id_str = match event.payload[__key][{{ subject_str }}].as_str() {
+                ::core::option::Option::Some(s) => s.to_string(),
+                ::core::option::Option::None => {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+            };
+            let __subject_id = match ::uuid::Uuid::parse_str(&__subject_id_str) {
+                ::core::result::Result::Ok(id) => id,
+                ::core::result::Result::Err(_) => {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+            };
+            @if (is_single) {
+                let __pii = event.payload[__key][{{ single_secret_str.as_ref().unwrap() }}].clone();
+                if __pii.is_null() {
+                    return ::core::result::Result::Ok(::std::vec::Vec::new());
+                }
+                if let ::core::option::Option::Some(__obj) = event.payload[__key].as_object_mut() {
+                    __obj.remove({{ single_secret_str.as_ref().unwrap() }});
+                }
+            } @else {
+                let __pii = {
+                    let __inner = match event.payload[__key].as_object() {
+                        ::core::option::Option::Some(o) => o,
+                        ::core::option::Option::None => {
+                            return ::core::result::Result::Ok(::std::vec::Vec::new());
+                        }
+                    };
+                    ::serde_json::json!({
+                        @for (s in secret_strs.iter()) {
+                            {{ s }}: __inner.get({{ s }}).cloned().unwrap_or(::serde_json::Value::Null),
+                        }
+                    })
+                };
+                if let ::core::option::Option::Some(__obj) = event.payload[__key].as_object_mut() {
+                    @for (s in secret_strs.iter()) {
+                        __obj.remove({{ s }});
+                    }
+                }
+            }
+            let __payload = ::serde_json::to_vec(&__pii)
+                .map_err(::cqrs_es_crypto::PiiCodecError::Json)?;
+            ::core::result::Result::Ok(::std::vec![
+                ::cqrs_es_crypto::SecretPartition {
+                    subject_id: __subject_id,
+                    label: "default".to_string(),
+                    payload: __payload,
+                }
+            ])
+        }
+    }
+}
+
+/// Generates one match arm for the new `reconstruct` method.
+///
+/// Finds the partition whose `label == "default"`, deserialises its
+/// `payload` bytes, and writes the decoded field(s) back into the event's
+/// inner JSON object in-place.
+#[zyn::element]
+fn new_reconstruct_arm(variant: PiiVariantModel) -> zyn::TokenStream {
+    let span = Span::call_site();
+    let event_type = LitStr::new(&variant.event_type, span);
+    // Legacy sentinel field name and the always-present "nonce" field.
+    // Removing these is a no-op for new-format events (the fields were never
+    // written), and cleans them up for events read from the legacy on-disk shape.
+    let sentinel = LitStr::new(&variant.sentinel, span);
+
+    let secret_strs: Vec<LitStr> = variant
+        .secret_fields()
+        .map(|f| LitStr::new(&f.ident.to_string(), span))
+        .collect();
+
+    let is_single = variant.is_single_secret();
+    let single_secret_str = is_single.then(|| {
+        LitStr::new(
+            &variant.secret_fields().next().unwrap().ident.to_string(),
+            span,
+        )
+    });
+
+    zyn::zyn! {
+        {{ event_type }} => {
+            let __key = {{ event_type }};
+            for __part in partitions {
+                if __part.label == "default" {
+                    let __pii: ::serde_json::Value =
+                        ::serde_json::from_slice(&__part.payload)
+                            .map_err(::cqrs_es_crypto::PiiCodecError::Json)?;
+                    if let ::core::option::Option::Some(__obj) =
+                        event.payload[__key].as_object_mut()
+                    {
+                        // Strip legacy sentinel fields (no-op for new-format events).
+                        __obj.remove({{ sentinel }});
+                        __obj.remove("nonce");
+                        @if (is_single) {
+                            __obj.insert(
+                                {{ single_secret_str.as_ref().unwrap() }}.to_string(),
+                                __pii.clone(),
+                            );
+                        } @else {
+                            @for (s in secret_strs.iter()) {
+                                __obj.insert({{ s }}.to_string(), __pii[{{ s }}].clone());
+                            }
+                        }
+                    }
+                }
+            }
+            ::core::result::Result::Ok(())
+        }
+    }
+}
+
+/// Generates one match arm for `redact_partitions`.
+///
+/// If `"default"` is present in `labels`, writes codec-defined sentinel
+/// values for each `#[pii(secret)]` field into the event payload in-place.
+#[zyn::element]
+fn redact_partitions_arm(variant: PiiVariantModel) -> zyn::TokenStream {
+    let span = Span::call_site();
+    let event_type = LitStr::new(&variant.event_type, span);
+    let sentinel = LitStr::new(&variant.sentinel, span);
+    let secrets = secret_field_data(variant, span);
+
+    zyn::zyn! {
+        {{ event_type }} => {
+            let __key = {{ event_type }};
+            if labels.iter().any(|__l| __l == "default") {
+                if let ::core::option::Option::Some(__obj) =
+                    event.payload[__key].as_object_mut()
+                {
+                    // Strip legacy sentinel fields (no-op for new-format events).
+                    __obj.remove({{ sentinel }});
+                    __obj.remove("nonce");
+                    @for (sf in secrets.iter()) {
+                        __obj.insert(
+                            {{ sf.name_str }}.to_string(),
+                            ::serde_json::json!({{ sf.redact_ts }}),
+                        );
+                    }
+                }
+            }
+            ::core::result::Result::Ok(())
+        }
+    }
+}
+
+/// Generates one match arm for `extract_encrypted_legacy`.
+///
+/// Detects the pre-partition on-disk shape: a sentinel field (e.g.
+/// `encrypted_pii`) and a `nonce` field both present in the inner object.
+/// Returns `None` for events that do not carry the legacy shape.
+/// (This is identical in logic to the old `extract_arm`.)
+#[zyn::element]
+fn extract_encrypted_legacy_arm(variant: PiiVariantModel) -> zyn::TokenStream {
+    // Replicates the old extract_arm logic (not delegated — code is duplicated
+    // here so the legacy extraction path has no dependency on the test-only
+    // `extract_arm` element).
+    let span = Span::call_site();
+    let event_type = LitStr::new(&variant.event_type, span);
+    let sentinel = LitStr::new(&variant.sentinel, span);
+    let subject_str = LitStr::new(&variant.subject_field().ident.to_string(), span);
+
+    zyn::zyn! {
+        {{ event_type }} => {
+            let __key = {{ event_type }};
+            event.payload[__key].get({{ sentinel }})?;
+            let __subject_id = ::uuid::Uuid::parse_str(
+                event.payload[__key][{{ subject_str }}].as_str()?).ok()?;
+            let __ciphertext = <::base64::engine::general_purpose::GeneralPurpose
+                as ::base64::Engine>::decode(
+                    &::base64::engine::general_purpose::STANDARD,
+                    event.payload[__key][{{ sentinel }}].as_str()?,
+                ).ok()?;
+            let __nonce = <::base64::engine::general_purpose::GeneralPurpose
+                as ::base64::Engine>::decode(
+                    &::base64::engine::general_purpose::STANDARD,
+                    event.payload[__key]["nonce"].as_str()?,
+                ).ok()?;
+            ::core::option::Option::Some(::cqrs_es_crypto::EncryptedPiiExtract {
+                subject_id: __subject_id,
+                ciphertext: __ciphertext,
+                nonce:      __nonce,
+            })
+        }
+    }
+}
+
+// ── Derive entry point ────────────────────────────────────────────────────
+
+/// Derives a `PiiEventCodec` implementation from an annotated event enum.
 ///
 /// See the [crate-level documentation](self) for the annotation syntax.
 #[zyn::derive("PiiCodec", attributes(pii))]
@@ -391,58 +629,56 @@ fn pii_codec(
         pub struct {{ codec_ident }};
 
         impl ::cqrs_es_crypto::PiiEventCodec for {{ codec_ident }} {
-            fn classify(
+            fn extract_partitions(
                 &self,
-                event: &::cqrs_es::persist::SerializedEvent,
-            ) -> ::core::option::Option<::cqrs_es_crypto::PiiFields> {
+                event: &mut ::cqrs_es::persist::SerializedEvent,
+            ) -> ::core::result::Result<
+                ::std::vec::Vec<::cqrs_es_crypto::SecretPartition>,
+                ::cqrs_es_crypto::PiiCodecError,
+            > {
                 match event.event_type.as_str() {
                     @for (v in pii_variants.iter()) {
-                        @classify_arm(variant = v.clone())
+                        @extract_partitions_arm(variant = v.clone())
                     }
-                    _ => ::core::option::Option::None,
-                }
-            }
-
-            fn extract_encrypted(
-                &self,
-                event: &::cqrs_es::persist::SerializedEvent,
-            ) -> ::core::option::Option<::cqrs_es_crypto::EncryptedPiiExtract> {
-                match event.event_type.as_str() {
-                    @for (v in pii_variants.iter()) {
-                        @extract_arm(variant = v.clone())
-                    }
-                    _ => ::core::option::Option::None,
+                    _ => ::core::result::Result::Ok(::std::vec::Vec::new()),
                 }
             }
 
             fn reconstruct(
                 &self,
-                event: &::cqrs_es::persist::SerializedEvent,
-                plaintext_pii: &::serde_json::Value,
-            ) -> ::core::result::Result<
-                ::serde_json::Value,
-                ::std::boxed::Box<dyn ::std::error::Error + Send + Sync>,
-            > {
+                event: &mut ::cqrs_es::persist::SerializedEvent,
+                partitions: ::std::vec::Vec<::cqrs_es_crypto::DecryptedPartition>,
+            ) -> ::core::result::Result<(), ::cqrs_es_crypto::PiiCodecError> {
                 match event.event_type.as_str() {
                     @for (v in pii_variants.iter()) {
-                        @reconstruct_arm(variant = v.clone())
+                        @new_reconstruct_arm(variant = v.clone())
                     }
-                    _ => ::core::result::Result::Ok(event.payload.clone()),
+                    _ => ::core::result::Result::Ok(()),
                 }
             }
 
-            fn redact(
+            fn redact_partitions(
                 &self,
-                event: &::cqrs_es::persist::SerializedEvent,
-            ) -> ::core::result::Result<
-                ::serde_json::Value,
-                ::std::boxed::Box<dyn ::std::error::Error + Send + Sync>,
-            > {
+                event: &mut ::cqrs_es::persist::SerializedEvent,
+                labels: &[::std::string::String],
+            ) -> ::core::result::Result<(), ::cqrs_es_crypto::PiiCodecError> {
                 match event.event_type.as_str() {
                     @for (v in pii_variants.iter()) {
-                        @redact_arm(variant = v.clone())
+                        @redact_partitions_arm(variant = v.clone())
                     }
-                    _ => ::core::result::Result::Ok(event.payload.clone()),
+                    _ => ::core::result::Result::Ok(()),
+                }
+            }
+
+            fn extract_encrypted_legacy(
+                &self,
+                event: &::cqrs_es::persist::SerializedEvent,
+            ) -> ::core::option::Option<::cqrs_es_crypto::EncryptedPiiExtract> {
+                match event.event_type.as_str() {
+                    @for (v in pii_variants.iter()) {
+                        @extract_encrypted_legacy_arm(variant = v.clone())
+                    }
+                    _ => ::core::option::Option::None,
                 }
             }
         }
