@@ -17,7 +17,7 @@
           {
             "id": "e1",
             "key": "computed",
-            "value": "pv = persons != null ? values(persons) : []; pn = len(pv); pt = search != null and search.passengers != null ? number(search.passengers.total) : 0; { hasSearch: search != null and search.origin != null and search.destination != null, hasOutbound: booking != null and booking.selectedOutboundFlight != null, hasReturn: booking != null and booking.selectedReturnFlight != null, isRoundTrip: search != null and search.tripType == 'round-trip', paymentDone: booking != null and booking.paymentStatus == 'completed', passengersComplete: pn >= pt and pn > 0 and (pn > 0 ? all(pv, #.passengerType != null) : false) }"
+            "value": "pv = persons != null ? values(persons) : []; pn = len(pv); pt = search != null and search.passengers != null ? number(search.passengers.adults) + number(search.passengers.children) + number(search.passengers.infants) : 0; { hasSearch: search != null and search.origin != null and search.destination != null, hasOutbound: booking != null and booking.selectedOutboundFlight != null, hasReturn: booking != null and booking.selectedReturnFlight != null, isRoundTrip: search != null and search.tripType == 'round-trip', paymentDone: booking != null and booking.paymentStatus == 'completed', passengersComplete: pn >= pt and pn > 0 and (pn > 0 ? all(pv, #.passengerType != null) : false) }"
           }
         ]
       }

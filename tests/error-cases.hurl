@@ -10,14 +10,23 @@ HTTP 404
 
 
 # ===========================================
-# Error: Capture on non-existent journey
+# Error: SetAttributes on non-existent journey
 # ===========================================
 POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
-    "Capture": {
-        "step": "test",
-        "data": {"foo": "bar"}
+    "SetAttributes": {
+        "search": {
+            "tripType": "one-way",
+            "origin": "LHR",
+            "destination": "JFK",
+            "departureDate": "2024-06-01",
+            "passengers": {
+                "adults": 1,
+                "children": 0,
+                "infants": 0
+            }
+        }
     }
 }
 

@@ -1,10 +1,23 @@
 {
-  "permissive": true,
+  "permissive": false,
+  "plaintext_prefixes": [
+    "search",
+    "searchResults",
+    "booking"
+  ],
   "namespace_patterns": [
     {
       "namespace": "persons",
-      "secret_fields": ["firstName", "lastName", "dateOfBirth", "passportNumber", "nationality"],
-      "plaintext_fields": ["passengerType"]
+      "secret_fields": [
+        "dateOfBirth",
+        "firstName",
+        "lastName",
+        "nationality",
+        "passportNumber"
+      ],
+      "plaintext_fields": [
+        "passengerType"
+      ]
     }
   ]
 }
