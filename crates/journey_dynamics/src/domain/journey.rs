@@ -42,6 +42,16 @@ pub struct PersonSlot {
     pub phone: Option<String>,
     /// Free-form PII details (passport, `DoB`, nationality, …) captured by
     /// `CapturePersonDetails`. Encrypted at rest.
+    ///
+    /// Deprecated: the canonical location for per-person attributes is
+    /// `shared_data` under `persons/<ref>/…`. This field is retained as a
+    /// back-compat mirror: both legacy `CapturePersonDetails` commands and
+    /// new `SetAttributes` commands (via the mirror-write in `apply`) keep
+    /// it populated, but external readers should prefer `shared_data`.
+    #[deprecated(
+        since = "0.3.0",
+        note = "read from shared_data under persons/<ref>/… instead"
+    )]
     pub details: Value,
     /// Set to `true` when a `SubjectForgotten` event is applied for this
     /// subject. The encrypted event payloads become unreadable at the same
@@ -355,6 +365,7 @@ impl Aggregate for Journey {
         }
     }
 
+    #[allow(deprecated)]
     fn apply(&mut self, event: Self::Event) {
         match event {
             JourneyEvent::Started { id } => {
@@ -525,6 +536,10 @@ impl Journey {
     }
 
     #[must_use]
+    #[deprecated(
+        since = "0.3.0",
+        note = "read WorkflowEvaluated.phase from shared_data instead"
+    )]
     pub const fn current_step(&self) -> Option<&String> {
         self.current_step.as_ref()
     }

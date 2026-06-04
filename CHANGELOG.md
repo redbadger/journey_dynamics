@@ -58,19 +58,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `rehydrate` for reading and writing deeply nested `serde_json::Value` trees
   using `AttributePath` keys.
 
+### Deprecated
+
+- `JourneyCommand::Capture` and `JourneyCommand::CapturePersonDetails`.
+  Use `JourneyCommand::SetAttributes` instead.
+- `JourneyEvent::Modified`, `JourneyEvent::PersonDetailsUpdated`, and
+  `JourneyEvent::StepProgressed`. New writes should emit
+  `JourneyEvent::AttributesSet`. Legacy events continue to replay.
+- `Journey::current_step()`, `JourneyView::current_step`, and
+  `PersonSlot.details` accessors / fields. Read from `shared_data`
+  under the relevant path-keyed attributes instead.
+
+All deprecated items remain fully functional and will keep working in
+this and future releases until an explicit removal RFC is accepted.
+
 ### Migration
 
 See [`docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md)
 for a full migration guide including before/after code snippets, a quick
 reference table, and common gotchas.
-
----
-
-> **Deprecation notice (Phase C — upcoming):** `JourneyCommand::Capture`,
-> `JourneyCommand::CapturePersonDetails`, `JourneyEvent::Modified`,
-> `JourneyEvent::PersonDetailsUpdated`, `JourneyEvent::StepProgressed`,
-> `Journey::current_step()`, and `JourneyView::current_step` will be marked
-> `#[deprecated]` in the next release. They will continue to compile and run;
-> the compiler will emit warnings nudging callers toward the new surface. No
-> code will be removed in that release. See the migration guide for details on
-> clearing the warnings when you are ready.

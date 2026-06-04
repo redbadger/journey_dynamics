@@ -44,6 +44,7 @@ impl StructuredJourneyViewRepository {
     /// Inner load: runs all three queries against an already-open transaction.
     /// The caller is responsible for setting the desired isolation level before
     /// calling this.
+    #[allow(deprecated)]
     async fn load_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
@@ -202,6 +203,7 @@ impl StructuredJourneyViewRepository {
         .await
     }
 
+    #[allow(deprecated)]
     async fn load_batch_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
@@ -464,7 +466,7 @@ impl StructuredJourneyViewRepository {
         })
     }
 
-    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap)]
+    #[allow(clippy::too_many_lines, clippy::cast_possible_wrap, deprecated)]
     async fn apply_event_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
