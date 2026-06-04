@@ -10,6 +10,7 @@ use cqrs_es_crypto::{
 
 use crate::{
     config::{CryptoCqrs, cqrs_framework},
+    domain::{AttributeSchema, AttributeSchemaConfig},
     view_repository::StructuredJourneyViewRepository,
 };
 
@@ -19,6 +20,30 @@ pub struct ApplicationState {
     pub cqrs: Arc<CryptoCqrs>,
     pub journey_query: Arc<StructuredJourneyViewRepository>,
     pub key_store: Arc<dyn KeyStore>,
+}
+
+/// Load an [`AttributeSchema`] from the path named by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
+///
+/// If the environment variable is not set, returns [`AttributeSchema::permissive`].
+///
+/// # Panics
+///
+/// Panics if `JOURNEY_ATTRIBUTE_SCHEMA_PATH` is set but the file cannot be read or parsed.
+#[must_use]
+pub fn load_attribute_schema() -> std::sync::Arc<AttributeSchema> {
+    std::env::var("JOURNEY_ATTRIBUTE_SCHEMA_PATH").map_or_else(
+        |_| std::sync::Arc::new(AttributeSchema::permissive()),
+        |path| {
+            let content = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+                panic!("JOURNEY_ATTRIBUTE_SCHEMA_PATH={path:?}: cannot read file: {e}")
+            });
+            let config: AttributeSchemaConfig =
+                serde_json::from_str(&content).unwrap_or_else(|e| {
+                    panic!("JOURNEY_ATTRIBUTE_SCHEMA_PATH={path:?}: invalid JSON: {e}")
+                });
+            std::sync::Arc::new(AttributeSchema::from(config))
+        },
+    )
 }
 
 /// # Panics

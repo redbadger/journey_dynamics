@@ -244,14 +244,18 @@ impl Aggregate for Journey {
 
                 // Reject secret paths whose person slot hasn't been created yet.
                 for path in &classification.unknown {
-                    if let Some(PiiClass::Secret { subject }) = schema.classify(path) {
-                        let person_ref = subject
-                            .as_str()
-                            .strip_prefix("persons/")
-                            .unwrap_or(subject.as_str())
-                            .to_string();
-                        return Err(JourneyError::PersonNotFound(person_ref));
-                    }
+                    let Some(cls) = schema.classify(path) else {
+                        continue;
+                    };
+                    let PiiClass::Secret { subject } = cls.as_ref() else {
+                        continue;
+                    };
+                    let person_ref = subject
+                        .as_str()
+                        .strip_prefix("persons/")
+                        .unwrap_or(subject.as_str())
+                        .to_string();
+                    return Err(JourneyError::PersonNotFound(person_ref));
                 }
 
                 // Build one SecretPartitionData per subject, sorted by person_ref

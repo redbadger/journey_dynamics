@@ -47,13 +47,6 @@
             "null"
           ]
         },
-        "hasUnaccompaniedMinors": {
-          "description": "Set to `true` by the application when any passenger is an unaccompanied minor.\nDrives the decision engine to the unaccompanied-minor-services step.",
-          "type": [
-            "boolean",
-            "null"
-          ]
-        },
         "insurance": {
           "anyOf": [
             {
@@ -69,15 +62,6 @@
             "boolean",
             "null"
           ]
-        },
-        "passengersReady": {
-          "description": "Number of passengers whose PII details have been submitted via `CapturePersonDetails`.\nSet by the application after capturing each passenger's details; used by the decision\nengine to determine when to advance to seat selection.",
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
         },
         "payment": {
           "anyOf": [

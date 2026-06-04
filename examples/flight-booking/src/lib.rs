@@ -1,3 +1,10 @@
+use std::collections::BTreeSet;
+
+use journey_dynamics::domain::{
+    attribute_schema::{AttributeSchemaConfig, NamespacePatternConfig},
+    AttributeSchema, NamespacePattern,
+};
+use journey_dynamics::queries::JourneyView;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +15,78 @@ pub struct FlightBookingSchema {
     pub search: Option<SearchCriteria>,
     pub search_results: Option<SearchResults>,
     pub booking: Option<BookingData>,
+}
+
+/// Reconstruct a [`FlightBookingSchema`] from the plaintext path-keyed bag
+/// stored in `shared_data`. PII fields (`firstName`, `passportNumber`, etc.)
+/// are encrypted separately and are not included.
+///
+/// # Errors
+///
+/// Returns a [`serde_json::Error`] if `shared_data` cannot be deserialised
+/// into the schema types.
+impl TryFrom<&JourneyView> for FlightBookingSchema {
+    type Error = serde_json::Error;
+
+    fn try_from(view: &JourneyView) -> Result<Self, Self::Error> {
+        serde_json::from_value(view.shared_data.clone())
+    }
+}
+
+/// Returns the [`AttributeSchema`] for the flight-booking example.
+///
+/// Classification:
+/// - `search/*`, `searchResults/*`, `booking/*` → Plaintext (permissive fallback)
+/// - `persons/<ref>/firstName`, `lastName`, `dateOfBirth`, `passportNumber`,
+///   `nationality` → `Secret` encrypted under `persons/<ref>`
+/// - `persons/<ref>/passengerType` → Plaintext
+#[must_use]
+pub fn attribute_schema() -> AttributeSchema {
+    let secret_fields: BTreeSet<String> = [
+        "firstName",
+        "lastName",
+        "dateOfBirth",
+        "passportNumber",
+        "nationality",
+    ]
+    .iter()
+    .map(|s| (*s).to_string())
+    .collect();
+
+    let plaintext_fields: BTreeSet<String> = std::iter::once("passengerType")
+        .map(str::to_string)
+        .collect();
+
+    AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+        namespace: "persons".to_string(),
+        secret_fields,
+        plaintext_fields,
+    }])
+}
+
+/// Serialised form of [`attribute_schema()`] suitable for writing to the JSON
+/// file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
+#[must_use]
+pub fn attribute_schema_config() -> AttributeSchemaConfig {
+    AttributeSchemaConfig {
+        permissive: true,
+        namespace_patterns: vec![NamespacePatternConfig {
+            namespace: "persons".to_string(),
+            secret_fields: [
+                "firstName",
+                "lastName",
+                "dateOfBirth",
+                "passportNumber",
+                "nationality",
+            ]
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect(),
+            plaintext_fields: std::iter::once("passengerType")
+                .map(str::to_string)
+                .collect(),
+        }],
+    }
 }
 
 // Search criteria group - when present, core fields are required
@@ -33,13 +112,6 @@ pub struct SearchCriteria {
 pub struct BookingData {
     pub selected_outbound_flight: Option<FlightSelection>,
     pub selected_return_flight: Option<FlightSelection>,
-    /// Number of passengers whose PII details have been submitted via `CapturePersonDetails`.
-    /// Set by the application after capturing each passenger's details; used by the decision
-    /// engine to determine when to advance to seat selection.
-    pub passengers_ready: Option<u32>,
-    /// Set to `true` by the application when any passenger is an unaccompanied minor.
-    /// Drives the decision engine to the unaccompanied-minor-services step.
-    pub has_unaccompanied_minors: Option<bool>,
     pub pricing: Option<Pricing>,
     pub insurance: Option<Insurance>,
     pub payment: Option<Payment>,
