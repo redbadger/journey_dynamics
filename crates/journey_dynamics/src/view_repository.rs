@@ -617,7 +617,10 @@ impl StructuredJourneyViewRepository {
                 .await?;
             }
 
-            JourneyEvent::WorkflowEvaluated { suggested_actions } => {
+            JourneyEvent::WorkflowEvaluated {
+                suggested_actions,
+                phase,
+            } => {
                 sqlx::query(
                     r"
                     UPDATE journey_workflow_decision
@@ -629,17 +632,16 @@ impl StructuredJourneyViewRepository {
                 .execute(&mut **tx)
                 .await?;
 
-                // TODO(path-keyed-step-B1): `phase` is not carried by this
-                // event yet; it will be written as NULL until step B1 adds it.
                 sqlx::query(
                     r"
                     INSERT INTO journey_workflow_decision
                         (journey_id, suggested_actions, is_latest, phase)
-                    VALUES ($1, $2, TRUE, NULL)
+                    VALUES ($1, $2, TRUE, $3)
                     ",
                 )
                 .bind(journey_id)
                 .bind(suggested_actions)
+                .bind(phase)
                 .execute(&mut **tx)
                 .await?;
 

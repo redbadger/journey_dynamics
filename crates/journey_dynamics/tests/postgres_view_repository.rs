@@ -195,6 +195,7 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
                 sequence: 3,
                 payload: JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["passenger_details".to_string()],
+                    phase: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -227,13 +228,11 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
 }
 
 // Phase field persists as NULL (None) when the event does not carry it.
-// This will become meaningful in step B1 when `WorkflowEvaluated` gains
-// the `phase` field.
+/// Verify that a `WorkflowEvaluated` event with `phase: None` stores NULL
+/// in the database and is loaded back as `phase: None`.
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_workflow_decision_phase_is_none_before_step_b1(
-    ctx: &mut PostgresViewRepositoryContext,
-) {
+async fn test_workflow_decision_phase_null_roundtrip(ctx: &mut PostgresViewRepositoryContext) {
     let repo = ctx.repo();
     let journey_id = ctx.track_journey(Uuid::new_v4());
 
@@ -251,6 +250,7 @@ async fn test_workflow_decision_phase_is_none_before_step_b1(
                 sequence: 2,
                 payload: JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["next_step".to_string()],
+                    phase: None,
                 },
                 metadata: HashMap::default(),
             },
@@ -263,8 +263,10 @@ async fn test_workflow_decision_phase_is_none_before_step_b1(
         .latest_workflow_decision
         .expect("decision should exist");
     assert_eq!(decision.suggested_actions, vec!["next_step"]);
-    // Phase is NULL / None until step B1 adds it to the event.
-    assert!(decision.phase.is_none());
+    assert!(
+        decision.phase.is_none(),
+        "phase: None round-trips as NULL in DB"
+    );
 }
 
 // ── load_all ─────────────────────────────────────────────────────────────
@@ -316,6 +318,7 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
                 sequence: 3,
                 payload: JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["passenger_details".to_string()],
+                    phase: None,
                 },
                 metadata: HashMap::default(),
             },
