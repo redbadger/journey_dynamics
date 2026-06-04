@@ -212,8 +212,14 @@ jsonpath "$.shared_data.search.origin" == "LHR"
 jsonpath "$.shared_data.search.destination" == "CDG"
 jsonpath "$.shared_data.booking.pricing.totalPrice" == 474.98
 jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_email_erase_demo"
+# Both person slots present and not yet forgotten
+jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == false
+jsonpath "$.persons[0].name" == "Clara Dupont"
+jsonpath "$.persons[0].email" == "Clara.Dupont@example.com"
+jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
+jsonpath "$.persons[1].name" == "Henri Dubois"
 
 
 # ===========================================
@@ -240,25 +246,54 @@ HTTP 204
 
 # ===========================================
 # Step 12: Verify journey after erasure
-#
-# KEY ASSERTIONS:
-#   • shared_data is completely intact — non-PII data is never touched.
-#   • passenger_0 (Clara) is forgotten: identity fields nulled, forgotten=true.
-#   • passenger_1 (Henri) is completely unaffected.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
+# ── Journey state ──────────────────────────────────────────────────────────
 jsonpath "$.state" == "Complete"
+
+# ── Shared data: search criteria (plaintext — survives erasure) ───────────
+jsonpath "$.shared_data.search.tripType" == "one-way"
 jsonpath "$.shared_data.search.origin" == "LHR"
 jsonpath "$.shared_data.search.destination" == "CDG"
+jsonpath "$.shared_data.search.departureDate" == "2024-06-01"
+jsonpath "$.shared_data.search.passengers.adults" == 2
+jsonpath "$.shared_data.search.passengers.children" == 0
+jsonpath "$.shared_data.search.passengers.infants" == 0
+
+# ── Shared data: flight selection ─────────────────────────────────────────
+jsonpath "$.shared_data.booking.selectedOutboundFlight.flightId" == "BA0303"
+jsonpath "$.shared_data.booking.selectedOutboundFlight.airline" == "British Airways"
+jsonpath "$.shared_data.booking.selectedOutboundFlight.price" == 189.99
+
+# ── Shared data: pricing and payment ─────────────────────────────────────
+jsonpath "$.shared_data.booking.paymentStatus" == "completed"
+jsonpath "$.shared_data.booking.pricing.basePrice" == 379.98
+jsonpath "$.shared_data.booking.pricing.taxes" == 95.0
 jsonpath "$.shared_data.booking.pricing.totalPrice" == 474.98
+jsonpath "$.shared_data.booking.pricing.currency" == "GBP"
+jsonpath "$.shared_data.booking.payment.method" == "credit_card"
+jsonpath "$.shared_data.booking.payment.status" == "completed"
 jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_email_erase_demo"
+
+# ── Shared data: plaintext person attributes survive erasure ─────────────
+# passengerType is a plaintext attribute stored in shared_data, not in the
+# encrypted person slot — erasing a DEK cannot touch it.
+jsonpath "$.shared_data.persons.passenger_0.passengerType" == "adult"
+jsonpath "$.shared_data.persons.passenger_1.passengerType" == "adult"
+
+# ── Person identity slots (ordered by insertion) ──────────────────────────
+# passenger_0 (Clara) — erased by email: all identity fields nulled
+jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == true
 jsonpath "$.persons[0].name" == null
 jsonpath "$.persons[0].email" == null
 jsonpath "$.persons[0].phone" == null
+
+# passenger_1 (Henri) — different subject, completely unaffected
+jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
 jsonpath "$.persons[1].name" == "Henri Dubois"
 jsonpath "$.persons[1].email" == "henri.dubois@example.com"

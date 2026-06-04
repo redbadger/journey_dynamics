@@ -309,7 +309,6 @@ HTTP 204
 
 # ===========================================
 # Step 16: Verify final state before shredding
-# All shared_data is visible; PII is in encrypted person slots.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
@@ -320,6 +319,17 @@ jsonpath "$.shared_data.search.origin" == "JFK"
 jsonpath "$.shared_data.search.destination" == "LAX"
 jsonpath "$.shared_data.booking.pricing.totalPrice" == 759.98
 jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
+# All person slots present and not yet forgotten
+jsonpath "$.persons[0].person_ref" == "passenger_0"
+jsonpath "$.persons[0].forgotten" == false
+jsonpath "$.persons[0].name" == "Alice Johnson"
+jsonpath "$.persons[0].email" == "alice.johnson@email.com"
+jsonpath "$.persons[1].person_ref" == "passenger_1"
+jsonpath "$.persons[1].forgotten" == false
+jsonpath "$.persons[1].name" == "Bob Johnson"
+jsonpath "$.persons[2].person_ref" == "passenger_2"
+jsonpath "$.persons[2].forgotten" == false
+jsonpath "$.persons[2].name" == "Charlie Johnson"
 
 
 # ===========================================
@@ -334,21 +344,75 @@ HTTP 204
 
 # ===========================================
 # Step 18: Verify journey after shredding
-#
-# KEY ASSERTION: shared_data is completely intact.
-# Search criteria, flight selections, pricing, and booking reference all
-# survive because they were never PII and were never encrypted.
-#
-# Alice's person slot (passenger_0) is now a tombstone in journey_person
-# (forgotten = true, all fields nulled).  Bob and Charlie's slots are
-# unaffected — their DEKs were not deleted.
 # ===========================================
 GET {{host}}/journeys/{{journey_id}}
 
 HTTP 200
 [Asserts]
+# ── Journey state ──────────────────────────────────────────────────────────
 jsonpath "$.state" == "Complete"
+
+# ── Shared data: search criteria (plaintext — survives shredding) ──────────
+jsonpath "$.shared_data.search.tripType" == "round-trip"
 jsonpath "$.shared_data.search.origin" == "JFK"
 jsonpath "$.shared_data.search.destination" == "LAX"
+jsonpath "$.shared_data.search.departureDate" == "2024-03-15"
+jsonpath "$.shared_data.search.returnDate" == "2024-03-22"
+jsonpath "$.shared_data.search.passengers.adults" == 2
+jsonpath "$.shared_data.search.passengers.children" == 1
+jsonpath "$.shared_data.search.passengers.infants" == 0
+
+# ── Shared data: flight selections ────────────────────────────────────────
+jsonpath "$.shared_data.booking.selectedOutboundFlight.flightId" == "AA1234"
+jsonpath "$.shared_data.booking.selectedOutboundFlight.airline" == "American Airlines"
+jsonpath "$.shared_data.booking.selectedOutboundFlight.price" == 299.99
+jsonpath "$.shared_data.booking.selectedReturnFlight.flightId" == "AA5678"
+jsonpath "$.shared_data.booking.selectedReturnFlight.price" == 279.99
+
+# ── Shared data: seat selection ───────────────────────────────────────────
+jsonpath "$.shared_data.booking.selectedSeats.outbound[0]" == "12A"
+jsonpath "$.shared_data.booking.selectedSeats.outbound[2]" == "12C"
+jsonpath "$.shared_data.booking.selectedSeats.return[0]" == "14A"
+jsonpath "$.shared_data.booking.seatUpgradeTotal" == 45.0
+
+# ── Shared data: ancillaries ──────────────────────────────────────────────
+jsonpath "$.shared_data.booking.insurance.selected" == true
+jsonpath "$.shared_data.booking.insurance.insurance_type" == "comprehensive"
+jsonpath "$.shared_data.booking.insurance.price" == 45.0
+
+# ── Shared data: pricing and payment ─────────────────────────────────────
+jsonpath "$.shared_data.booking.paymentStatus" == "completed"
+jsonpath "$.shared_data.booking.pricing.basePrice" == 579.98
+jsonpath "$.shared_data.booking.pricing.taxes" == 180.0
 jsonpath "$.shared_data.booking.pricing.totalPrice" == 759.98
+jsonpath "$.shared_data.booking.pricing.currency" == "USD"
+jsonpath "$.shared_data.booking.payment.method" == "credit_card"
+jsonpath "$.shared_data.booking.payment.status" == "completed"
 jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
+
+# ── Shared data: plaintext person attributes survive shredding ────────────
+# passengerType is a plaintext attribute stored in shared_data, not in the
+# encrypted person slot — shredding a DEK cannot touch it.
+jsonpath "$.shared_data.persons.passenger_0.passengerType" == "adult"
+jsonpath "$.shared_data.persons.passenger_1.passengerType" == "adult"
+jsonpath "$.shared_data.persons.passenger_2.passengerType" == "child"
+
+# ── Person identity slots (ordered by insertion) ──────────────────────────
+# passenger_0 (Alice) — DEK shredded: all identity fields nulled
+jsonpath "$.persons[0].person_ref" == "passenger_0"
+jsonpath "$.persons[0].forgotten" == true
+jsonpath "$.persons[0].name" == null
+jsonpath "$.persons[0].email" == null
+jsonpath "$.persons[0].phone" == null
+
+# passenger_1 (Bob) — different DEK, completely unaffected
+jsonpath "$.persons[1].person_ref" == "passenger_1"
+jsonpath "$.persons[1].forgotten" == false
+jsonpath "$.persons[1].name" == "Bob Johnson"
+jsonpath "$.persons[1].email" == "bob.johnson@email.com"
+
+# passenger_2 (Charlie) — different DEK, completely unaffected
+jsonpath "$.persons[2].person_ref" == "passenger_2"
+jsonpath "$.persons[2].forgotten" == false
+jsonpath "$.persons[2].name" == "Charlie Johnson"
+jsonpath "$.persons[2].email" == "charlie.johnson@email.com"

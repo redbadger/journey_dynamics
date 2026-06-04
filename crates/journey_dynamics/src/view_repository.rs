@@ -11,6 +11,14 @@ use crate::{
     queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
 };
 
+/// Deep-merge `patch` into `target` using JSON Merge Patch (RFC 7396).
+/// This is the Rust equivalent of what `PostgreSQL`'s `||` should do but
+/// doesn't — `||` is a shallow merge that replaces top-level keys entirely.
+#[inline]
+fn deep_merge(target: &mut serde_json::Value, patch: &serde_json::Value) {
+    json_patch::merge(target, patch);
+}
+
 /// A structured database view repository for journeys.
 #[derive(Clone)]
 pub struct StructuredJourneyViewRepository {
@@ -491,19 +499,32 @@ impl StructuredJourneyViewRepository {
             }
 
             JourneyEvent::Modified { step: _, data } => {
-                // Merge new data into shared_data via JSONB concatenation.
+                // Deep-merge new data into shared_data.
                 // shared_data never contains PII and is never cleared by shredding.
+                // We load, merge in Rust, and write back rather than using
+                // PostgreSQL's || operator, which only does a shallow (top-level)
+                // key merge and would overwrite sibling keys within the same
+                // top-level namespace.
+                let current: serde_json::Value =
+                    sqlx::query_scalar("SELECT shared_data FROM journey_view WHERE id = $1")
+                        .bind(journey_id)
+                        .fetch_one(&mut **tx)
+                        .await?;
+
+                let mut merged = current;
+                deep_merge(&mut merged, data);
+
                 sqlx::query(
                     r"
                     UPDATE journey_view
-                    SET shared_data = shared_data || $2,
+                    SET shared_data = $2,
                         version     = $3,
                         updated_at  = CURRENT_TIMESTAMP
                     WHERE id = $1
                     ",
                 )
                 .bind(journey_id)
-                .bind(data)
+                .bind(&merged)
                 .bind(event.sequence as i64)
                 .execute(&mut **tx)
                 .await?;
@@ -698,8 +719,7 @@ impl StructuredJourneyViewRepository {
                 plaintext,
                 secret_partitions,
             } => {
-                // Rehydrate plaintext changes into a nested JSON value for the
-                // shared_data column update.
+                // Rehydrate plaintext changes into a nested JSON value.
                 let mut data_update = rehydrate(plaintext);
                 // Also write full-path secret changes into shared_data (as the
                 // aggregate does), so the read model has a unified view of all
@@ -710,17 +730,32 @@ impl StructuredJourneyViewRepository {
                     }
                 }
 
+                // Deep-merge into shared_data. PostgreSQL's || operator only
+                // does a shallow (top-level) merge, so successive SetAttributes
+                // commands touching the same top-level namespace (e.g. multiple
+                // updates to `booking/*`) would overwrite each other. We load,
+                // merge in Rust with json_patch::merge (RFC 7396), and write
+                // back the fully-merged value instead.
+                let current: serde_json::Value =
+                    sqlx::query_scalar("SELECT shared_data FROM journey_view WHERE id = $1")
+                        .bind(journey_id)
+                        .fetch_one(&mut **tx)
+                        .await?;
+
+                let mut merged = current;
+                deep_merge(&mut merged, &data_update);
+
                 sqlx::query(
                     r"
                     UPDATE journey_view
-                    SET shared_data = shared_data || $2,
+                    SET shared_data = $2,
                         version     = $3,
                         updated_at  = CURRENT_TIMESTAMP
                     WHERE id = $1
                     ",
                 )
                 .bind(journey_id)
-                .bind(&data_update)
+                .bind(&merged)
                 .bind(event.sequence as i64)
                 .execute(&mut **tx)
                 .await?;
