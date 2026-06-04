@@ -131,35 +131,67 @@ set JOURNEY_ID (echo $JOURNEY_LOCATION | sed 's|/journeys/||')
 echo "Journey ID: $JOURNEY_ID"
 ```
 
-### 6.2 Capture shared (non-PII) data
+### 6.2 Set shared attributes (non-PII)
 
-`Capture` is for data that is **not** personally identifiable — search criteria, flight
-selections, pricing, payment status, booking references, and so on.  This data is stored in
-plaintext and is **never encrypted**.  It survives GDPR shredding completely intact.
+`SetAttributes` is the recommended way to store data that is **not** personally identifiable
+— search criteria, flight selections, pricing, payment status, booking references, and so
+on.  This data is stored in plaintext and is **never encrypted**.  It survives GDPR shredding
+completely intact.
+
+**bash / zsh**
 
 ```bash
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "Capture": {
-      "step": "search",
-      "data": {
-        "search": {
-          "tripType":      "round-trip",
-          "origin":        "LHR",
-          "destination":   "JFK",
-          "departureDate": "2026-09-01",
-          "passengers": {
-            "total":    1,
-            "adults":   1,
-            "children": 0,
-            "infants":  0
-          }
+    "SetAttributes": {
+      "search": {
+        "tripType":      "round-trip",
+        "origin":        "LHR",
+        "destination":   "JFK",
+        "departureDate": "2026-09-01",
+        "passengers": {
+          "total":    1,
+          "adults":   1,
+          "children": 0,
+          "infants":  0
         }
       }
     }
   }'
 ```
+
+**fish**
+
+```fish
+curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SetAttributes": {
+      "search": {
+        "tripType":      "round-trip",
+        "origin":        "LHR",
+        "destination":   "JFK",
+        "departureDate": "2026-09-01",
+        "passengers": {
+          "total":    1,
+          "adults":   1,
+          "children": 0,
+          "infants":  0
+        }
+      }
+    }
+  }'
+```
+
+The nested sugar form is flattened server-side. The canonical flat form is also accepted:
+`{ "SetAttributes": { "changes": { "search/origin": "LHR", … } } }`
+
+> **Legacy form (deprecated in Phase C).** `Capture` still works and is equivalent:
+> ```bash
+> curl … -d '{ "Capture": { "step": "search", "data": { "search": { … } } } }'
+> ```
+> See the [migration guide](PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) for details.
 
 ### 6.3 Capture person identity (PII)
 
@@ -210,30 +242,43 @@ curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   }"
 ```
 
-### 6.4 Capture per-person PII details
+`CapturePerson` is not deprecated. Call it once per passenger to bind a `subject_id` to a
+journey-local slot before sending any `persons/<ref>/…` attributes via `SetAttributes`.
 
-`CapturePersonDetails` captures free-form PII (passport, date of birth, nationality, …) for
-an existing person slot.  The `data` blob is encrypted under the same subject's DEK.
-`CapturePerson` must be called first for the same `person_ref`.
+### 6.4 Set per-person PII attributes
+
+`SetAttributes` with paths under `persons/<ref>/` is the recommended way to store per-person
+free-form PII.  `CapturePerson` must be called first for the same `person_ref`.
 
 ```bash
 curl -s -X POST "http://localhost:3030/journeys/$JOURNEY_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "CapturePersonDetails": {
-      "person_ref": "lead_booker",
-      "data": {
-        "dateOfBirth":    "1990-05-15",
-        "passportNumber": "GB12345678",
-        "nationality":    "GB",
-        "passengerType":  "adult"
+    "SetAttributes": {
+      "persons": {
+        "lead_booker": {
+          "dateOfBirth":    "1990-05-15",
+          "passportNumber": "GB12345678",
+          "nationality":    "GB",
+          "passengerType":  "adult"
+        }
       }
     }
   }'
 ```
 
-Multiple `CapturePersonDetails` calls for the same `person_ref` are merged (JSON
-merge-patch), so you can split the data across several requests if needed.
+Paths under `persons/<ref>/` that are classified as `Secret` in your `AttributeSchema`
+(passport number, date of birth, …) are encrypted under the subject's DEK.  The default
+permissive schema treats all paths as plaintext — configure `JOURNEY_ATTRIBUTE_SCHEMA_PATH`
+for production deployments.  See the [migration guide](PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md)
+for schema configuration.
+
+> **Legacy form (deprecated in Phase C).** `CapturePersonDetails` still works:
+> ```bash
+> curl … -d '{ "CapturePersonDetails": { "person_ref": "lead_booker", "data": { … } } }'
+> ```
+> The legacy command always encrypts regardless of schema. Its event (`PersonDetailsUpdated`)
+> also mirrors into `persons[].details` for backward-compatible readers.
 
 ### 6.5 Query the journey — shared data visible, PII in separate table
 
@@ -295,6 +340,10 @@ is the decrypted projection.
 
 Connect to the database directly and inspect the raw event payloads.
 
+When using the new `SetAttributes` command, secret attributes produce an `AttributesSet`
+event in the store. See the [migration guide](PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) for
+its on-disk shape.
+
 ### 7.1 PersonCaptured — always encrypted
 
 The `PersonCaptured` event stores name/email/phone as AES-256-GCM ciphertext.
@@ -317,7 +366,7 @@ Expected output:
                 |   "nonce": "mNq2..."}}
 ```
 
-### 7.2 PersonDetailsUpdated — always encrypted
+### 7.2 PersonDetailsUpdated — always encrypted *(legacy event)*
 
 The `PersonDetailsUpdated` event stores the entire `data` blob as ciphertext:
 
@@ -336,7 +385,7 @@ psql -h localhost -U postgres journey_dynamics -c \
                       |   "nonce": "..."}}
 ```
 
-### 7.3 Modified — always plaintext
+### 7.3 Modified — always plaintext *(legacy event)*
 
 `Modified` events carry only shared, non-PII journey data and are **never** encrypted,
 regardless of whether a person has been captured on the journey.
@@ -673,6 +722,8 @@ curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID_2"
 |---|---|---|
 | `name`, `email`, `phone` in `PersonCaptured` | ✅ Yes (ciphertext, key deleted) | Direct PII |
 | `data` in `PersonDetailsUpdated` | ✅ Yes (ciphertext, key deleted) | Direct PII |
+| `AttributesSet` (secret partitions for target subject) | ✅ Yes (ciphertext, key deleted) | Path-keyed PII, encrypted under subject DEK |
+| `AttributesSet` (other subjects' partitions in same event) | ❌ No | Different DEK — independent subject |
 | `journey_person` row for target subject | ✅ Yes (fields nulled, `forgotten = true`) | Read-model PII cache |
 | Other persons' `journey_person` rows | ❌ No | Different DEK — independent subject |
 | `journey_view.shared_data` | ❌ No | Never contained PII; never encrypted |
@@ -692,3 +743,5 @@ curl -si -X DELETE "http://localhost:3030/subjects/$SUBJECT_ID_2"
   command reference
 - [`IMPLEMENTATION_SUMMARY.md`](IMPLEMENTATION_SUMMARY.md) — what was built across the
   implementation phases
+- [`PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) —
+  migrating from `Capture`/`CapturePersonDetails` to `SetAttributes`

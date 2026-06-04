@@ -70,11 +70,82 @@ Returns `201 Created` with a `Location: /journeys/{journey_id}` header.
 curl http://localhost:3030/journeys/{journey_id}
 ```
 
-#### Capture shared step data (non-PII)
+#### Set attributes (recommended)
 
-`Capture` is for data that is **not** personally identifiable — search criteria, flight
-selections, pricing, payment status, booking references, and so on. This data is stored in
-plaintext and survives GDPR shredding intact.
+`SetAttributes` accepts a flat map of path → value (or the nested sugar form below) and
+routes each attribute to plaintext storage or per-subject encrypted storage based on your
+[`AttributeSchema`](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md#configuring-your-attributeschema).
+A single submission can touch attributes for multiple data subjects atomically.
+
+The **nested sugar form** (server-side flattened) is the most ergonomic on the wire:
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SetAttributes": {
+      "search": {
+        "tripType":      "round-trip",
+        "origin":        "LHR",
+        "destination":   "JFK",
+        "departureDate": "2025-08-15",
+        "passengers": {
+          "total":    1,
+          "adults":   1,
+          "children": 0,
+          "infants":  0
+        }
+      }
+    }
+  }'
+```
+
+The canonical **flat form** is also accepted:
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SetAttributes": {
+      "changes": {
+        "search/origin":      "LHR",
+        "search/destination": "JFK"
+      }
+    }
+  }'
+```
+
+For per-person PII (passport number, date of birth, …) call `CapturePerson` first to
+bind a `subject_id` to the person slot, then use paths under `persons/<ref>/…`:
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "SetAttributes": {
+      "persons": {
+        "lead_booker": {
+          "dateOfBirth":    "1990-05-15",
+          "passportNumber": "GB123456789",
+          "nationality":    "GB",
+          "passengerType":  "adult"
+        }
+      }
+    }
+  }'
+```
+
+> **See also:** [`docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md)
+> for schema configuration, migration recipes, and a comparison with the legacy commands.
+
+---
+
+#### Legacy API (deprecated in Phase C)
+
+The commands below still work and are fully supported. They will be marked
+`#[deprecated]` in a future release; new integrations should use `SetAttributes` above.
+
+##### Capture shared step data (non-PII) — legacy
 
 ```bash
 curl -X POST http://localhost:3030/journeys/{journey_id} \
@@ -123,11 +194,10 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
   }'
 ```
 
-#### Capture per-person PII details
+##### Capture per-person PII details — legacy
 
-Free-form PII details (passport number, date of birth, nationality, …) for an existing person
-slot. `CapturePerson` must be called first for the same `person_ref`. The `data` blob is
-encrypted under the same subject's DEK. Multiple calls for the same `person_ref` are merged.
+Free-form PII details for an existing person slot. Always encrypts regardless of schema.
+Multiple calls for the same `person_ref` are merged.
 
 ```bash
 curl -X POST http://localhost:3030/journeys/{journey_id} \
@@ -192,9 +262,10 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 
 | Document | Description |
 |---|---|
+| [`docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) | **Start here** — migrating to `SetAttributes` / `AttributesSet` (path-keyed attributes) |
 | [`docs/QUICK_START.md`](docs/QUICK_START.md) | Step-by-step walkthrough and crypto-shredding demo |
 | [`docs/MULTI_SUBJECT_DESIGN.md`](docs/MULTI_SUBJECT_DESIGN.md) | Multi-subject GDPR crypto-shredding design (current) |
-| [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` and `CapturePersonDetails` command reference |
+| [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` command reference (not deprecated); legacy `CapturePersonDetails` reference |
 | [`docs/IMPLEMENTATION_SUMMARY.md`](docs/IMPLEMENTATION_SUMMARY.md) | What was built and why |
 | [`docs/ARCHITECTURE_REVIEW.md`](docs/ARCHITECTURE_REVIEW.md) | Architecture Review Board (ARB) review document |
 | [`docs/SUBJECT_ID_STRATEGIES.md`](docs/SUBJECT_ID_STRATEGIES.md) | How to mint or resolve `subject_id` values (authenticated users, additional passengers, GDPR erasure by email) |
