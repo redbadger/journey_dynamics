@@ -2,15 +2,38 @@
 
 Transparent PII encryption and GDPR crypto-shredding for [`cqrs-es`](https://crates.io/crates/cqrs-es).
 
-Wraps any [`PersistedEventRepository`] with a crypto layer that:
+Wraps any [`PersistedEventRepository`](https://docs.rs/cqrs-es/0.5/cqrs_es/persist/trait.PersistedEventRepository.html) with a crypto layer that:
 
 - **Encrypts** designated PII fields on the write path using AES-256-GCM, keyed by a per-subject Data Encryption Key (DEK).
 - **Decrypts** them transparently on the read path when the DEK is present.
 - **Redacts** them permanently when the DEK has been deleted — this is GDPR crypto-shredding.
 
+Each event is stored as zero or more **subject-scoped encrypted partitions**, so a
+single event can carry PII belonging to several data subjects and still be
+shredded one subject at a time. You describe how to split an event into
+partitions by implementing the [`PiiEventCodec`](https://docs.rs/cqrs-es-crypto/latest/cqrs_es_crypto/repository/trait.PiiEventCodec.html) trait. There are two ways to do
+that:
+
+- **Hand-write the codec** (the general case). Full control, and the only way to
+  support **multiple subjects per event** or classification that is decided at
+  runtime (e.g. path-keyed attributes partitioned by a schema). See
+  [Manual implementation](#manual-implementation).
+- **`#[derive(PiiCodec)]`** (a convenience). Zero boilerplate for the common
+  case of an event whose PII all belongs to a **single** subject. See
+  [Quick start](#quick-start).
+
+The derive macro is a generator for the single-subject shape; everything it emits
+can be written by hand when you need more.
+
 ---
 
 ## Quick start
+
+> This section uses `#[derive(PiiCodec)]`, which fits events whose PII all
+> belongs to a **single** data subject (one partition per event). If one event
+> must carry PII for **multiple** subjects, or its PII classification is decided
+> at runtime, write the codec by hand instead — see
+> [Manual implementation](#manual-implementation).
 
 ### 1. Add the dependency
 
@@ -62,6 +85,12 @@ enum MyEvent {
 //            impl PiiEventCodec for MyEventPiiCodec { ... }
 ```
 
+> **One subject per variant.** Each PII variant names exactly one
+> `#[pii(subject)]` field, so the macro emits a single encrypted partition
+> (`label = "default"`) per event. An event that mixes PII from several subjects
+> cannot be expressed this way — hand-write the codec instead (see
+> [Manual implementation](#manual-implementation)).
+
 #### Field roles
 
 | Attribute | Role |
@@ -79,6 +108,7 @@ The macro infers a redaction value from each `#[pii(secret)]` field's type:
 | `String` | `"[redacted]"` | no |
 | `Option<T>` | `null` | no |
 | `serde_json::Value` | `{}` | no |
+| `Vec<T>` | `[]` | no |
 | `chrono::NaiveDate` | `"0000-01-01"` (requires the `chrono` feature) | yes |
 | Anything else | compile error — use `#[pii(secret, redact = "...")]` | n/a |
 
@@ -89,8 +119,8 @@ The override syntax accepts a string literal:
 ```
 
 It is only allowed on types whose default is not part of the crate's
-contract — so `String`, `Option<_>`, and `serde_json::Value` cannot be
-overridden.
+contract — so `String`, `Option<_>`, `serde_json::Value`, and `Vec<_>` cannot
+be overridden.
 
 ### 3. Wire it into your repository
 
@@ -135,9 +165,22 @@ key_store.delete_key(&subject_id).await?;
 
 ## Manual implementation
 
-For cases where the derive macro does not fit — non-standard payload shapes,
-runtime-determined event types, or custom redaction logic — implement
-`PiiEventCodec` directly.
+Hand-writing `PiiEventCodec` is the general case — reach for it whenever an event
+is more than a single subject's fixed fields. The common reasons:
+
+- **Multi-subject events.** One event carries PII for more than one data subject
+  (e.g. several passengers' passport numbers captured in one submission). The
+  codec returns **one `SecretPartition` per subject**, each encrypted under its
+  own DEK, so crypto-shredding stays per-subject: deleting one subject's DEK
+  redacts only their partition and leaves the others intact.
+- **Schema- or data-driven classification.** Which fields are PII — and which
+  subject they belong to — is decided at runtime rather than by fixed struct
+  fields. For example a path-keyed `AttributesSet` event whose `changes` map is
+  partitioned by a runtime `AttributeSchema`.
+- **Non-standard payload shapes or custom redaction logic.**
+
+The single-subject case the derive macro covers is just the degenerate version of
+this: return one partition with `label = "default"`.
 
 ### The trait
 
@@ -183,42 +226,72 @@ pub trait PiiEventCodec: Send + Sync {
   `reconstruct` (or `redact_partitions`) as a single partition with
   `label = "default"`.
 
+The example below is **multi-subject** and **path-keyed**. A single
+`AttributesSet` event carries one group of secret `changes` per person, already
+grouped by subject. The codec encrypts each group into its own partition,
+labelled by the person's slot (`person_ref`), so shredding one subject's DEK
+redacts only their changes while everyone else's still decrypt.
+
 ```rust
 use cqrs_es::persist::SerializedEvent;
-use cqrs_es_crypto::{
-    DecryptedPartition, PiiCodecError, PiiEventCodec, SecretPartition,
-};
-use serde_json::Value;
+use cqrs_es_crypto::{DecryptedPartition, PiiCodecError, PiiEventCodec, SecretPartition};
+use serde_json::{json, Value};
 use uuid::Uuid;
 
-pub struct MyCodec;
+// Payload shape this codec manages:
+//
+//   { "AttributesSet": {
+//       "plaintext": { "search/origin": "LHR" },
+//       "secret_partitions": [
+//         { "person_ref": "passenger_0", "subject_id": "…",
+//           "changes": { "persons/passenger_0/passport": "GB123…" } },
+//         { "person_ref": "passenger_1", "subject_id": "…",
+//           "changes": { "persons/passenger_1/passport": "FR456…" } }
+//       ]
+//   } }
+//
+// One partition per `secret_partitions` entry; the label equals `person_ref`.
+pub struct AttributesSetCodec;
 
-impl PiiEventCodec for MyCodec {
+impl PiiEventCodec for AttributesSetCodec {
     fn extract_partitions(
         &self,
         event: &mut SerializedEvent,
     ) -> Result<Vec<SecretPartition>, PiiCodecError> {
-        if event.event_type != "UserRegistered" { return Ok(vec![]); }
-        let Some(user_id_str) = event.payload["UserRegistered"]["user_id"].as_str() else {
+        if event.event_type != "AttributesSet" {
             return Ok(vec![]);
-        };
-        let Ok(subject_id) = Uuid::parse_str(user_id_str) else {
-            return Ok(vec![]);
-        };
-        let pii = serde_json::json!({
-            "email": event.payload["UserRegistered"]["email"].clone(),
-            "name":  event.payload["UserRegistered"]["name"].clone(),
-        });
-        // Clear PII from the payload before the repository persists it.
-        if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
-            obj.remove("email");
-            obj.remove("name");
         }
-        Ok(vec![SecretPartition {
-            subject_id,
-            label: "default".to_string(),
-            payload: serde_json::to_vec(&pii)?,
-        }])
+        let parts = &event.payload["AttributesSet"]["secret_partitions"];
+        let n = parts.as_array().map_or(0, Vec::len);
+
+        let mut partitions = Vec::with_capacity(n);
+        for i in 0..n {
+            let entry = &event.payload["AttributesSet"]["secret_partitions"][i];
+            let Some(subject_id) = entry["subject_id"]
+                .as_str()
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                continue;
+            };
+            let Some(person_ref) = entry["person_ref"].as_str().map(str::to_string) else {
+                continue;
+            };
+            let changes = entry["changes"].clone();
+            if changes == json!({}) { // nothing secret in this group
+                continue;
+            }
+
+            // Replace the cleartext changes with `{}`; the bytes are about to be
+            // encrypted into a partition labelled by `person_ref`.
+            event.payload["AttributesSet"]["secret_partitions"][i]["changes"] = json!({});
+
+            partitions.push(SecretPartition {
+                subject_id,
+                label: person_ref,
+                payload: serde_json::to_vec(&changes)?,
+            });
+        }
+        Ok(partitions)
     }
 
     fn reconstruct(
@@ -226,13 +299,22 @@ impl PiiEventCodec for MyCodec {
         event: &mut SerializedEvent,
         partitions: Vec<DecryptedPartition>,
     ) -> Result<(), PiiCodecError> {
-        if event.event_type != "UserRegistered" { return Ok(()); }
+        if event.event_type != "AttributesSet" {
+            return Ok(());
+        }
+        let n = event.payload["AttributesSet"]["secret_partitions"]
+            .as_array()
+            .map_or(0, Vec::len);
         for part in partitions {
-            if part.label == "default" {
-                let pii: Value = serde_json::from_slice(&part.payload)?;
-                if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
-                    obj.insert("email".into(), pii["email"].clone());
-                    obj.insert("name".into(),  pii["name"].clone());
+            // The label routes the decrypted bytes back to the matching entry.
+            for i in 0..n {
+                let matches = event.payload["AttributesSet"]["secret_partitions"][i]["person_ref"]
+                    .as_str()
+                    == Some(part.label.as_str());
+                if matches {
+                    let changes: Value = serde_json::from_slice(&part.payload)?;
+                    event.payload["AttributesSet"]["secret_partitions"][i]["changes"] = changes;
+                    break;
                 }
             }
         }
@@ -244,17 +326,36 @@ impl PiiEventCodec for MyCodec {
         event: &mut SerializedEvent,
         labels: &[String],
     ) -> Result<(), PiiCodecError> {
-        if event.event_type != "UserRegistered" { return Ok(()); }
-        if labels.iter().any(|l| l == "default") {
-            if let Some(obj) = event.payload["UserRegistered"].as_object_mut() {
-                obj.insert("email".into(), Value::String("[redacted]".into()));
-                obj.insert("name".into(),  Value::String("[redacted]".into()));
+        if event.event_type != "AttributesSet" {
+            return Ok(());
+        }
+        let n = event.payload["AttributesSet"]["secret_partitions"]
+            .as_array()
+            .map_or(0, Vec::len);
+        for i in 0..n {
+            let redacted = event.payload["AttributesSet"]["secret_partitions"][i]["person_ref"]
+                .as_str()
+                .is_some_and(|pr| labels.iter().any(|l| l == pr));
+            if redacted {
+                // Sentinel marking a shredded partition.
+                event.payload["AttributesSet"]["secret_partitions"][i]["changes"] =
+                    json!({ "redacted": true });
             }
         }
         Ok(())
     }
 }
 ```
+
+A single-subject event is just the degenerate case: return one `SecretPartition`
+with `label = "default"` and match on that label in `reconstruct` /
+`redact_partitions` — exactly what `#[derive(PiiCodec)]` generates for you.
+
+> **Real-world reference.** A complete, tested implementation of this exact
+> pattern — including the single-subject `PersonCaptured` /
+> `PersonDetailsUpdated` variants and legacy back-compat — lives in this
+> workspace as `JourneyPiiCodec`
+> (`crates/journey_dynamics/src/pii_codec.rs`).
 
 ---
 
@@ -335,10 +436,10 @@ event payload
 Each partition is encrypted independently. Shredding subject A's DEK redacts
 A's partition only; B's partition decrypts normally in the same event.
 
-Most events carry a single partition (`label = "default"`) or none — this is
-what `#[derive(PiiCodec)]` emits for single-subject variants. Multi-subject
-events are written by hand-written codecs that return multiple `SecretPartition`
-entries from `extract_partitions`.
+`#[derive(PiiCodec)]` only emits the single-partition shape (`label = "default"`,
+or none). Multi-subject events are written by hand-written codecs that return one
+`SecretPartition` per subject from `extract_partitions` — see the worked example
+under [Manual implementation](#manual-implementation).
 
 ### Per-partition AAD
 

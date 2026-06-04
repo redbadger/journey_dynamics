@@ -34,7 +34,19 @@ export DATABASE_URL=postgres://postgres:postgres@localhost:5432/journey_dynamics
 
 # 256-bit Key Encryption Key for GDPR crypto-shredding (required)
 export JOURNEY_KEK=$(openssl rand -base64 32)
+
+# Path to the AttributeSchema JSON that classifies each attribute path as
+# plaintext or per-subject secret (optional). When unset, the service runs
+# with a permissive schema that treats every path as plaintext.
+export JOURNEY_ATTRIBUTE_SCHEMA_PATH=./attribute_schema.json
 ```
+
+> **`JOURNEY_ATTRIBUTE_SCHEMA_PATH`** controls how `SetAttributes` routes each
+> path. The permissive default is convenient for local development, but in
+> production you should supply a schema so that PII paths are encrypted under
+> the right subject's DEK. See the
+> [migration guide](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md#configuring-your-attributeschema)
+> for the file format (`permissive`, `plaintext_prefixes`, `namespace_patterns`, exact `paths`).
 
 > **Keep `JOURNEY_KEK` safe.** It wraps every per-subject Data Encryption Key stored in the
 > database. Losing it makes all encrypted PII permanently irrecoverable. In production, load it
@@ -69,6 +81,13 @@ Returns `201 Created` with a `Location: /journeys/{journey_id}` header.
 ```bash
 curl http://localhost:3030/journeys/{journey_id}
 ```
+
+The response includes `shared_data` (the merged path-keyed attribute bag),
+`persons`, and `latest_workflow_decision`. The decision now carries a
+`phase` label alongside `suggested_actions` — read `phase` to drive UI
+state. The top-level `current_step` field is deprecated (it is still
+populated for legacy `StepProgressed` events); prefer
+`latest_workflow_decision.phase`.
 
 #### Set attributes (recommended)
 
@@ -140,10 +159,42 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
 
 ---
 
-#### Legacy API (deprecated in Phase C)
+#### Capture person identity (PII)
 
-The commands below still work and are fully supported. They will be marked
-`#[deprecated]` in a future release; new integrations should use `SetAttributes` above.
+`CapturePerson` is **not** deprecated — it is still the way to bind a `subject_id` to a
+person slot before you write per-person attributes with `SetAttributes`.
+
+`person_ref` is a journey-local slot name (e.g. `"lead_booker"`, `"passenger_0"`). It is not
+PII and is stored in plaintext. `subject_id` is a stable UUID from your identity system — reuse
+it for the same person across multiple journeys so a single erasure request covers all of them.
+
+Name, email, and phone are encrypted at rest using AES-256-GCM under a per-subject Data
+Encryption Key (DEK).
+
+```bash
+curl -X POST http://localhost:3030/journeys/{journey_id} \
+  -H "Content-Type: application/json" \
+  -d '{
+    "CapturePerson": {
+      "person_ref": "passenger_0",
+      "subject_id": "'"$SUBJECT_ID"'",
+      "name": "Alice Smith",
+      "email": "alice@example.com",
+      "phone": "+44-7700-900000"
+    }
+  }'
+```
+
+---
+
+#### Legacy API (deprecated, pending the 0.3.0 release)
+
+The commands below still work and replay correctly, but they are now annotated
+`#[deprecated]` in the domain model (`since = "0.3.0"`, which is not yet published).
+New integrations should use `SetAttributes` above; see the
+[migration guide](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) for a
+command-by-command mapping. They remain fully functional until an explicit
+removal RFC is accepted.
 
 ##### Capture shared step data (non-PII) — legacy
 
@@ -167,29 +218,6 @@ curl -X POST http://localhost:3030/journeys/{journey_id} \
           }
         }
       }
-    }
-  }'
-```
-
-#### Capture person identity (PII)
-
-`person_ref` is a journey-local slot name (e.g. `"lead_booker"`, `"passenger_0"`). It is not
-PII and is stored in plaintext. `subject_id` is a stable UUID from your identity system — reuse
-it for the same person across multiple journeys so a single erasure request covers all of them.
-
-Name, email, and phone are encrypted at rest using AES-256-GCM under a per-subject Data
-Encryption Key (DEK).
-
-```bash
-curl -X POST http://localhost:3030/journeys/{journey_id} \
-  -H "Content-Type: application/json" \
-  -d '{
-    "CapturePerson": {
-      "person_ref": "passenger_0",
-      "subject_id": "'"$SUBJECT_ID"'",
-      "name": "Alice Smith",
-      "email": "alice@example.com",
-      "phone": "+44-7700-900000"
     }
   }'
 ```
@@ -262,7 +290,9 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 
 | Document | Description |
 |---|---|
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed, including the path-keyed attributes work and the list of deprecated commands/events/fields |
 | [`docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md`](docs/PATH_KEYED_ATTRIBUTES_MIGRATION_GUIDE.md) | **Start here** — migrating to `SetAttributes` / `AttributesSet` (path-keyed attributes) |
+| [`docs/PATH_KEYED_ATTRIBUTES_DESIGN.md`](docs/PATH_KEYED_ATTRIBUTES_DESIGN.md) | Design proposal and rationale behind path-keyed attributes |
 | [`docs/QUICK_START.md`](docs/QUICK_START.md) | Step-by-step walkthrough and crypto-shredding demo |
 | [`docs/MULTI_SUBJECT_DESIGN.md`](docs/MULTI_SUBJECT_DESIGN.md) | Multi-subject GDPR crypto-shredding design (current) |
 | [`docs/PERSON_CAPTURE.md`](docs/PERSON_CAPTURE.md) | `CapturePerson` command reference (not deprecated); legacy `CapturePersonDetails` reference |
