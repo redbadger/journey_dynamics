@@ -337,8 +337,16 @@ impl StructuredJourneyViewRepository {
 
     /// Find all journey aggregate IDs that have referenced the given subject.
     ///
-    /// Queries `PersonCaptured` and `PersonDetailsUpdated` events in the event store directly —
-    /// both carry `subject_id` in plaintext, so no decryption is needed.
+    /// Searches three event types in the event store — all carry `subject_id`
+    /// in plaintext or in an unencrypted index array, so no decryption is
+    /// needed:
+    ///
+    /// - `PersonCaptured` / `PersonDetailsUpdated` — legacy and current
+    ///   identity-capture events; subject UUID is a top-level string field.
+    /// - `AttributesSet` — new path-keyed command; the crypto layer writes a
+    ///   `subjects` array of UUID strings alongside the encrypted partitions.
+    ///   Queried with a GIN array-containment predicate backed by
+    ///   `idx_events_attributes_set_subjects`.
     ///
     /// # Errors
     ///
@@ -358,6 +366,10 @@ impl StructuredJourneyViewRepository {
                 OR
                 (event_type = 'PersonDetailsUpdated'
                  AND payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
+                OR
+                (event_type = 'AttributesSet'
+                 AND payload -> 'AttributesSet' -> 'subjects'
+                     @> jsonb_build_array($1))
               )
             ",
         )
