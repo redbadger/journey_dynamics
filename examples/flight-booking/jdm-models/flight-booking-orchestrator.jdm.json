@@ -8,24 +8,87 @@
       "name": "Attribute Bag"
     },
     {
-      "id": "derive",
+      "id": "derive-person-list",
       "type": "expressionNode",
       "position": { "x": 350, "y": 300 },
-      "name": "Derive Helpers",
+      "name": "Derive Person List",
       "content": {
         "expressions": [
           {
             "id": "e1",
-            "key": "computed",
-            "value": "pv = persons != null ? values(persons) : []; pn = len(pv); pt = search != null and search.passengers != null ? number(search.passengers.adults) + number(search.passengers.children) + number(search.passengers.infants) : 0; { hasSearch: search != null and search.origin != null and search.destination != null, hasOutbound: booking != null and booking.selectedOutboundFlight != null, hasReturn: booking != null and booking.selectedReturnFlight != null, isRoundTrip: search != null and search.tripType == 'round-trip', paymentDone: booking != null and booking.paymentStatus == 'completed', passengersComplete: pn >= pt and pn > 0 and (pn > 0 ? all(pv, #.passengerType != null) : false) }"
+            "key": "persons_list",
+            "value": "persons != null ? values(persons) : []"
           }
-        ]
+        ],
+        "passThrough": true
+      }
+    },
+    {
+      "id": "derive-passenger-counts",
+      "type": "expressionNode",
+      "position": { "x": 600, "y": 300 },
+      "name": "Derive Passenger Counts",
+      "content": {
+        "expressions": [
+          {
+            "id": "e1",
+            "key": "passenger_counts.found",
+            "value": "len(persons_list)"
+          },
+          {
+            "id": "e2",
+            "key": "passenger_counts.required",
+            "value": "number(search.passengers.adults ?? 0) + number(search.passengers.children ?? 0) + number(search.passengers.infants ?? 0)"
+          }
+        ],
+        "passThrough": true
+      }
+    },
+    {
+      "id": "derive-flags",
+      "type": "expressionNode",
+      "position": { "x": 850, "y": 300 },
+      "name": "Derive Flags",
+      "content": {
+        "expressions": [
+          {
+            "id": "e1",
+            "key": "computed.hasSearch",
+            "value": "search.origin != null and search.destination != null"
+          },
+          {
+            "id": "e2",
+            "key": "computed.hasOutbound",
+            "value": "booking.selectedOutboundFlight != null"
+          },
+          {
+            "id": "e3",
+            "key": "computed.hasReturn",
+            "value": "booking.selectedReturnFlight != null"
+          },
+          {
+            "id": "e4",
+            "key": "computed.isRoundTrip",
+            "value": "search.tripType == 'round-trip'"
+          },
+          {
+            "id": "e5",
+            "key": "computed.paymentDone",
+            "value": "booking.paymentStatus == 'completed'"
+          },
+          {
+            "id": "e6",
+            "key": "computed.passengersComplete",
+            "value": "passenger_counts.found >= passenger_counts.required and passenger_counts.found > 0 and all(persons_list, #.passengerType != null)"
+          }
+        ],
+        "passThrough": true
       }
     },
     {
       "id": "phase-table",
       "type": "decisionTableNode",
-      "position": { "x": 650, "y": 300 },
+      "position": { "x": 1100, "y": 300 },
       "name": "Phase and Actions",
       "content": {
         "hitPolicy": "first",
@@ -154,20 +217,32 @@
     {
       "id": "output",
       "type": "outputNode",
-      "position": { "x": 950, "y": 300 },
+      "position": { "x": 1350, "y": 300 },
       "name": "Result"
     }
   ],
   "edges": [
     {
-      "id": "edge-input-derive",
+      "id": "edge-input-derive-person-list",
       "sourceId": "input",
       "type": "edge",
-      "targetId": "derive"
+      "targetId": "derive-person-list"
     },
     {
-      "id": "edge-derive-table",
-      "sourceId": "derive",
+      "id": "edge-derive-person-list-derive-passenger-counts",
+      "sourceId": "derive-person-list",
+      "type": "edge",
+      "targetId": "derive-passenger-counts"
+    },
+    {
+      "id": "edge-derive-passenger-counts-derive-flags",
+      "sourceId": "derive-passenger-counts",
+      "type": "edge",
+      "targetId": "derive-flags"
+    },
+    {
+      "id": "edge-derive-flags-phase-table",
+      "sourceId": "derive-flags",
       "type": "edge",
       "targetId": "phase-table"
     },
