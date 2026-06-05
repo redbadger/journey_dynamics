@@ -290,6 +290,25 @@ pub struct Classification {
 rather than the resolved UUID. The UUID is still threaded through as the second
 element of the tuple for the encryption layer.
 
+#### Why not key by UUID and merge all of a subject's changes together?
+
+Keying by UUID and merging would also be correct for current requirements —
+encrypt/decrypt, `shared_data` reconstruction, and `ForgetSubject` all work the
+same way regardless. The reasons for keying by role path instead are:
+
+- **Partition label semantics.** Each `SecretPartitionData` carries a `role_path`
+  as its crypto label (AAD). Keying by role path keeps the label and the
+  classification key consistent. With UUID keying the natural label would be the
+  UUID string itself, which is opaque and harder to reason about when inspecting
+  stored events.
+- **Future per-role shredding.** If retention periods or consent scopes ever
+  differ by role (e.g. lead-booker data kept 7 years, passenger data kept 2
+  years), per-role partitions make that tractable. Merging into one partition per
+  subject forecloses that option without re-engineering the event store.
+
+If neither concern applies, UUID keying would produce fewer, smaller partitions
+(one per subject rather than one per role) and is a valid alternative.
+
 ### `SecretPartitionData` — `person_ref` → `role_path`
 
 ```rust
