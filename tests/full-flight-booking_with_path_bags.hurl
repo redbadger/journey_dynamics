@@ -199,28 +199,20 @@ Content-Type: application/json
 {
     "SetAttributes": {
         "changes": {
-            "booking/selectedSeats": {
-                "outbound": ["12A", "12B", "12C"],
-                "return":   ["14A", "14B", "14C"]
-            },
+            "booking/selectedSeats/outbound": ["12A", "12B", "12C"],
+            "booking/selectedSeats/return": ["14A", "14B", "14C"],
             "booking/seatUpgradeTotal": 45.00,
-            "booking/insurance": {
-                "selected":        true,
-                "insurance_type":  "comprehensive",
-                "price":           45.00
-            },
+            "booking/insurance/selected": true,
+            "booking/insurance/insurance_type": "comprehensive",
+            "booking/insurance/price": 45.00,
             "booking/paymentStatus": "completed",
-            "booking/payment": {
-                "method":         "credit_card",
-                "status":         "completed",
-                "transaction_id": "txn_abc123xyz"
-            },
-            "booking/pricing": {
-                "basePrice":  579.98,
-                "taxes":      180.00,
-                "totalPrice": 759.98,
-                "currency":   "USD"
-            }
+            "booking/payment/method": "credit_card",
+            "booking/payment/status": "completed",
+            "booking/payment/transaction_id": "txn_abc123xyz",
+            "booking/pricing/basePrice": 579.98,
+            "booking/pricing/taxes": 180.00,
+            "booking/pricing/totalPrice": 759.98,
+            "booking/pricing/currency": "USD"
         }
     }
 }
