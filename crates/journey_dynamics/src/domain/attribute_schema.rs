@@ -618,6 +618,153 @@ mod tests {
         assert!(result.unknown.is_empty());
     }
 
+    // ── classification precedence ──────────────────────────────────────────
+
+    #[test]
+    fn namespace_pattern_beats_plaintext_prefix() {
+        // The critical rule from the design doc: a namespace pattern (step 2)
+        // is evaluated before a plaintext prefix (step 3), so a secret field
+        // inside an otherwise-plaintext subtree is still encrypted.
+        //
+        // Schema: `booking` is a plaintext prefix, but
+        //         `booking/passengers` is a namespace pattern.
+        let schema = AttributeSchema::new(BTreeMap::new(), None)
+            .with_plaintext_prefixes(vec!["booking".to_string()])
+            .with_namespace_patterns(vec![NamespacePattern {
+                prefix: "booking/passengers".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // A plain booking field → Plaintext (step 3).
+        assert!(matches!(
+            schema.classify(&path("booking/origin")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // A passenger secret field → Secret (step 2 wins over step 3).
+        assert!(matches!(
+            schema
+                .classify(&path("booking/passengers/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject })
+                if subject.as_str() == "booking/passengers/alice-ref"
+        ));
+    }
+
+    #[test]
+    fn exact_entry_overrides_namespace_pattern_default() {
+        // An exact path entry (step 1) must override a namespace pattern's
+        // default-secret classification (step 2).
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            path("persons/0/role"),
+            PiiClass::Plaintext, // explicit one-off exemption
+        );
+        let schema =
+            AttributeSchema::new(paths, None).with_namespace_patterns(vec![NamespacePattern {
+                prefix: "persons".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // The exact entry wins — Plaintext, not Secret.
+        assert!(matches!(
+            schema.classify(&path("persons/0/role")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // Other fields still follow the namespace pattern → Secret.
+        assert!(matches!(
+            schema.classify(&path("persons/0/firstName")).as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "persons/0"
+        ));
+    }
+
+    #[test]
+    fn path_without_attribute_segment_falls_through() {
+        // `prefix/ref` with no attribute segment must not match a namespace
+        // pattern and should fall through to the next rule.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "pax".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // `pax/alice-ref` — no attribute segment — falls through to permissive.
+        assert!(matches!(
+            schema.classify(&path("pax/alice-ref")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // `pax` alone — too short — falls through to permissive.
+        assert!(matches!(
+            schema.classify(&path("pax")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
+    #[test]
+    fn multi_segment_suffix_is_classified_as_secret() {
+        // A deep field like `pax/alice-ref/address/line1` has a multi-segment
+        // suffix (`address/line1`); it should still be classified as Secret
+        // unless that exact suffix is in plaintext_suffixes.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "pax".parse().unwrap(),
+                plaintext_suffixes: ["address/postalCode".to_string()].into(),
+            }]);
+
+        // Multi-segment suffix not in plaintext_suffixes → Secret.
+        assert!(matches!(
+            schema
+                .classify(&path("pax/alice-ref/address/line1"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "pax/alice-ref"
+        ));
+
+        // Multi-segment suffix that IS in plaintext_suffixes → Plaintext.
+        assert!(matches!(
+            schema
+                .classify(&path("pax/alice-ref/address/postalCode"))
+                .as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
+    #[test]
+    fn multi_segment_prefix_pattern_matches_correctly() {
+        // A namespace pattern with a multi-segment prefix such as
+        // `flights/outbound/pax` should match paths like
+        // `flights/outbound/pax/{ref}/{field}` but NOT shorter paths.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "flights/outbound/pax".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // Correct depth → Secret.
+        assert!(matches!(
+            schema
+                .classify(&path("flights/outbound/pax/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject })
+                if subject.as_str() == "flights/outbound/pax/alice-ref"
+        ));
+
+        // A different top-level namespace → falls through to permissive.
+        assert!(matches!(
+            schema
+                .classify(&path("flights/inbound/pax/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // Path stops at the prefix itself — too short → falls through.
+        assert!(matches!(
+            schema.classify(&path("flights/outbound/pax")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
     #[test]
     fn attribute_schema_config_round_trips_via_json() {
         let config = AttributeSchemaConfig {
