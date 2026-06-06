@@ -242,15 +242,37 @@ impl Aggregate for Journey {
                 }
 
                 // Classify every path against the attribute schema.
-                // The subject_lookup resolves "persons/<ref>" → slot UUID.
+                //
+                // subject_lookup resolves a role path (e.g. `"persons/passenger_0"`)
+                // to the subject UUID whose DEK encrypts that role's secret fields.
+                //
+                // Resolution order:
+                //   1. `self.bindings` — role paths established by `BindSubject` /
+                //      `CaptureAndBindSubject` (new path).
+                //   2. `self.persons` — legacy fallback for journeys that still use
+                //      `CapturePerson` (backward compat until Layer 6).
+                //
+                // Forgotten subjects return `None` so their paths land in `unknown`
+                // and the command is rejected.
                 let schema = services.attribute_schema();
                 let classification = {
+                    let bindings = &self.bindings;
+                    let subjects = &self.subjects;
                     let persons = &self.persons;
                     classify_changes(schema, &changes, |subject_path| {
+                        // 1. New path: role-path binding.
+                        if let Some(&uuid) = bindings.get(subject_path) {
+                            if subjects.get(&uuid).is_some_and(|r| r.forgotten) {
+                                return None;
+                            }
+                            return Some(uuid);
+                        }
+                        // 2. Legacy fallback: strip "persons/" and look in persons map.
                         subject_path
                             .as_str()
                             .strip_prefix("persons/")
                             .and_then(|person_ref| persons.get(person_ref))
+                            .filter(|slot| !slot.forgotten)
                             .map(|slot| slot.subject_id)
                     })
                 };
@@ -2049,6 +2071,84 @@ mod tests {
                     phase: None,
                 },
             ]);
+    }
+
+    // ── SetAttributes via bindings (new path) ─────────────────────────────
+
+    #[test]
+    fn set_attributes_resolves_subject_via_bindings() {
+        // A secret attribute whose role path exists in `self.bindings` (registered
+        // via CaptureAndBindSubject) must be encrypted successfully.
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        let passport_path: AttributePath = "persons/passenger_0/passport".parse().unwrap();
+        let mut changes = BTreeMap::new();
+        changes.insert(passport_path.clone(), json!("AB123456"));
+
+        let mut expected_secret = BTreeMap::new();
+        expected_secret.insert(passport_path, json!("AB123456"));
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: role_path.clone(),
+                    subject_id,
+                },
+            ])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_events(vec![
+                JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::new(),
+                    secret_partitions: vec![SecretPartitionData {
+                        role_path,
+                        subject_id,
+                        changes: expected_secret,
+                    }],
+                },
+                JourneyEvent::WorkflowEvaluated {
+                    suggested_actions: vec![],
+                    phase: None,
+                },
+            ]);
+    }
+
+    #[test]
+    fn set_attributes_rejects_secret_path_when_subject_forgotten_via_bindings() {
+        // A forgotten subject's role path must not be usable in SetAttributes —
+        // their DEK has been deleted and encryption would fail.
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "persons/passenger_0/passport"
+                .parse::<AttributePath>()
+                .unwrap(),
+            json!("AB123456"),
+        );
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: "persons/passenger_0".parse().unwrap(),
+                    subject_id,
+                },
+                JourneyEvent::SubjectForgotten { subject_id },
+            ])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
     }
 
     #[test]
