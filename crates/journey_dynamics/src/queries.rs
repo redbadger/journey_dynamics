@@ -124,9 +124,13 @@ impl View<Journey> for JourneyView {
             // StructuredJourneyViewRepository; no state change needed here.
             // Person events are projected to journey_person by StructuredJourneyViewRepository.
             // The persons field on JourneyView is populated by load(), not from events.
+            // These events are handled by StructuredJourneyViewRepository
+            // or are purely audit records; no in-memory view update needed.
             JourneyEvent::PersonCaptured { .. }
             | JourneyEvent::PersonDetailsUpdated { .. }
-            | JourneyEvent::SubjectForgotten { .. } => {}
+            | JourneyEvent::SubjectForgotten { .. }
+            | JourneyEvent::SubjectCaptured { .. }
+            | JourneyEvent::SubjectBound { .. } => {}
 
             JourneyEvent::WorkflowEvaluated {
                 suggested_actions,

@@ -18,6 +18,15 @@ use crate::{
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
 
+/// Registration record for a data subject captured via [`JourneyCommand::CaptureSubject`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubjectRegistration {
+    /// Contact email — used for GDPR erasure lookup.
+    pub email: String,
+    /// Set to `true` once a `SubjectForgotten` event is applied.
+    pub forgotten: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Journey {
     id: Uuid,
@@ -26,7 +35,12 @@ pub struct Journey {
     /// Never encrypted. Fully intact after any shredding operation.
     shared_data: Value,
     /// Per-person slots, keyed by client-assigned `person_ref`.
+    /// Retained for backward-compat replay of `PersonCaptured` events.
     persons: BTreeMap<String, PersonSlot>,
+    /// Registered subjects, keyed by subject UUID.
+    subjects: BTreeMap<Uuid, SubjectRegistration>,
+    /// Role-path → subject-UUID bindings established by `BindSubject`.
+    bindings: BTreeMap<AttributePath, Uuid>,
     current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
 }
@@ -332,19 +346,112 @@ impl Aggregate for Journey {
                 }
             }
 
+            JourneyCommand::CaptureSubject { subject_id, email } => {
+                if self.id == Uuid::default() {
+                    return Err(JourneyError::NotFound);
+                }
+                if JourneyState::Complete == self.state {
+                    return Err(JourneyError::AlreadyCompleted);
+                }
+                // Idempotent: skip if already registered with the same email.
+                if self
+                    .subjects
+                    .get(&subject_id)
+                    .is_some_and(|reg| reg.email == email)
+                {
+                    return Ok(());
+                }
+                sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                    .await;
+                Ok(())
+            }
+
+            JourneyCommand::BindSubject {
+                role_path,
+                subject_id,
+            } => {
+                if self.id == Uuid::default() {
+                    return Err(JourneyError::NotFound);
+                }
+                if JourneyState::Complete == self.state {
+                    return Err(JourneyError::AlreadyCompleted);
+                }
+                if !self.subjects.contains_key(&subject_id) {
+                    return Err(JourneyError::SubjectNotRegistered);
+                }
+                match self.bindings.get(&role_path) {
+                    Some(&existing) if existing != subject_id => {
+                        return Err(JourneyError::RolePathConflict(role_path));
+                    }
+                    Some(_) => return Ok(()), // same subject — idempotent
+                    None => {}
+                }
+                sink.write(
+                    JourneyEvent::SubjectBound {
+                        role_path,
+                        subject_id,
+                    },
+                    self,
+                )
+                .await;
+                Ok(())
+            }
+
+            JourneyCommand::CaptureAndBindSubject {
+                role_path,
+                subject_id,
+                email,
+            } => {
+                if self.id == Uuid::default() {
+                    return Err(JourneyError::NotFound);
+                }
+                if JourneyState::Complete == self.state {
+                    return Err(JourneyError::AlreadyCompleted);
+                }
+                // Validate the binding upfront before emitting any events.
+                if let Some(&existing) = self.bindings.get(&role_path)
+                    && existing != subject_id
+                {
+                    return Err(JourneyError::RolePathConflict(role_path));
+                }
+                // Emit SubjectCaptured if new or email changed.
+                if self
+                    .subjects
+                    .get(&subject_id)
+                    .is_none_or(|reg| reg.email != email)
+                {
+                    sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                        .await;
+                }
+                // Emit SubjectBound if not already bound.
+                if !self.bindings.contains_key(&role_path) {
+                    sink.write(
+                        JourneyEvent::SubjectBound {
+                            role_path,
+                            subject_id,
+                        },
+                        self,
+                    )
+                    .await;
+                }
+                Ok(())
+            }
+
             JourneyCommand::ForgetSubject { subject_id } => {
                 if self.id == Uuid::default() {
                     return Err(JourneyError::NotFound);
                 }
-                // Only emit SubjectForgotten if the subject has at least one
-                // non-forgotten slot in this journey.  This makes the shredding
-                // endpoint idempotent: a second erasure request for the same
-                // subject (or one issued after the journey is already complete)
-                // does not produce a duplicate audit event.
+                // Only emit SubjectForgotten if the subject is still active
+                // in either the new subjects map or the legacy persons slots.
+                // This keeps the shredding endpoint idempotent.
                 let needs_forgetting = self
-                    .persons
-                    .values()
-                    .any(|slot| slot.subject_id == subject_id && !slot.forgotten);
+                    .subjects
+                    .get(&subject_id)
+                    .is_some_and(|reg| !reg.forgotten)
+                    || self
+                        .persons
+                        .values()
+                        .any(|slot| slot.subject_id == subject_id && !slot.forgotten);
                 if needs_forgetting {
                     sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
                         .await;
@@ -354,7 +461,7 @@ impl Aggregate for Journey {
         }
     }
 
-    #[allow(deprecated)]
+    #[allow(deprecated, clippy::too_many_lines)]
     fn apply(&mut self, event: Self::Event) {
         match event {
             JourneyEvent::Started { id } => {
@@ -446,11 +553,31 @@ impl Aggregate for Journey {
                 self.state = JourneyState::Complete;
             }
             JourneyEvent::SubjectForgotten { subject_id } => {
+                // Mark forgotten in the new subjects map.
+                if let Some(reg) = self.subjects.get_mut(&subject_id) {
+                    reg.forgotten = true;
+                }
+                // Also mark legacy person slots for backward compat.
                 for slot in self.persons.values_mut() {
                     if slot.subject_id == subject_id {
                         slot.forgotten = true;
                     }
                 }
+            }
+            JourneyEvent::SubjectCaptured { subject_id, email } => {
+                self.subjects
+                    .entry(subject_id)
+                    .and_modify(|reg| reg.email.clone_from(&email))
+                    .or_insert_with(|| SubjectRegistration {
+                        email,
+                        forgotten: false,
+                    });
+            }
+            JourneyEvent::SubjectBound {
+                role_path,
+                subject_id,
+            } => {
+                self.bindings.insert(role_path, subject_id);
             }
         }
     }
@@ -474,6 +601,10 @@ pub enum JourneyError {
     PersonNotFound(String),
     #[error("Unknown attribute paths: {0:?}")]
     UnknownAttributePath(Vec<AttributePath>),
+    #[error("Subject not registered — call CaptureSubject first")]
+    SubjectNotRegistered,
+    #[error("Role path '{0}' is already bound to a different subject")]
+    RolePathConflict(AttributePath),
 }
 
 pub struct JourneyServices {
@@ -545,6 +676,16 @@ impl Journey {
     pub const fn persons(&self) -> &BTreeMap<String, PersonSlot> {
         &self.persons
     }
+
+    #[must_use]
+    pub const fn subjects(&self) -> &BTreeMap<Uuid, SubjectRegistration> {
+        &self.subjects
+    }
+
+    #[must_use]
+    pub const fn bindings(&self) -> &BTreeMap<AttributePath, Uuid> {
+        &self.bindings
+    }
 }
 
 impl Default for Journey {
@@ -554,6 +695,8 @@ impl Default for Journey {
             state: JourneyState::default(),
             shared_data: json!({}),
             persons: BTreeMap::new(),
+            subjects: BTreeMap::new(),
+            bindings: BTreeMap::new(),
             current_step: None,
             latest_workflow_decision: None,
         }
@@ -1330,6 +1473,302 @@ mod tests {
 
         let p1 = journey.persons().get("passenger_1").unwrap();
         assert!(!p1.forgotten, "passenger_1 should NOT be forgotten");
+    }
+
+    // ── CaptureSubject / BindSubject / CaptureAndBindSubject ────────────────
+
+    #[test]
+    fn capture_subject_emits_subject_captured() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::CaptureSubject {
+                subject_id,
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
+                subject_id,
+                email: "alice@example.com".to_string(),
+            }]);
+    }
+
+    #[test]
+    fn capture_subject_is_idempotent_with_same_email() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+            ])
+            .when(JourneyCommand::CaptureSubject {
+                subject_id,
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_events(vec![]);
+    }
+
+    #[test]
+    fn capture_subject_updates_email() {
+        // Re-capturing with a different email must emit a new SubjectCaptured.
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "old@example.com".to_string(),
+                },
+            ])
+            .when(JourneyCommand::CaptureSubject {
+                subject_id,
+                email: "new@example.com".to_string(),
+            })
+            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
+                subject_id,
+                email: "new@example.com".to_string(),
+            }]);
+    }
+
+    #[test]
+    fn capture_subject_requires_started() {
+        JourneyTester::with(services())
+            .given_no_previous_events()
+            .when(JourneyCommand::CaptureSubject {
+                subject_id: Uuid::new_v4(),
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_error(JourneyError::NotFound);
+    }
+
+    #[test]
+    fn capture_subject_rejects_after_complete() {
+        let id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
+            .when(JourneyCommand::CaptureSubject {
+                subject_id: Uuid::new_v4(),
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_error(JourneyError::AlreadyCompleted);
+    }
+
+    #[test]
+    fn bind_subject_emits_subject_bound() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+            ])
+            .when(JourneyCommand::BindSubject {
+                role_path: role_path.clone(),
+                subject_id,
+            })
+            .then_expect_events(vec![JourneyEvent::SubjectBound {
+                role_path,
+                subject_id,
+            }]);
+    }
+
+    #[test]
+    fn bind_subject_is_idempotent() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: role_path.clone(),
+                    subject_id,
+                },
+            ])
+            .when(JourneyCommand::BindSubject {
+                role_path,
+                subject_id,
+            })
+            .then_expect_events(vec![]);
+    }
+
+    #[test]
+    fn bind_subject_rejects_role_path_conflict() {
+        // Binding a different subject to an already-bound role path must fail.
+        let id = Uuid::new_v4();
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id: subject_a,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectCaptured {
+                    subject_id: subject_b,
+                    email: "bob@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: role_path.clone(),
+                    subject_id: subject_a,
+                },
+            ])
+            .when(JourneyCommand::BindSubject {
+                role_path: role_path.clone(),
+                subject_id: subject_b,
+            })
+            .then_expect_error(JourneyError::RolePathConflict(role_path));
+    }
+
+    #[test]
+    fn bind_subject_rejects_unregistered_subject() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::BindSubject {
+                role_path: "persons/passenger_0".parse().unwrap(),
+                subject_id,
+            })
+            .then_expect_error(JourneyError::SubjectNotRegistered);
+    }
+
+    #[test]
+    fn capture_and_bind_subject_emits_both_events() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::CaptureAndBindSubject {
+                role_path: role_path.clone(),
+                subject_id,
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_events(vec![
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path,
+                    subject_id,
+                },
+            ]);
+    }
+
+    #[test]
+    fn capture_and_bind_subject_is_idempotent() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: role_path.clone(),
+                    subject_id,
+                },
+            ])
+            .when(JourneyCommand::CaptureAndBindSubject {
+                role_path,
+                subject_id,
+                email: "alice@example.com".to_string(),
+            })
+            .then_expect_events(vec![]);
+    }
+
+    #[test]
+    fn capture_and_bind_subject_rejects_role_path_conflict() {
+        let id = Uuid::new_v4();
+        let subject_a = Uuid::new_v4();
+        let subject_b = Uuid::new_v4();
+        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id: subject_a,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: role_path.clone(),
+                    subject_id: subject_a,
+                },
+            ])
+            .when(JourneyCommand::CaptureAndBindSubject {
+                role_path: role_path.clone(),
+                subject_id: subject_b,
+                email: "bob@example.com".to_string(),
+            })
+            .then_expect_error(JourneyError::RolePathConflict(role_path));
+    }
+
+    #[test]
+    fn forget_subject_via_subjects_map() {
+        // ForgetSubject must work for subjects registered via CaptureSubject
+        // (not just the legacy PersonCaptured path).
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+            ])
+            .when(JourneyCommand::ForgetSubject { subject_id })
+            .then_expect_events(vec![JourneyEvent::SubjectForgotten { subject_id }]);
+    }
+
+    #[test]
+    fn forget_subject_via_subjects_map_is_idempotent() {
+        let id = Uuid::new_v4();
+        let subject_id = Uuid::new_v4();
+
+        JourneyTester::with(services())
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectForgotten { subject_id },
+            ])
+            .when(JourneyCommand::ForgetSubject { subject_id })
+            .then_expect_events(vec![]);
     }
 
     // ── apply() — shared_data accumulation ───────────────────────────────────

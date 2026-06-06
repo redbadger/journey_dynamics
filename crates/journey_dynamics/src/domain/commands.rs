@@ -62,6 +62,33 @@ pub enum JourneyCommand {
     #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
     CapturePersonDetails { person_ref: String, data: Value },
 
+    /// Register a data subject (email → `subject_id` mapping) in this journey.
+    ///
+    /// If the subject is already registered with the same email the command is
+    /// a no-op. If registered with a *different* email, the email is updated.
+    ///
+    /// Email is required so the subject can be found by GDPR erasure requests.
+    CaptureSubject { subject_id: Uuid, email: String },
+
+    /// Bind a registered subject to a role path (e.g. `"persons/passenger_0"`).
+    ///
+    /// The subject must have been registered by a prior `CaptureSubject`
+    /// command. The role path must not already be bound to a *different*
+    /// subject; binding the same subject to the same path is idempotent.
+    BindSubject {
+        role_path: AttributePath,
+        subject_id: Uuid,
+    },
+
+    /// Convenience composite: register a subject and bind it to a role path
+    /// in a single command. Equivalent to `CaptureSubject` followed by
+    /// `BindSubject` but avoids a round-trip when both are needed together.
+    CaptureAndBindSubject {
+        role_path: AttributePath,
+        subject_id: Uuid,
+        email: String,
+    },
+
     /// Mark the journey as complete.
     Complete,
 

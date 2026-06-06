@@ -110,6 +110,16 @@ pub enum JourneyEvent {
     SubjectForgotten {
         subject_id: Uuid,
     },
+    /// A data subject was registered in this journey.
+    SubjectCaptured {
+        subject_id: Uuid,
+        email: String,
+    },
+    /// A registered subject was bound to a role path within this journey.
+    SubjectBound {
+        role_path: AttributePath,
+        subject_id: Uuid,
+    },
     /// Path-keyed attribute changes produced by a `SetAttributes` command.
     ///
     /// `plaintext` contains all changes that the attribute schema classified
@@ -138,6 +148,8 @@ impl DomainEvent for JourneyEvent {
             Self::StepProgressed { .. } => "StepProgressed",
             Self::Completed => "JourneyClosed",
             Self::SubjectForgotten { .. } => "SubjectForgotten",
+            Self::SubjectCaptured { .. } => "SubjectCaptured",
+            Self::SubjectBound { .. } => "SubjectBound",
             Self::AttributesSet { .. } => "AttributesSet",
         };
         event_type.to_string()

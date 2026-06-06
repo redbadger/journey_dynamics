@@ -794,6 +794,10 @@ impl StructuredJourneyViewRepository {
                     .await?;
                 }
             }
+
+            // SubjectCaptured and SubjectBound will be projected to a
+            // journey_subject table in Layer 7; for now they are no-ops.
+            JourneyEvent::SubjectCaptured { .. } | JourneyEvent::SubjectBound { .. } => {}
         }
 
         Ok(())
