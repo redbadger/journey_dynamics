@@ -64,6 +64,7 @@ impl Aggregate for Journey {
 
     const TYPE: &'static str = "Journey";
 
+    #[allow(clippy::too_many_lines)]
     async fn handle(
         &mut self,
         command: Self::Command,
@@ -339,8 +340,8 @@ impl Aggregate for Journey {
                     });
                 self.bindings.insert(role_path, subject_id);
             }
-            JourneyEvent::PersonDetailsUpdated { .. } => {
-                // Legacy event. Projected to journey_person by
+            JourneyEvent::PersonDetailsUpdated { .. } | JourneyEvent::StepProgressed { .. } => {
+                // Legacy events. Projected directly from event payloads by
                 // StructuredJourneyViewRepository; no write-side state to update.
             }
             JourneyEvent::AttributesSet {
@@ -365,10 +366,6 @@ impl Aggregate for Journey {
                     suggested_actions,
                     phase,
                 });
-            }
-            JourneyEvent::StepProgressed { .. } => {
-                // Legacy event. Projected to journey_view.current_step by
-                // StructuredJourneyViewRepository; no write-side state to update.
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
