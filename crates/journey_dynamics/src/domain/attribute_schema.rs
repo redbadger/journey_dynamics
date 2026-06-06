@@ -39,12 +39,15 @@ pub enum PiiClass {
 /// to permissive mode if the schema is permissive).
 #[derive(Debug, Clone)]
 pub struct NamespacePattern {
-    /// First path segment, e.g. `"persons"`.
-    pub namespace: String,
-    /// Leaf field names classified as `Secret` under `<namespace>/<ref>`.
-    pub secret_fields: BTreeSet<String>,
-    /// Leaf field names classified as `Plaintext`.
-    pub plaintext_fields: BTreeSet<String>,
+    /// Path prefix — one or more segments. The segment immediately after
+    /// this prefix in any matching path is the role ref.
+    ///
+    /// e.g. `"pax"` matches `pax/{ref}/…`
+    ///      `"flights/outbound/pax"` matches `flights/outbound/pax/{ref}/…`
+    pub prefix: AttributePath,
+    /// Suffixes (relative to `prefix/{ref}`) that are exempt from encryption.
+    /// Everything else under the namespace is Secret by default.
+    pub plaintext_suffixes: BTreeSet<String>,
 }
 
 // ── AttributeSchema ───────────────────────────────────────────────────────────
@@ -135,7 +138,7 @@ impl AttributeSchema {
     ///
     /// Resolution order:
     /// 1. Exact match in `paths`.
-    /// 2. Namespace pattern match for three-segment paths (`namespace/ref/field`).
+    /// 2. Namespace pattern match (matches `prefix/{ref}/suffix`).
     /// 3. Plaintext prefix — `Some(Plaintext)` if the first segment is listed.
     /// 4. Permissive fallback — `Some(Plaintext)` if the schema is permissive.
     /// 5. `None` — path is unknown.
@@ -150,20 +153,36 @@ impl AttributeSchema {
             return Some(Cow::Borrowed(cls));
         }
 
-        // 2. Namespace pattern: only applies to exactly three segments.
-        let segs: Vec<&str> = path.segments().collect();
-        if segs.len() == 3 {
-            for pattern in &self.namespace_patterns {
-                if segs[0] != pattern.namespace {
+        // 2. Namespace pattern.
+        for pattern in &self.namespace_patterns {
+            if path.starts_with(&pattern.prefix) {
+                // Find the part after the prefix.
+                // path = prefix + "/" + ref + "/" + suffix...
+                let path_str = path.as_str();
+                let prefix_str = pattern.prefix.as_str();
+
+                // Skip prefix and the following '/'
+                let remaining = &path_str[prefix_str.len()..];
+                if !remaining.starts_with('/') {
                     continue;
                 }
-                let field = segs[2];
-                if pattern.plaintext_fields.contains(field) {
-                    return Some(Cow::Borrowed(&PLAINTEXT));
-                }
-                if pattern.secret_fields.contains(field) {
-                    // Build subject path dynamically: namespace/ref
-                    let subject_str = format!("{}/{}", segs[0], segs[1]);
+                let remaining = &remaining[1..];
+
+                // The next segment is the role ref.
+                if let Some(first_slash) = remaining.find('/') {
+                    let ref_part = &remaining[..first_slash];
+                    let suffix = &remaining[first_slash + 1..];
+
+                    // If the suffix is empty, it's not a field, so it doesn't match this pattern.
+                    if suffix.is_empty() {
+                        continue;
+                    }
+
+                    // Plaintext-exempt suffixes pass through; everything else is Secret.
+                    if pattern.plaintext_suffixes.contains(suffix) {
+                        return Some(Cow::Borrowed(&PLAINTEXT));
+                    }
+                    let subject_str = format!("{prefix_str}/{ref_part}");
                     if let Ok(subject) = subject_str.parse::<AttributePath>() {
                         return Some(Cow::Owned(PiiClass::Secret { subject }));
                     }
@@ -172,6 +191,7 @@ impl AttributeSchema {
         }
 
         // 3. Plaintext prefix.
+        let segs: Vec<&str> = path.segments().collect();
         if let Some(first) = segs.first()
             && self.plaintext_prefixes.iter().any(|p| p.as_str() == *first)
         {
@@ -234,13 +254,27 @@ pub struct AttributeSchemaConfig {
 }
 
 /// JSON-serialisable form of [`NamespacePattern`].
+///
+/// # Backward compatibility
+/// The old format used `namespace` (single segment string) and split fields
+/// into `secret_fields` / `plaintext_fields`.  Existing configs are still
+/// accepted via serde aliases:
+/// - `namespace` is an alias for `prefix`
+/// - `plaintext_fields` is an alias for `plaintext_suffixes`
+/// - `secret_fields` is silently ignored on read (those fields remain secret
+///   under the new default-secret rule)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespacePatternConfig {
-    pub namespace: String,
-    #[serde(default)]
-    pub secret_fields: BTreeSet<String>,
-    #[serde(default)]
-    pub plaintext_fields: BTreeSet<String>,
+    /// Path prefix — one or more segments. The segment immediately after
+    /// this prefix in any matching path is the role ref.
+    /// Accepts `"namespace"` as an alias for backward compatibility.
+    #[serde(alias = "namespace")]
+    pub prefix: AttributePath,
+    /// Suffixes (relative to `prefix/{ref}`) that are exempt from encryption.
+    /// Everything else under the namespace is Secret by default.
+    /// Accepts `"plaintext_fields"` as an alias for backward compatibility.
+    #[serde(default, alias = "plaintext_fields")]
+    pub plaintext_suffixes: BTreeSet<String>,
 }
 
 impl From<AttributeSchemaConfig> for AttributeSchema {
@@ -256,9 +290,8 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
                     .namespace_patterns
                     .into_iter()
                     .map(|p| NamespacePattern {
-                        namespace: p.namespace,
-                        secret_fields: p.secret_fields,
-                        plaintext_fields: p.plaintext_fields,
+                        prefix: p.prefix,
+                        plaintext_suffixes: p.plaintext_suffixes,
                     })
                     .collect(),
             )
@@ -479,12 +512,8 @@ mod tests {
 
     fn persons_namespace_schema() -> AttributeSchema {
         let pattern = NamespacePattern {
-            namespace: "persons".to_string(),
-            secret_fields: ["firstName", "lastName", "passportNumber"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            plaintext_fields: std::iter::once("passengerType")
+            prefix: "persons".parse().unwrap(),
+            plaintext_suffixes: std::iter::once("passengerType")
                 .map(str::to_string)
                 .collect(),
         };
@@ -517,12 +546,14 @@ mod tests {
     }
 
     #[test]
-    fn namespace_pattern_unknown_field_falls_through_to_permissive() {
+    fn namespace_pattern_unknown_field_is_secret_by_default() {
         let schema = persons_namespace_schema();
-        // "role" is in neither secret_fields nor plaintext_fields,
-        // but the schema is permissive so it falls through to Plaintext.
+        // "role" is not in plaintext_suffixes, so the new "secret by default" rule applies.
         let result = schema.classify(&path("persons/passenger_0/role"));
-        assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
+        assert!(matches!(
+            result.as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "persons/passenger_0"
+        ));
     }
 
     #[test]
@@ -571,12 +602,8 @@ mod tests {
             permissive: true,
             plaintext_prefixes: vec!["search".to_string()],
             namespace_patterns: vec![NamespacePatternConfig {
-                namespace: "persons".to_string(),
-                secret_fields: ["firstName", "lastName"]
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect(),
-                plaintext_fields: std::iter::once("passengerType")
+                prefix: "persons".parse().unwrap(),
+                plaintext_suffixes: std::iter::once("passengerType")
                     .map(str::to_string)
                     .collect(),
             }],
@@ -585,6 +612,34 @@ mod tests {
         let decoded: AttributeSchemaConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.permissive, config.permissive);
         assert_eq!(decoded.namespace_patterns.len(), 1);
-        assert_eq!(decoded.namespace_patterns[0].namespace, "persons");
+        assert_eq!(
+            decoded.namespace_patterns[0].prefix,
+            config.namespace_patterns[0].prefix
+        );
+    }
+
+    #[test]
+    fn old_namespace_pattern_config_format_deserialises() {
+        // Configs written before the NamespacePattern refactor used `namespace`,
+        // `secret_fields`, and `plaintext_fields`.  They must still parse.
+        let old_json = r#"{
+            "permissive": true,
+            "namespace_patterns": [{
+                "namespace": "persons",
+                "secret_fields": ["firstName", "lastName"],
+                "plaintext_fields": ["passengerType"]
+            }]
+        }"#;
+        let config: AttributeSchemaConfig = serde_json::from_str(old_json).unwrap();
+        assert_eq!(config.namespace_patterns.len(), 1);
+        // `namespace` aliased to `prefix`
+        assert_eq!(config.namespace_patterns[0].prefix.as_str(), "persons");
+        // `plaintext_fields` aliased to `plaintext_suffixes`
+        assert!(
+            config.namespace_patterns[0]
+                .plaintext_suffixes
+                .contains("passengerType")
+        );
+        // `secret_fields` silently ignored — not stored anywhere
     }
 }

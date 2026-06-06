@@ -7,15 +7,8 @@
   ],
   "namespace_patterns": [
     {
-      "namespace": "persons",
-      "secret_fields": [
-        "dateOfBirth",
-        "firstName",
-        "lastName",
-        "nationality",
-        "passportNumber"
-      ],
-      "plaintext_fields": [
+      "prefix": "persons",
+      "plaintext_suffixes": [
         "passengerType"
       ]
     }
