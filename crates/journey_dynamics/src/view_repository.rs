@@ -763,7 +763,15 @@ impl StructuredJourneyViewRepository {
                 // Mirror secret changes into journey_person.details using the
                 // suffix path (the part after "persons/<ref>/").
                 for partition in secret_partitions {
-                    let prefix = format!("persons/{}/", partition.person_ref);
+                    // Derive the short person_ref from the full role path
+                    // (e.g. "persons/passenger_0" → "passenger_0") for the
+                    // legacy journey_person table lookup.
+                    let Some(person_ref_str) =
+                        partition.role_path.as_str().strip_prefix("persons/")
+                    else {
+                        continue;
+                    };
+                    let prefix = format!("{}/", partition.role_path.as_str());
                     let mut details_update = json!({});
                     for (path, value) in &partition.changes {
                         let suffix = path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
@@ -780,7 +788,7 @@ impl StructuredJourneyViewRepository {
                         ",
                     )
                     .bind(journey_id)
-                    .bind(&partition.person_ref)
+                    .bind(person_ref_str)
                     .bind(&details_update)
                     .execute(&mut **tx)
                     .await?;

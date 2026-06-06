@@ -261,7 +261,7 @@ fn flight_booking_capture_person_details() {
             JourneyEvent::AttributesSet {
                 plaintext: expected_plaintext,
                 secret_partitions: vec![SecretPartitionData {
-                    person_ref: "passenger_0".to_string(),
+                    role_path: "persons/passenger_0".parse().unwrap(),
                     subject_id,
                     changes: expected_secret,
                 }],
@@ -672,12 +672,12 @@ fn flight_booking_set_person_secret_attributes() {
                 plaintext: BTreeMap::new(),
                 secret_partitions: vec![
                     SecretPartitionData {
-                        person_ref: "passenger_0".to_string(),
+                        role_path: "persons/passenger_0".parse().unwrap(),
                         subject_id: subject_a,
                         changes: expected_secret_a,
                     },
                     SecretPartitionData {
-                        person_ref: "passenger_1".to_string(),
+                        role_path: "persons/passenger_1".parse().unwrap(),
                         subject_id: subject_b,
                         changes: expected_secret_b,
                     },

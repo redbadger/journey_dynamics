@@ -7,20 +7,65 @@ use uuid::Uuid;
 
 use super::AttributePath;
 
-/// Per-subject secret data carried by an [`JourneyEvent::AttributesSet`] event.
+/// Per-role secret data carried by an [`JourneyEvent::AttributesSet`] event.
 ///
-/// Each entry corresponds to one person slot whose secret attributes were
-/// touched by the originating `SetAttributes` command. From step A7 onwards
-/// the `changes` map is encrypted under the subject's DEK; until then it is
-/// stored as plaintext (same behaviour as all other non-annotated variants).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// Each entry corresponds to one role path (e.g. `"persons/passenger_0"`) whose
+/// secret attributes were touched by the originating `SetAttributes` command.
+/// The `changes` map is encrypted under the subject's DEK; `role_path` is used
+/// as the crypto label (AAD) so the partition identity is meaningful on the
+/// read path.
+///
+/// # Backward compatibility
+/// Events written before this rename stored `person_ref: "passenger_0"` (the
+/// short slot name without the `"persons/"` prefix). The custom [`Deserialize`]
+/// impl accepts both formats: if `role_path` is absent it reads `person_ref`
+/// and synthesises `"persons/{person_ref}"` as the role path.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SecretPartitionData {
-    /// Journey-local slot name; used as the codec `label` from A7 onwards.
-    pub person_ref: String,
-    /// The subject's identity key, copied from `PersonSlot.subject_id`.
+    /// Full schema path at which the subject is bound, e.g. `"persons/passenger_0"`.
+    /// Used as the crypto label (AAD).
+    pub role_path: AttributePath,
+    /// The subject's identity key — used to look up the DEK.
     pub subject_id: Uuid,
-    /// Path → value changes. Encrypted under `subject_id`'s DEK from A7.
+    /// Path → value changes. Encrypted under `subject_id`'s DEK.
     pub changes: BTreeMap<AttributePath, Value>,
+}
+
+impl<'de> Deserialize<'de> for SecretPartitionData {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Intermediate struct that accepts both the current and legacy field names.
+        #[derive(Deserialize)]
+        struct Raw {
+            /// Current field name.
+            role_path: Option<AttributePath>,
+            /// Legacy field name — present in events written before the rename.
+            person_ref: Option<String>,
+            subject_id: Uuid,
+            #[serde(default)]
+            changes: BTreeMap<AttributePath, Value>,
+        }
+
+        let raw = Raw::deserialize(deserializer)?;
+        let role_path = if let Some(rp) = raw.role_path {
+            rp
+        } else if let Some(pr) = raw.person_ref {
+            // Old events stored only the short slot name; synthesise the full path.
+            format!("persons/{pr}")
+                .parse::<AttributePath>()
+                .map_err(serde::de::Error::custom)?
+        } else {
+            return Err(serde::de::Error::missing_field("role_path"));
+        };
+
+        Ok(Self {
+            role_path,
+            subject_id: raw.subject_id,
+            changes: raw.changes,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

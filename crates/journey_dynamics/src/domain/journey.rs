@@ -269,30 +269,20 @@ impl Aggregate for Journey {
                 }
 
                 // Build one SecretPartitionData per role path, sorted
-                // deterministically.  The role path flows directly from the
-                // classification, so no reverse UUID→ref map is needed.
+                // deterministically.  The role path and UUID flow directly from
+                // the classification; no reverse map needed.
                 let mut secret_partitions: Vec<SecretPartitionData> = classification
                     .secret_by_subject
                     .into_iter()
-                    .map(|(role_path, (subject_id, secret_changes))| {
-                        // Derive the legacy person_ref string from the role path
-                        // (e.g. "persons/passenger_0" → "passenger_0") for the
-                        // existing SecretPartitionData.person_ref field.
-                        // This will be replaced in Layer 3 when person_ref
-                        // becomes role_path: AttributePath.
-                        let person_ref = role_path
-                            .as_str()
-                            .strip_prefix("persons/")
-                            .unwrap_or(role_path.as_str())
-                            .to_string();
-                        SecretPartitionData {
-                            person_ref,
+                    .map(
+                        |(role_path, (subject_id, secret_changes))| SecretPartitionData {
+                            role_path,
                             subject_id,
                             changes: secret_changes,
-                        }
-                    })
+                        },
+                    )
                     .collect();
-                secret_partitions.sort_by(|a, b| a.person_ref.cmp(&b.person_ref));
+                secret_partitions.sort_by(|a, b| a.role_path.cmp(&b.role_path));
 
                 // Validate plaintext changes merged with current shared_data.
                 if !classification.plaintext.is_empty() {
@@ -424,8 +414,11 @@ impl Aggregate for Journey {
                     // path (the part after "persons/<ref>/").  This keeps the
                     // legacy `journey_person.details` column populated for
                     // downstream consumers that still read from it.
-                    if let Some(slot) = self.persons.get_mut(&partition.person_ref) {
-                        let prefix = format!("persons/{}/", partition.person_ref);
+                    if let Some(person_ref_str) =
+                        partition.role_path.as_str().strip_prefix("persons/")
+                        && let Some(slot) = self.persons.get_mut(person_ref_str)
+                    {
+                        let prefix = format!("{}/", partition.role_path.as_str());
                         for (path, value) in &partition.changes {
                             let suffix =
                                 path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
@@ -1515,7 +1508,7 @@ mod tests {
         journey.apply(JourneyEvent::AttributesSet {
             plaintext: BTreeMap::new(),
             secret_partitions: vec![SecretPartitionData {
-                person_ref: "passenger_0".to_string(),
+                role_path: "persons/passenger_0".parse().unwrap(),
                 subject_id,
                 changes: secret_changes,
             }],
@@ -1601,12 +1594,12 @@ mod tests {
                     plaintext: BTreeMap::new(),
                     secret_partitions: vec![
                         SecretPartitionData {
-                            person_ref: "passenger_0".to_string(),
+                            role_path: "persons/passenger_0".parse().unwrap(),
                             subject_id: subject_id_0,
                             changes: changes_0,
                         },
                         SecretPartitionData {
-                            person_ref: "passenger_1".to_string(),
+                            role_path: "persons/passenger_1".parse().unwrap(),
                             subject_id: subject_id_1,
                             changes: changes_1,
                         },
