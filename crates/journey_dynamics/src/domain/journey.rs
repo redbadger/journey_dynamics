@@ -31,46 +31,14 @@ pub struct SubjectRegistration {
 pub struct Journey {
     id: Uuid,
     state: JourneyState,
-    /// Shared, non-PII data accumulated from `Capture` commands.
-    /// Never encrypted. Fully intact after any shredding operation.
+    /// Accumulated journey attributes (plaintext and decrypted secret values).
+    /// Never encrypted at rest. Fully intact after any shredding operation.
     shared_data: Value,
-    /// Per-person slots, keyed by client-assigned `person_ref`.
-    /// Retained for backward-compat replay of `PersonCaptured` events.
-    persons: BTreeMap<String, PersonSlot>,
     /// Registered subjects, keyed by subject UUID.
     subjects: BTreeMap<Uuid, SubjectRegistration>,
     /// Role-path → subject-UUID bindings established by `BindSubject`.
     bindings: BTreeMap<AttributePath, Uuid>,
-    current_step: Option<String>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
-}
-
-/// One data subject's slot within a journey.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PersonSlot {
-    /// Cross-journey identity key — used to look up the DEK in the key store.
-    pub subject_id: Uuid,
-    /// Identity fields captured by `CapturePerson`. Encrypted at rest.
-    pub name: Option<String>,
-    pub email: Option<String>,
-    pub phone: Option<String>,
-    /// Free-form PII details (passport, `DoB`, nationality, …) captured by
-    /// `CapturePersonDetails`. Encrypted at rest.
-    ///
-    /// Deprecated: the canonical location for per-person attributes is
-    /// `shared_data` under `persons/<ref>/…`. This field is retained as a
-    /// back-compat mirror: both legacy `CapturePersonDetails` commands and
-    /// new `SetAttributes` commands (via the mirror-write in `apply`) keep
-    /// it populated, but external readers should prefer `shared_data`.
-    #[deprecated(
-        since = "0.3.0",
-        note = "read from shared_data under persons/<ref>/… instead"
-    )]
-    pub details: Value,
-    /// Set to `true` when a `SubjectForgotten` event is applied for this
-    /// subject. The encrypted event payloads become unreadable at the same
-    /// time (DEK deleted), so this is primarily a tombstone for the read model.
-    pub forgotten: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,7 +64,6 @@ impl Aggregate for Journey {
 
     const TYPE: &'static str = "Journey";
 
-    #[allow(clippy::too_many_lines, deprecated)]
     async fn handle(
         &mut self,
         command: Self::Command,
@@ -113,143 +80,6 @@ impl Aggregate for Journey {
                 }
             }
 
-            JourneyCommand::CapturePerson {
-                person_ref,
-                subject_id,
-                email,
-                // name and phone were identity fields on the legacy PersonCaptured
-                // event; they are not carried forward in the new subject model.
-                name: _,
-                phone: _,
-            } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                // Derive the role path and check for a conflicting binding.
-                let role_path: AttributePath = format!("persons/{person_ref}")
-                    .parse()
-                    .map_err(|_| JourneyError::PersonRefConflict(person_ref.clone()))?;
-                if let Some(&existing) = self.bindings.get(&role_path)
-                    && existing != subject_id
-                {
-                    return Err(JourneyError::PersonRefConflict(person_ref));
-                }
-                // Emit SubjectRegistered if the subject is new or email changed.
-                if self
-                    .subjects
-                    .get(&subject_id)
-                    .is_none_or(|reg| reg.email != email)
-                {
-                    sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
-                        .await;
-                }
-                // Emit SubjectBound if the role path is not yet bound.
-                if !self.bindings.contains_key(&role_path) {
-                    sink.write(
-                        JourneyEvent::SubjectBound {
-                            role_path,
-                            subject_id,
-                        },
-                        self,
-                    )
-                    .await;
-                }
-                Ok(())
-            }
-
-            JourneyCommand::CapturePersonDetails { person_ref, data } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                // Resolve subject_id: check bindings (new path) then persons (legacy).
-                let subject_id = {
-                    let role_path: AttributePath = format!("persons/{person_ref}")
-                        .parse()
-                        .map_err(|_| JourneyError::PersonNotFound(person_ref.clone()))?;
-                    self.bindings
-                        .get(&role_path)
-                        .copied()
-                        .or_else(|| self.persons.get(&person_ref).map(|slot| slot.subject_id))
-                        .ok_or_else(|| JourneyError::PersonNotFound(person_ref.clone()))?
-                };
-                sink.write(
-                    JourneyEvent::PersonDetailsUpdated {
-                        person_ref,
-                        subject_id,
-                        data,
-                    },
-                    self,
-                )
-                .await;
-                Ok(())
-            }
-
-            JourneyCommand::Capture { step, data } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-
-                if let Err(e) = services.schema_validator().validate(&data) {
-                    return Err(JourneyError::InvalidData(e.to_string()));
-                }
-
-                let is_step_transition = self.current_step.as_ref() != Some(&step);
-
-                let mut journey_for_eval = self.clone();
-                if is_step_transition {
-                    journey_for_eval.current_step = Some(step.clone());
-                }
-
-                let decision = services
-                    .decision_engine()
-                    .evaluate_next_steps(&journey_for_eval, &step, &data)
-                    .await
-                    .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
-
-                let from_step = self.current_step.clone();
-
-                sink.write(
-                    JourneyEvent::Modified {
-                        step: step.clone(),
-                        data: data.clone(),
-                    },
-                    self,
-                )
-                .await;
-
-                sink.write(
-                    JourneyEvent::WorkflowEvaluated {
-                        suggested_actions: decision.suggested_actions,
-                        // The legacy `Capture` arm never carries a phase label.
-                        phase: None,
-                    },
-                    self,
-                )
-                .await;
-
-                if is_step_transition {
-                    sink.write(
-                        JourneyEvent::StepProgressed {
-                            from_step,
-                            to_step: step.clone(),
-                        },
-                        self,
-                    )
-                    .await;
-                }
-
-                Ok(())
-            }
-
             JourneyCommand::SetAttributes { changes } => {
                 if self.id == Uuid::default() {
                     return Err(JourneyError::NotFound);
@@ -262,38 +92,18 @@ impl Aggregate for Journey {
                 }
 
                 // Classify every path against the attribute schema.
-                //
-                // subject_lookup resolves a role path (e.g. `"persons/passenger_0"`)
-                // to the subject UUID whose DEK encrypts that role's secret fields.
-                //
-                // Resolution order:
-                //   1. `self.bindings` — role paths established by `BindSubject` /
-                //      `RegisterAndBindSubject` (new path).
-                //   2. `self.persons` — legacy fallback for journeys that still use
-                //      `CapturePerson` (backward compat until Layer 6).
-                //
                 // Forgotten subjects return `None` so their paths land in `unknown`
                 // and the command is rejected.
                 let schema = services.attribute_schema();
                 let classification = {
                     let bindings = &self.bindings;
                     let subjects = &self.subjects;
-                    let persons = &self.persons;
                     classify_changes(schema, &changes, |subject_path| {
-                        // 1. New path: role-path binding.
-                        if let Some(&uuid) = bindings.get(subject_path) {
-                            if subjects.get(&uuid).is_some_and(|r| r.forgotten) {
-                                return None;
-                            }
-                            return Some(uuid);
+                        let uuid = *bindings.get(subject_path)?;
+                        if subjects.get(&uuid).is_some_and(|r| r.forgotten) {
+                            return None;
                         }
-                        // 2. Legacy fallback: strip "persons/" and look in persons map.
-                        subject_path
-                            .as_str()
-                            .strip_prefix("persons/")
-                            .and_then(|person_ref| persons.get(person_ref))
-                            .filter(|slot| !slot.forgotten)
-                            .map(|slot| slot.subject_id)
+                        Some(uuid)
                     })
                 };
 
@@ -483,17 +293,12 @@ impl Aggregate for Journey {
                 if self.id == Uuid::default() {
                     return Err(JourneyError::NotFound);
                 }
-                // Only emit SubjectForgotten if the subject is still active
-                // in either the new subjects map or the legacy persons slots.
+                // Only emit SubjectForgotten if the subject is still active.
                 // This keeps the shredding endpoint idempotent.
                 let needs_forgetting = self
                     .subjects
                     .get(&subject_id)
-                    .is_some_and(|reg| !reg.forgotten)
-                    || self
-                        .persons
-                        .values()
-                        .any(|slot| slot.subject_id == subject_id && !slot.forgotten);
+                    .is_some_and(|reg| !reg.forgotten);
                 if needs_forgetting {
                     sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
                         .await;
@@ -516,16 +321,13 @@ impl Aggregate for Journey {
             JourneyEvent::PersonCaptured {
                 person_ref,
                 subject_id,
-                name,
                 email,
-                phone,
+                ..
             } => {
-                // Populate the new subjects/bindings maps so that SetAttributes
-                // resolves correctly for journeys using the legacy CapturePerson path.
+                // Populate subjects/bindings so that SetAttributes and
+                // ForgetSubject resolve correctly when replaying legacy events.
                 let role_path: AttributePath =
                     format!("persons/{person_ref}").parse().unwrap_or_else(|_| {
-                        // person_ref values stored in old events are always valid
-                        // path segments; this branch exists only for safety.
                         AttributePath::new("persons/unknown").expect("static fallback")
                     });
                 self.subjects
@@ -536,59 +338,21 @@ impl Aggregate for Journey {
                         forgotten: false,
                     });
                 self.bindings.insert(role_path, subject_id);
-                // Also maintain the legacy persons map for backward compat.
-                let slot = self
-                    .persons
-                    .entry(person_ref)
-                    .or_insert_with(|| PersonSlot {
-                        subject_id,
-                        name: None,
-                        email: None,
-                        phone: None,
-                        details: json!({}),
-                        forgotten: false,
-                    });
-                slot.name = Some(name);
-                slot.email = Some(email);
-                slot.phone = phone;
             }
-            JourneyEvent::PersonDetailsUpdated {
-                person_ref, data, ..
-            } => {
-                if let Some(slot) = self.persons.get_mut(&person_ref) {
-                    json_patch::merge(&mut slot.details, &data);
-                }
+            JourneyEvent::PersonDetailsUpdated { .. } => {
+                // Legacy event. Projected to journey_person by
+                // StructuredJourneyViewRepository; no write-side state to update.
             }
             JourneyEvent::AttributesSet {
                 plaintext,
                 secret_partitions,
             } => {
-                // Apply plaintext changes directly into shared_data.
                 for (path, value) in &plaintext {
                     set_at_path(&mut self.shared_data, path, value.clone());
                 }
-                // Apply secret changes.
                 for partition in &secret_partitions {
-                    // Write every change at its full path into shared_data.
                     for (path, value) in &partition.changes {
                         set_at_path(&mut self.shared_data, path, value.clone());
-                    }
-                    // Permanent mirror-write into slot.details using the suffix
-                    // path (the part after "persons/<ref>/").  This keeps the
-                    // legacy `journey_person.details` column populated for
-                    // downstream consumers that still read from it.
-                    if let Some(person_ref_str) =
-                        partition.role_path.as_str().strip_prefix("persons/")
-                        && let Some(slot) = self.persons.get_mut(person_ref_str)
-                    {
-                        let prefix = format!("{}/", partition.role_path.as_str());
-                        for (path, value) in &partition.changes {
-                            let suffix =
-                                path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
-                            if let Ok(suffix_path) = suffix.parse::<AttributePath>() {
-                                set_at_path(&mut slot.details, &suffix_path, value.clone());
-                            }
-                        }
                     }
                 }
             }
@@ -602,22 +366,16 @@ impl Aggregate for Journey {
                     phase,
                 });
             }
-            JourneyEvent::StepProgressed { to_step, .. } => {
-                self.current_step = Some(to_step);
+            JourneyEvent::StepProgressed { .. } => {
+                // Legacy event. Projected to journey_view.current_step by
+                // StructuredJourneyViewRepository; no write-side state to update.
             }
             JourneyEvent::Completed => {
                 self.state = JourneyState::Complete;
             }
             JourneyEvent::SubjectForgotten { subject_id } => {
-                // Mark forgotten in the new subjects map.
                 if let Some(reg) = self.subjects.get_mut(&subject_id) {
                     reg.forgotten = true;
-                }
-                // Also mark legacy person slots for backward compat.
-                for slot in self.persons.values_mut() {
-                    if slot.subject_id == subject_id {
-                        slot.forgotten = true;
-                    }
                 }
             }
             JourneyEvent::SubjectRegistered { subject_id, email } => {
@@ -715,22 +473,8 @@ impl Journey {
     }
 
     #[must_use]
-    #[deprecated(
-        since = "0.3.0",
-        note = "read WorkflowEvaluated.phase from shared_data instead"
-    )]
-    pub const fn current_step(&self) -> Option<&String> {
-        self.current_step.as_ref()
-    }
-
-    #[must_use]
     pub const fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
         self.latest_workflow_decision.as_ref()
-    }
-
-    #[must_use]
-    pub const fn persons(&self) -> &BTreeMap<String, PersonSlot> {
-        &self.persons
     }
 
     #[must_use]
@@ -750,10 +494,8 @@ impl Default for Journey {
             id: Uuid::default(),
             state: JourneyState::default(),
             shared_data: json!({}),
-            persons: BTreeMap::new(),
             subjects: BTreeMap::new(),
             bindings: BTreeMap::new(),
-            current_step: None,
             latest_workflow_decision: None,
         }
     }
@@ -857,31 +599,6 @@ mod tests {
     }
 
     #[test]
-    fn modify_journey() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::Capture {
-                step: "first_name".to_string(),
-                data: json!("Joe"),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    step: "first_name".to_string(),
-                    data: json!("Joe"),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "first_name".to_string(),
-                },
-            ]);
-    }
-
-    #[test]
     fn complete_unmodified_journey() {
         let id = Uuid::new_v4();
         JourneyTester::with(services())
@@ -899,93 +616,6 @@ mod tests {
                 JourneyEvent::Modified {
                     step: "first_name".to_string(),
                     data: json!("Joe"),
-                },
-            ])
-            .when(JourneyCommand::Complete)
-            .then_expect_events(vec![JourneyEvent::Completed]);
-    }
-
-    #[test]
-    fn capture_empty_form_data() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::Capture {
-                step: "form_data".to_string(),
-                data: json!({}),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    step: "form_data".to_string(),
-                    data: json!({}),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "form_data".to_string(),
-                },
-            ]);
-    }
-
-    #[test]
-    fn capture_form_data_with_values() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::Modified {
-                    step: "form_data".to_string(),
-                    data: json!({}),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "form_data".to_string(),
-                },
-            ])
-            .when(JourneyCommand::Capture {
-                step: "alpha".to_string(),
-                data: json!({ "alpha": 42, "beta": "hello" }),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    step: "alpha".to_string(),
-                    data: json!({ "alpha": 42, "beta": "hello" }),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: Some("form_data".to_string()),
-                    to_step: "alpha".to_string(),
-                },
-            ]);
-    }
-
-    #[test]
-    fn complete_journey_with_form_data() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::Modified {
-                    step: "alpha".to_string(),
-                    data: json!({ "alpha": 42, "beta": "hello" }),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: Some("form_data".to_string()),
-                    to_step: "alpha".to_string(),
                 },
             ])
             .when(JourneyCommand::Complete)
@@ -1018,402 +648,7 @@ mod tests {
             .then_expect_error(JourneyError::AlreadyCompleted);
     }
 
-    #[test]
-    fn modify_not_started() {
-        JourneyTester::with(services())
-            .given_no_previous_events()
-            .when(JourneyCommand::Capture {
-                step: "first_name".to_string(),
-                data: json!("Joe"),
-            })
-            .then_expect_error(JourneyError::NotFound);
-    }
-
-    #[test]
-    fn modify_already_completed() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
-            .when(JourneyCommand::Capture {
-                step: "first_name".to_string(),
-                data: json!("Joe"),
-            })
-            .then_expect_error(JourneyError::AlreadyCompleted);
-    }
-
-    // ── Workflow evaluation ──────────────────────────────────────────────────
-
-    #[test]
-    fn automatic_workflow_evaluation_after_every_event() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::Capture {
-                step: "step-1".to_string(),
-                data: json!({
-                    "step": "personal_info",
-                    "email": "user@example.com",
-                    "name": "Alice"
-                }),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    step: "step-1".to_string(),
-                    data: json!({
-                        "step": "personal_info",
-                        "email": "user@example.com",
-                        "name": "Alice"
-                    }),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec![],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "step-1".to_string(),
-                },
-            ]);
-    }
-
-    #[test]
-    fn automatic_workflow_evaluation_for_specific_data() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::Capture {
-                step: "step-1".to_string(),
-                data: json!({
-                    "step": "personal_info",
-                    "email": "user@example.com",
-                    "first_name": "Alice"
-                }),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::Modified {
-                    step: "step-1".to_string(),
-                    data: json!({
-                        "step": "personal_info",
-                        "email": "user@example.com",
-                        "first_name": "Alice"
-                    }),
-                },
-                JourneyEvent::WorkflowEvaluated {
-                    suggested_actions: vec!["form_3".to_string()],
-                    phase: None,
-                },
-                JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "step-1".to_string(),
-                },
-            ]);
-    }
-
-    // ── CapturePerson ────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_capture_person() {
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_0".to_string(),
-                subject_id,
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: Some("+44-7700-900000".to_string()),
-            })
-            .then_expect_events(vec![
-                JourneyEvent::SubjectRegistered {
-                    subject_id,
-                    email: "alice@example.com".to_string(),
-                },
-                JourneyEvent::SubjectBound {
-                    role_path: "persons/passenger_0".parse().unwrap(),
-                    subject_id,
-                },
-            ]);
-    }
-
-    #[test]
-    fn test_capture_person_updates_identity_fields_for_same_subject() {
-        // Calling CapturePerson again with the same person_ref and subject_id
-        // is allowed — it updates the identity fields in place.
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-            ])
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_0".to_string(),
-                subject_id, // same subject_id — update allowed
-                name: "Alice J. Smith".to_string(),
-                email: "alice.new@example.com".to_string(),
-                phone: Some("+44-7700-900001".to_string()),
-            })
-            // email changed → SubjectRegistered; binding already exists → no SubjectBound
-            .then_expect_events(vec![JourneyEvent::SubjectRegistered {
-                subject_id,
-                email: "alice.new@example.com".to_string(),
-            }]);
-    }
-
-    #[test]
-    fn test_capture_person_conflict_rejects_different_subject_for_same_ref() {
-        // Reusing a person_ref with a different subject_id is an error.
-        let id = Uuid::new_v4();
-        let subject_id_a = Uuid::new_v4();
-        let subject_id_b = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id: subject_id_a,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-            ])
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_0".to_string(),
-                subject_id: subject_id_b, // different subject — must be rejected
-                name: "Bob Jones".to_string(),
-                email: "bob@example.com".to_string(),
-                phone: None,
-            })
-            .then_expect_error(JourneyError::PersonRefConflict("passenger_0".to_string()));
-    }
-
-    #[test]
-    fn test_capture_multiple_persons_independently() {
-        // Two different passengers in the same journey.
-        let id = Uuid::new_v4();
-        let subject_a = Uuid::new_v4();
-        let subject_b = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id: subject_a,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-            ])
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_1".to_string(),
-                subject_id: subject_b,
-                name: "Bob Jones".to_string(),
-                email: "bob@example.com".to_string(),
-                phone: None,
-            })
-            .then_expect_events(vec![
-                JourneyEvent::SubjectRegistered {
-                    subject_id: subject_b,
-                    email: "bob@example.com".to_string(),
-                },
-                JourneyEvent::SubjectBound {
-                    role_path: "persons/passenger_1".parse().unwrap(),
-                    subject_id: subject_b,
-                },
-            ]);
-    }
-
-    #[test]
-    fn test_capture_person_journey_not_started() {
-        JourneyTester::with(services())
-            .given_no_previous_events()
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_0".to_string(),
-                subject_id: Uuid::new_v4(),
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: None,
-            })
-            .then_expect_error(JourneyError::NotFound);
-    }
-
-    #[test]
-    fn test_capture_person_journey_completed() {
-        let id = Uuid::new_v4();
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
-            .when(JourneyCommand::CapturePerson {
-                person_ref: "passenger_0".to_string(),
-                subject_id: Uuid::new_v4(),
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: None,
-            })
-            .then_expect_error(JourneyError::AlreadyCompleted);
-    }
-
-    // ── CapturePersonDetails ─────────────────────────────────────────────────
-
-    #[test]
-    fn test_capture_person_details() {
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-            ])
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "passenger_0".to_string(),
-                data: json!({
-                    "passportNumber": "GB123456789",
-                    "dateOfBirth":    "1990-05-15",
-                    "nationality":    "GB"
-                }),
-            })
-            .then_expect_events(vec![JourneyEvent::PersonDetailsUpdated {
-                person_ref: "passenger_0".to_string(),
-                subject_id, // copied from the slot by the aggregate
-                data: json!({
-                    "passportNumber": "GB123456789",
-                    "dateOfBirth":    "1990-05-15",
-                    "nationality":    "GB"
-                }),
-            }]);
-    }
-
-    #[test]
-    fn test_capture_person_details_uses_subject_id_from_slot() {
-        // The emitted event carries the subject_id from the existing slot, not
-        // one supplied by the caller — CapturePersonDetails has no subject_id field.
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "lead_booker".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-            ])
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "lead_booker".to_string(),
-                data: json!({ "dateOfBirth": "1990-01-01" }),
-            })
-            .then_expect_events(vec![JourneyEvent::PersonDetailsUpdated {
-                person_ref: "lead_booker".to_string(),
-                subject_id, // must match the subject captured above
-                data: json!({ "dateOfBirth": "1990-01-01" }),
-            }]);
-    }
-
-    #[test]
-    fn test_capture_person_details_not_started() {
-        JourneyTester::with(services())
-            .given_no_previous_events()
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "passenger_0".to_string(),
-                data: json!({ "passportNumber": "GB123456789" }),
-            })
-            .then_expect_error(JourneyError::NotFound);
-    }
-
-    #[test]
-    fn test_capture_person_details_journey_completed() {
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-                JourneyEvent::Completed,
-            ])
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "passenger_0".to_string(),
-                data: json!({ "passportNumber": "GB123456789" }),
-            })
-            .then_expect_error(JourneyError::AlreadyCompleted);
-    }
-
-    #[test]
-    fn test_capture_person_details_slot_not_found() {
-        // CapturePersonDetails requires CapturePerson to have been called first.
-        let id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "passenger_0".to_string(),
-                data: json!({ "passportNumber": "GB123456789" }),
-            })
-            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
-    }
-
-    #[test]
-    fn test_capture_person_details_multiple_calls_merge() {
-        // Successive CapturePersonDetails calls for the same slot each produce
-        // their own PersonDetailsUpdated event; the aggregate merges them via
-        // json_patch::merge in apply().
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        JourneyTester::with(services())
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-                JourneyEvent::PersonDetailsUpdated {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    data: json!({ "passportNumber": "GB123456789" }),
-                },
-            ])
-            .when(JourneyCommand::CapturePersonDetails {
-                person_ref: "passenger_0".to_string(),
-                data: json!({ "nationality": "GB", "dateOfBirth": "1990-05-15" }),
-            })
-            .then_expect_events(vec![JourneyEvent::PersonDetailsUpdated {
-                person_ref: "passenger_0".to_string(),
-                subject_id,
-                data: json!({ "nationality": "GB", "dateOfBirth": "1990-05-15" }),
-            }]);
-    }
-
-    // ── ForgetSubject ────────────────────────────────────────────────────────
+    // ── ForgetSubject ──────────────────────────────────────────────────────────
 
     #[test]
     fn test_forget_subject() {
@@ -1528,11 +763,15 @@ mod tests {
             journey.apply(event);
         }
 
-        let p0 = journey.persons().get("passenger_0").unwrap();
-        assert!(p0.forgotten, "passenger_0 should be forgotten");
-
-        let p1 = journey.persons().get("passenger_1").unwrap();
-        assert!(!p1.forgotten, "passenger_1 should NOT be forgotten");
+        let subjects = journey.subjects();
+        assert!(
+            subjects.get(&subject_a).is_some_and(|r| r.forgotten),
+            "subject_a should be forgotten"
+        );
+        assert!(
+            subjects.get(&subject_b).is_some_and(|r| !r.forgotten),
+            "subject_b should NOT be forgotten"
+        );
     }
 
     // ── RegisterSubject / BindSubject / RegisterAndBindSubject ────────────────
@@ -1852,35 +1091,6 @@ mod tests {
         assert_eq!(journey.shared_data()["totalPrice"], json!(450.00));
     }
 
-    #[test]
-    fn test_apply_person_details_merges_into_slot() {
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-        let mut journey = Journey::default();
-        journey.apply(JourneyEvent::Started { id });
-        journey.apply(JourneyEvent::PersonCaptured {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            name: "Alice Smith".to_string(),
-            email: "alice@example.com".to_string(),
-            phone: None,
-        });
-        journey.apply(JourneyEvent::PersonDetailsUpdated {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            data: json!({ "passportNumber": "GB123456789" }),
-        });
-        journey.apply(JourneyEvent::PersonDetailsUpdated {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            data: json!({ "dateOfBirth": "1990-05-15" }),
-        });
-
-        let slot = journey.persons().get("passenger_0").unwrap();
-        assert_eq!(slot.details["passportNumber"], json!("GB123456789"));
-        assert_eq!(slot.details["dateOfBirth"], json!("1990-05-15"));
-    }
-
     // ── Schema validation ────────────────────────────────────────────────────
 
     // ── SetAttributes ──────────────────────────────────────────────────────────
@@ -1985,9 +1195,8 @@ mod tests {
     }
 
     #[test]
-    fn set_attributes_secret_writes_under_slot() {
-        // apply() should write secret changes both into shared_data (full path)
-        // and into slot.details (suffix path after "persons/<ref>/").
+    fn set_attributes_secret_writes_into_shared_data() {
+        // apply() writes secret changes into shared_data at their full path.
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 
@@ -2013,14 +1222,10 @@ mod tests {
             }],
         });
 
-        // Full path is visible in shared_data (persons is an object keyed by person_ref).
         assert_eq!(
             journey.shared_data()["persons"]["passenger_0"]["passport"],
             json!("AB123456")
         );
-        // Suffix path is mirrored into slot.details.
-        let slot = journey.persons().get("passenger_0").unwrap();
-        assert_eq!(slot.details["passport"], json!("AB123456"));
     }
 
     #[test]
@@ -2212,23 +1417,35 @@ mod tests {
     }
 
     #[test]
-    fn test_capture_invalid_data_schema_validation_error() {
+    fn set_attributes_rejects_secret_path_when_subject_forgotten_via_person_captured() {
+        // A PersonCaptured event followed by SubjectForgotten must prevent
+        // SetAttributes from using that subject's secret paths. This validates
+        // that PersonCaptured.apply() correctly populates self.subjects (not
+        // just self.bindings) so that the forgotten check in SetAttributes fires.
         let id = Uuid::new_v4();
-        let invalid_data = json!({
-            "alpha": "this should be a number",
-            "beta": 123  // should be a string
-        });
+        let subject_id = Uuid::new_v4();
 
-        JourneyTester::with(services())
-            .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::Capture {
-                step: "test_step".to_string(),
-                data: invalid_data,
-            })
-            .then_expect_error(JourneyError::InvalidData(
-                "Schema validation failed: {\"alpha\":\"this should be a number\",\"beta\":123} \
-                 is not valid under any of the schemas listed in the 'oneOf' keyword"
-                    .to_string(),
-            ));
+        let mut changes = BTreeMap::new();
+        changes.insert(
+            "persons/passenger_0/passport"
+                .parse::<AttributePath>()
+                .unwrap(),
+            json!("AB123456"),
+        );
+
+        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
+            .given(vec![
+                JourneyEvent::Started { id },
+                JourneyEvent::PersonCaptured {
+                    person_ref: "passenger_0".to_string(),
+                    subject_id,
+                    name: "Alice Smith".to_string(),
+                    email: "alice@example.com".to_string(),
+                    phone: None,
+                },
+                JourneyEvent::SubjectForgotten { subject_id },
+            ])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
     }
 }
