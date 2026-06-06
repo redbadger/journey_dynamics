@@ -74,19 +74,17 @@ HTTP 204
 
 
 # ===========================================
-# Step 4: Capture lead passenger identity (PII — encrypted at rest)
+# Step 4: Register lead passenger and bind to role path.
 # The subject_id is opaque to support staff — the by-email endpoint removes
 # the need to ever surface it to them.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_0",
+    "CaptureAndBindSubject": {
+        "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
-        "name": "Clara Dupont",
-        "email": "Clara.Dupont@example.com",
-        "phone": "+33-6-12-34-56-78"
+        "email": "Clara.Dupont@example.com"
     }
 }
 
@@ -118,18 +116,16 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture second passenger identity (PII — different DEK)
+# Step 6: Register second passenger and bind to role path.
 # This passenger must survive the erasure of passenger_0.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_1",
+    "CaptureAndBindSubject": {
+        "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
-        "name": "Henri Dubois",
-        "email": "henri.dubois@example.com",
-        "phone": null
+        "email": "henri.dubois@example.com"
     }
 }
 
