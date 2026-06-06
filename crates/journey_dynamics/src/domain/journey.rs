@@ -268,24 +268,23 @@ impl Aggregate for Journey {
                     return Err(JourneyError::PersonNotFound(person_ref));
                 }
 
-                // Build one SecretPartitionData per subject, sorted by person_ref
-                // for deterministic event ordering.
-                // Reverse map: subject_id → person_ref (1-to-1: PersonRefConflict
-                // prevents two slots sharing the same subject_id).
-                let subject_to_ref: BTreeMap<Uuid, String> = self
-                    .persons
-                    .iter()
-                    .map(|(person_ref, slot)| (slot.subject_id, person_ref.clone()))
-                    .collect();
-
+                // Build one SecretPartitionData per role path, sorted
+                // deterministically.  The role path flows directly from the
+                // classification, so no reverse UUID→ref map is needed.
                 let mut secret_partitions: Vec<SecretPartitionData> = classification
                     .secret_by_subject
                     .into_iter()
-                    .map(|(subject_id, secret_changes)| {
-                        let person_ref = subject_to_ref
-                            .get(&subject_id)
-                            .cloned()
-                            .unwrap_or_else(|| subject_id.to_string());
+                    .map(|(role_path, (subject_id, secret_changes))| {
+                        // Derive the legacy person_ref string from the role path
+                        // (e.g. "persons/passenger_0" → "passenger_0") for the
+                        // existing SecretPartitionData.person_ref field.
+                        // This will be replaced in Layer 3 when person_ref
+                        // becomes role_path: AttributePath.
+                        let person_ref = role_path
+                            .as_str()
+                            .strip_prefix("persons/")
+                            .unwrap_or(role_path.as_str())
+                            .to_string();
                         SecretPartitionData {
                             person_ref,
                             subject_id,

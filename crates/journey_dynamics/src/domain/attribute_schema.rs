@@ -306,9 +306,19 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
 pub struct Classification {
     /// Changes that may be stored in plaintext.
     pub plaintext: BTreeMap<AttributePath, Value>,
-    /// Changes grouped by subject UUID — each group must be encrypted under
-    /// that subject's DEK.
-    pub secret_by_subject: BTreeMap<Uuid, BTreeMap<AttributePath, Value>>,
+    /// Changes grouped by *role path* (e.g. `"persons/passenger_0"`).
+    ///
+    /// The key is the `subject` `AttributePath` produced by `PiiClass::Secret`
+    /// — one entry per distinct role path, not per subject UUID.  The tuple
+    /// value carries `(subject_uuid, changes)`: the UUID is needed by the
+    /// encryption layer to look up the DEK, while the role path is used as the
+    /// crypto label (AAD) so that the partition identity is meaningful on the
+    /// read path.
+    ///
+    /// Two entries may share the same UUID when a subject occupies multiple
+    /// roles; the crypto layer must handle encrypting them under the same key
+    /// with different labels.
+    pub secret_by_subject: BTreeMap<AttributePath, (Uuid, BTreeMap<AttributePath, Value>)>,
     /// Paths that are neither in the schema nor handled by permissive mode.
     /// Also includes secret paths whose subject UUID could not be resolved by
     /// the caller-supplied lookup.  The caller decides how to react (typically
@@ -327,7 +337,8 @@ pub fn classify_changes(
     subject_lookup: impl Fn(&AttributePath) -> Option<Uuid>,
 ) -> Classification {
     let mut plaintext: BTreeMap<AttributePath, Value> = BTreeMap::new();
-    let mut secret_by_subject: BTreeMap<Uuid, BTreeMap<AttributePath, Value>> = BTreeMap::new();
+    let mut secret_by_subject: BTreeMap<AttributePath, (Uuid, BTreeMap<AttributePath, Value>)> =
+        BTreeMap::new();
     let mut unknown: Vec<AttributePath> = Vec::new();
 
     for (path, value) in changes {
@@ -344,10 +355,12 @@ pub fn classify_changes(
                         unknown.push(path.clone());
                     }
                     Some(uuid) => {
-                        secret_by_subject
-                            .entry(uuid)
-                            .or_default()
-                            .insert(path.clone(), value.clone());
+                        // Key by role path (subject AttributePath); carry UUID
+                        // as first tuple element for the encryption layer.
+                        let (_, bucket) = secret_by_subject
+                            .entry(subject.clone())
+                            .or_insert_with(|| (uuid, BTreeMap::new()));
+                        bucket.insert(path.clone(), value.clone());
                     }
                 },
             },
@@ -439,8 +452,9 @@ mod tests {
         assert_eq!(result.plaintext.len(), 1);
         assert_eq!(result.secret_by_subject.len(), 1);
         assert!(result.unknown.is_empty());
-        let slot = result.secret_by_subject.get(&subject_a()).unwrap();
-        assert_eq!(slot[&path("persons/0/passport")], json!("AB123456"));
+        let (uuid, changes) = result.secret_by_subject.get(&path("persons/0")).unwrap();
+        assert_eq!(*uuid, subject_a());
+        assert_eq!(changes[&path("persons/0/passport")], json!("AB123456"));
     }
 
     // ── two subjects in one batch ─────────────────────────────────────────
@@ -457,8 +471,12 @@ mod tests {
         assert!(result.plaintext.is_empty());
         assert_eq!(result.secret_by_subject.len(), 2);
         assert!(result.unknown.is_empty());
-        assert!(result.secret_by_subject.contains_key(&subject_a()));
-        assert!(result.secret_by_subject.contains_key(&subject_b()));
+        // Keyed by role path, not UUID.
+        assert!(result.secret_by_subject.contains_key(&path("persons/0")));
+        assert!(result.secret_by_subject.contains_key(&path("persons/1")));
+        // UUIDs are carried in the tuple.
+        assert_eq!(result.secret_by_subject[&path("persons/0")].0, subject_a());
+        assert_eq!(result.secret_by_subject[&path("persons/1")].0, subject_b());
     }
 
     // ── unknown path ──────────────────────────────────────────────────────
@@ -571,7 +589,11 @@ mod tests {
             json!("adult")
         );
         assert_eq!(result.secret_by_subject.len(), 1);
-        let slot = result.secret_by_subject.get(&subject_a()).unwrap();
+        let (uuid, slot) = result
+            .secret_by_subject
+            .get(&path("persons/passenger_0"))
+            .unwrap();
+        assert_eq!(*uuid, subject_a());
         assert_eq!(slot[&path("persons/passenger_0/firstName")], json!("Alice"));
         assert!(result.unknown.is_empty());
     }
