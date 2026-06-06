@@ -101,7 +101,7 @@ jsonpath "$.shared_data.booking.selectedReturnFlight.flightId" == "AA5678"
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CaptureAndBindSubject": {
+    "RegisterAndBindSubject": {
         "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
         "email": "alice.johnson@email.com"
@@ -117,7 +117,7 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CaptureAndBindSubject": {
+    "RegisterAndBindSubject": {
         "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
         "email": "bob.johnson@email.com"
@@ -133,7 +133,7 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CaptureAndBindSubject": {
+    "RegisterAndBindSubject": {
         "role_path": "persons/passenger_2",
         "subject_id": "{{newUuid}}",
         "email": "charlie.johnson@email.com"
@@ -150,8 +150,8 @@ HTTP 204
 # Secret fields (firstName, lastName, dateOfBirth, passportNumber) are
 # encrypted under each passenger's individual DEK. passengerType is
 # plaintext and lands in shared_data. This replaces six requests in the
-# original (three CaptureAndBindSubject + three SetAttributes) with three
-# CaptureAndBindSubject + one batched SetAttributes.
+# original (three RegisterAndBindSubject + three SetAttributes) with three
+# RegisterAndBindSubject + one batched SetAttributes.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json

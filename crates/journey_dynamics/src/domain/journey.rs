@@ -18,7 +18,7 @@ use crate::{
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
 
-/// Registration record for a data subject captured via [`JourneyCommand::CaptureSubject`].
+/// Registration record for a data subject captured via [`JourneyCommand::RegisterSubject`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubjectRegistration {
     /// Contact email — used for GDPR erasure lookup.
@@ -137,13 +137,13 @@ impl Aggregate for Journey {
                 {
                     return Err(JourneyError::PersonRefConflict(person_ref));
                 }
-                // Emit SubjectCaptured if the subject is new or email changed.
+                // Emit SubjectRegistered if the subject is new or email changed.
                 if self
                     .subjects
                     .get(&subject_id)
                     .is_none_or(|reg| reg.email != email)
                 {
-                    sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                    sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
                         .await;
                 }
                 // Emit SubjectBound if the role path is not yet bound.
@@ -268,7 +268,7 @@ impl Aggregate for Journey {
                 //
                 // Resolution order:
                 //   1. `self.bindings` — role paths established by `BindSubject` /
-                //      `CaptureAndBindSubject` (new path).
+                //      `RegisterAndBindSubject` (new path).
                 //   2. `self.persons` — legacy fallback for journeys that still use
                 //      `CapturePerson` (backward compat until Layer 6).
                 //
@@ -388,7 +388,7 @@ impl Aggregate for Journey {
                 }
             }
 
-            JourneyCommand::CaptureSubject { subject_id, email } => {
+            JourneyCommand::RegisterSubject { subject_id, email } => {
                 if self.id == Uuid::default() {
                     return Err(JourneyError::NotFound);
                 }
@@ -403,7 +403,7 @@ impl Aggregate for Journey {
                 {
                     return Ok(());
                 }
-                sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
                     .await;
                 Ok(())
             }
@@ -439,7 +439,7 @@ impl Aggregate for Journey {
                 Ok(())
             }
 
-            JourneyCommand::CaptureAndBindSubject {
+            JourneyCommand::RegisterAndBindSubject {
                 role_path,
                 subject_id,
                 email,
@@ -456,13 +456,13 @@ impl Aggregate for Journey {
                 {
                     return Err(JourneyError::RolePathConflict(role_path));
                 }
-                // Emit SubjectCaptured if new or email changed.
+                // Emit SubjectRegistered if new or email changed.
                 if self
                     .subjects
                     .get(&subject_id)
                     .is_none_or(|reg| reg.email != email)
                 {
-                    sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                    sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
                         .await;
                 }
                 // Emit SubjectBound if not already bound.
@@ -620,7 +620,7 @@ impl Aggregate for Journey {
                     }
                 }
             }
-            JourneyEvent::SubjectCaptured { subject_id, email } => {
+            JourneyEvent::SubjectRegistered { subject_id, email } => {
                 self.subjects
                     .entry(subject_id)
                     .and_modify(|reg| reg.email.clone_from(&email))
@@ -657,7 +657,7 @@ pub enum JourneyError {
     PersonNotFound(String),
     #[error("Unknown attribute paths: {0:?}")]
     UnknownAttributePath(Vec<AttributePath>),
-    #[error("Subject not registered — call CaptureSubject first")]
+    #[error("Subject not registered — call RegisterSubject first")]
     SubjectNotRegistered,
     #[error("Role path '{0}' is already bound to a different subject")]
     RolePathConflict(AttributePath),
@@ -1126,7 +1126,7 @@ mod tests {
                 phone: Some("+44-7700-900000".to_string()),
             })
             .then_expect_events(vec![
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1162,8 +1162,8 @@ mod tests {
                 email: "alice.new@example.com".to_string(),
                 phone: Some("+44-7700-900001".to_string()),
             })
-            // email changed → SubjectCaptured; binding already exists → no SubjectBound
-            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
+            // email changed → SubjectRegistered; binding already exists → no SubjectBound
+            .then_expect_events(vec![JourneyEvent::SubjectRegistered {
                 subject_id,
                 email: "alice.new@example.com".to_string(),
             }]);
@@ -1223,7 +1223,7 @@ mod tests {
                 phone: None,
             })
             .then_expect_events(vec![
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_b,
                     email: "bob@example.com".to_string(),
                 },
@@ -1535,39 +1535,39 @@ mod tests {
         assert!(!p1.forgotten, "passenger_1 should NOT be forgotten");
     }
 
-    // ── CaptureSubject / BindSubject / CaptureAndBindSubject ────────────────
+    // ── RegisterSubject / BindSubject / RegisterAndBindSubject ────────────────
 
     #[test]
-    fn capture_subject_emits_subject_captured() {
+    fn register_subject_emits_subject_registered() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::CaptureSubject {
+            .when(JourneyCommand::RegisterSubject {
                 subject_id,
                 email: "alice@example.com".to_string(),
             })
-            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
+            .then_expect_events(vec![JourneyEvent::SubjectRegistered {
                 subject_id,
                 email: "alice@example.com".to_string(),
             }]);
     }
 
     #[test]
-    fn capture_subject_is_idempotent_with_same_email() {
+    fn register_subject_is_idempotent_with_same_email() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
             ])
-            .when(JourneyCommand::CaptureSubject {
+            .when(JourneyCommand::RegisterSubject {
                 subject_id,
                 email: "alice@example.com".to_string(),
             })
@@ -1575,34 +1575,34 @@ mod tests {
     }
 
     #[test]
-    fn capture_subject_updates_email() {
-        // Re-capturing with a different email must emit a new SubjectCaptured.
+    fn register_subject_updates_email() {
+        // Re-capturing with a different email must emit a new SubjectRegistered.
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "old@example.com".to_string(),
                 },
             ])
-            .when(JourneyCommand::CaptureSubject {
+            .when(JourneyCommand::RegisterSubject {
                 subject_id,
                 email: "new@example.com".to_string(),
             })
-            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
+            .then_expect_events(vec![JourneyEvent::SubjectRegistered {
                 subject_id,
                 email: "new@example.com".to_string(),
             }]);
     }
 
     #[test]
-    fn capture_subject_requires_started() {
+    fn register_subject_requires_started() {
         JourneyTester::with(services())
             .given_no_previous_events()
-            .when(JourneyCommand::CaptureSubject {
+            .when(JourneyCommand::RegisterSubject {
                 subject_id: Uuid::new_v4(),
                 email: "alice@example.com".to_string(),
             })
@@ -1610,12 +1610,12 @@ mod tests {
     }
 
     #[test]
-    fn capture_subject_rejects_after_complete() {
+    fn register_subject_rejects_after_complete() {
         let id = Uuid::new_v4();
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
-            .when(JourneyCommand::CaptureSubject {
+            .when(JourneyCommand::RegisterSubject {
                 subject_id: Uuid::new_v4(),
                 email: "alice@example.com".to_string(),
             })
@@ -1631,7 +1631,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1655,7 +1655,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1682,11 +1682,11 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_a,
                     email: "alice@example.com".to_string(),
                 },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_b,
                     email: "bob@example.com".to_string(),
                 },
@@ -1717,20 +1717,20 @@ mod tests {
     }
 
     #[test]
-    fn capture_and_bind_subject_emits_both_events() {
+    fn register_and_bind_subject_emits_both_events() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
-            .when(JourneyCommand::CaptureAndBindSubject {
+            .when(JourneyCommand::RegisterAndBindSubject {
                 role_path: role_path.clone(),
                 subject_id,
                 email: "alice@example.com".to_string(),
             })
             .then_expect_events(vec![
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1742,7 +1742,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_and_bind_subject_is_idempotent() {
+    fn register_and_bind_subject_is_idempotent() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
@@ -1750,7 +1750,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1759,7 +1759,7 @@ mod tests {
                     subject_id,
                 },
             ])
-            .when(JourneyCommand::CaptureAndBindSubject {
+            .when(JourneyCommand::RegisterAndBindSubject {
                 role_path,
                 subject_id,
                 email: "alice@example.com".to_string(),
@@ -1768,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_and_bind_subject_rejects_role_path_conflict() {
+    fn register_and_bind_subject_rejects_role_path_conflict() {
         let id = Uuid::new_v4();
         let subject_a = Uuid::new_v4();
         let subject_b = Uuid::new_v4();
@@ -1777,7 +1777,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_a,
                     email: "alice@example.com".to_string(),
                 },
@@ -1786,7 +1786,7 @@ mod tests {
                     subject_id: subject_a,
                 },
             ])
-            .when(JourneyCommand::CaptureAndBindSubject {
+            .when(JourneyCommand::RegisterAndBindSubject {
                 role_path: role_path.clone(),
                 subject_id: subject_b,
                 email: "bob@example.com".to_string(),
@@ -1796,7 +1796,7 @@ mod tests {
 
     #[test]
     fn forget_subject_via_subjects_map() {
-        // ForgetSubject must work for subjects registered via CaptureSubject
+        // ForgetSubject must work for subjects registered via RegisterSubject
         // (not just the legacy PersonCaptured path).
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
@@ -1804,7 +1804,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -1821,7 +1821,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -2116,7 +2116,7 @@ mod tests {
     #[test]
     fn set_attributes_resolves_subject_via_bindings() {
         // A secret attribute whose role path exists in `self.bindings` (registered
-        // via CaptureAndBindSubject) must be encrypted successfully.
+        // via RegisterAndBindSubject) must be encrypted successfully.
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
         let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
@@ -2131,7 +2131,7 @@ mod tests {
         JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },
@@ -2175,7 +2175,7 @@ mod tests {
         JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::SubjectCaptured {
+                JourneyEvent::SubjectRegistered {
                     subject_id,
                     email: "alice@example.com".to_string(),
                 },

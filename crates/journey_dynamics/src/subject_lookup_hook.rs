@@ -23,7 +23,7 @@ impl PersistHook for SubjectLookupHook {
     ) -> Result<(), PersistenceError> {
         for event in events {
             // Extract (subject_id, email) from either PersonCaptured (legacy)
-            // or SubjectCaptured (new).
+            // or SubjectRegistered (new).
             let (subject_id, email) = match event.event_type.as_str() {
                 "PersonCaptured" => {
                     let Some(inner) = event.payload.get("PersonCaptured") else {
@@ -41,8 +41,8 @@ impl PersistHook for SubjectLookupHook {
                     };
                     (subject_id, email)
                 }
-                "SubjectCaptured" => {
-                    let Some(inner) = event.payload.get("SubjectCaptured") else {
+                "SubjectRegistered" => {
+                    let Some(inner) = event.payload.get("SubjectRegistered") else {
                         continue;
                     };
                     let Some(subject_id) = inner

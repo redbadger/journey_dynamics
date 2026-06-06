@@ -129,7 +129,7 @@ impl View<Journey> for JourneyView {
             JourneyEvent::PersonCaptured { .. }
             | JourneyEvent::PersonDetailsUpdated { .. }
             | JourneyEvent::SubjectForgotten { .. }
-            | JourneyEvent::SubjectCaptured { .. }
+            | JourneyEvent::SubjectRegistered { .. }
             | JourneyEvent::SubjectBound { .. } => {}
 
             JourneyEvent::WorkflowEvaluated {

@@ -81,7 +81,7 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CaptureAndBindSubject": {
+    "RegisterAndBindSubject": {
         "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
         "email": "Clara.Dupont@example.com"
@@ -122,7 +122,7 @@ HTTP 204
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CaptureAndBindSubject": {
+    "RegisterAndBindSubject": {
         "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
         "email": "henri.dubois@example.com"

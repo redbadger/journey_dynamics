@@ -111,7 +111,7 @@ pub enum JourneyEvent {
         subject_id: Uuid,
     },
     /// A data subject was registered in this journey.
-    SubjectCaptured {
+    SubjectRegistered {
         subject_id: Uuid,
         email: String,
     },
@@ -148,7 +148,7 @@ impl DomainEvent for JourneyEvent {
             Self::StepProgressed { .. } => "StepProgressed",
             Self::Completed => "JourneyClosed",
             Self::SubjectForgotten { .. } => "SubjectForgotten",
-            Self::SubjectCaptured { .. } => "SubjectCaptured",
+            Self::SubjectRegistered { .. } => "SubjectRegistered",
             Self::SubjectBound { .. } => "SubjectBound",
             Self::AttributesSet { .. } => "AttributesSet",
         };

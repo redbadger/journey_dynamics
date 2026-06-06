@@ -44,11 +44,11 @@ pub enum JourneyCommand {
     /// `subject_id`, the command is rejected with `PersonRefConflict`.
     ///
     /// # Deprecated
-    /// Use [`JourneyCommand::CaptureAndBindSubject`] followed by
+    /// Use [`JourneyCommand::RegisterAndBindSubject`] followed by
     /// [`JourneyCommand::SetAttributes`] for path-keyed PII fields instead.
     #[deprecated(
         since = "0.4.0",
-        note = "use CaptureAndBindSubject + SetAttributes instead"
+        note = "use RegisterAndBindSubject + SetAttributes instead"
     )]
     CapturePerson {
         person_ref: String,
@@ -76,11 +76,11 @@ pub enum JourneyCommand {
     /// a no-op. If registered with a *different* email, the email is updated.
     ///
     /// Email is required so the subject can be found by GDPR erasure requests.
-    CaptureSubject { subject_id: Uuid, email: String },
+    RegisterSubject { subject_id: Uuid, email: String },
 
     /// Bind a registered subject to a role path (e.g. `"persons/passenger_0"`).
     ///
-    /// The subject must have been registered by a prior `CaptureSubject`
+    /// The subject must have been registered by a prior `RegisterSubject`
     /// command. The role path must not already be bound to a *different*
     /// subject; binding the same subject to the same path is idempotent.
     BindSubject {
@@ -89,9 +89,9 @@ pub enum JourneyCommand {
     },
 
     /// Convenience composite: register a subject and bind it to a role path
-    /// in a single command. Equivalent to `CaptureSubject` followed by
+    /// in a single command. Equivalent to `RegisterSubject` followed by
     /// `BindSubject` but avoids a round-trip when both are needed together.
-    CaptureAndBindSubject {
+    RegisterAndBindSubject {
         role_path: AttributePath,
         subject_id: Uuid,
         email: String,

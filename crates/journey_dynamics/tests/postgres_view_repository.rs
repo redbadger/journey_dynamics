@@ -1048,10 +1048,10 @@ async fn test_find_journeys_by_subject_returns_empty_for_unknown_subject(
     assert!(journeys.is_empty(), "unknown subject must return empty vec");
 }
 
-/// `SubjectCaptured` path — new index added in Layer 7.
+/// `SubjectRegistered` path — new index added in Layer 7.
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_journeys_by_subject_via_subject_captured(
+async fn test_find_journeys_by_subject_via_subject_registered(
     ctx: &mut PostgresViewRepositoryContext,
 ) {
     let repo = ctx.repo();
@@ -1061,9 +1061,9 @@ async fn test_find_journeys_by_subject_via_subject_captured(
     ctx.insert_event(
         &aggregate_id,
         1,
-        "SubjectCaptured",
+        "SubjectRegistered",
         json!({
-            "SubjectCaptured": {
+            "SubjectRegistered": {
                 "subject_id": subject_id.to_string(),
                 "email": "alice@example.com"
             }
@@ -1075,11 +1075,11 @@ async fn test_find_journeys_by_subject_via_subject_captured(
     assert_eq!(journeys, vec![aggregate_id]);
 }
 
-/// A journey with both `SubjectCaptured` and `SubjectBound` for the same
+/// A journey with both `SubjectRegistered` and `SubjectBound` for the same
 /// subject must appear exactly once (DISTINCT).
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_find_journeys_by_subject_deduplicates_subject_captured_and_bound(
+async fn test_find_journeys_by_subject_deduplicates_subject_registered_and_bound(
     ctx: &mut PostgresViewRepositoryContext,
 ) {
     let repo = ctx.repo();
@@ -1089,9 +1089,9 @@ async fn test_find_journeys_by_subject_deduplicates_subject_captured_and_bound(
     ctx.insert_event(
         &aggregate_id,
         1,
-        "SubjectCaptured",
+        "SubjectRegistered",
         json!({
-            "SubjectCaptured": {
+            "SubjectRegistered": {
                 "subject_id": subject_id.to_string(),
                 "email": "alice@example.com"
             }

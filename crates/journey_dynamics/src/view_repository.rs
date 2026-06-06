@@ -350,7 +350,7 @@ impl StructuredJourneyViewRepository {
     /// Searches event types that carry `subject_id` in plaintext:
     ///
     /// - `PersonCaptured` / `PersonDetailsUpdated` — legacy identity-capture events.
-    /// - `SubjectCaptured` — new-style subject registration.
+    /// - `SubjectRegistered` — new-style subject registration.
     /// - `AttributesSet` — new path-keyed command; the crypto layer writes a
     ///   `subjects` array of UUID strings alongside the encrypted partitions.
     ///   Queried with a GIN array-containment predicate backed by
@@ -375,8 +375,8 @@ impl StructuredJourneyViewRepository {
                 (event_type = 'PersonDetailsUpdated'
                  AND payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
                 OR
-                (event_type = 'SubjectCaptured'
-                 AND payload -> 'SubjectCaptured' ->> 'subject_id' = $1)
+                (event_type = 'SubjectRegistered'
+                 AND payload -> 'SubjectRegistered' ->> 'subject_id' = $1)
                 OR
                 (event_type = 'AttributesSet'
                  AND payload -> 'AttributesSet' -> 'subjects'
@@ -796,9 +796,9 @@ impl StructuredJourneyViewRepository {
                 }
             }
 
-            // SubjectCaptured: update email on any existing journey_person row
+            // SubjectRegistered: update email on any existing journey_person row
             // for this subject in this journey (handles re-capture email updates).
-            JourneyEvent::SubjectCaptured { subject_id, email } => {
+            JourneyEvent::SubjectRegistered { subject_id, email } => {
                 sqlx::query(
                     r"
                     UPDATE journey_person
