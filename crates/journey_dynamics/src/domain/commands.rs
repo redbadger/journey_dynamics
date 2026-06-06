@@ -42,6 +42,14 @@ pub enum JourneyCommand {
     /// with the same `subject_id`, the identity fields are updated
     /// (idempotent). If the slot already exists with a **different**
     /// `subject_id`, the command is rejected with `PersonRefConflict`.
+    ///
+    /// # Deprecated
+    /// Use [`JourneyCommand::CaptureAndBindSubject`] followed by
+    /// [`JourneyCommand::SetAttributes`] for path-keyed PII fields instead.
+    #[deprecated(
+        since = "0.4.0",
+        note = "use CaptureAndBindSubject + SetAttributes instead"
+    )]
     CapturePerson {
         person_ref: String,
         subject_id: Uuid,

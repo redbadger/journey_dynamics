@@ -6,6 +6,7 @@
 //! - How person data is projected to the structured database table
 //!
 //! Run with: `cargo run -p journey_dynamics --example capture_person`
+#![allow(deprecated)]
 
 use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
 use journey_dynamics::SimpleLoggingQuery;

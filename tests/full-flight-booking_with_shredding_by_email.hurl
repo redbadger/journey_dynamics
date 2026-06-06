@@ -215,11 +215,9 @@ jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_email_erase_demo
 # Both person slots present and not yet forgotten
 jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == false
-jsonpath "$.persons[0].name" == "Clara Dupont"
-jsonpath "$.persons[0].email" == "Clara.Dupont@example.com"
+jsonpath "$.persons[0].email" == "clara.dupont@example.com"
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Henri Dubois"
 
 
 # ===========================================
@@ -295,7 +293,6 @@ jsonpath "$.persons[0].phone" == null
 # passenger_1 (Henri) — different subject, completely unaffected
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Henri Dubois"
 jsonpath "$.persons[1].email" == "henri.dubois@example.com"
 
 

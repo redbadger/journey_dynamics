@@ -182,6 +182,7 @@ fn flight_booking_return_selection() {
 /// `CapturePerson` stores name/email/phone encrypted under that subject's DEK.
 /// No workflow evaluation is triggered (the decision engine sees only shared data).
 #[test]
+#[allow(deprecated)]
 fn flight_booking_capture_person() {
     let id = Uuid::new_v4();
     let subject_id = Uuid::new_v4();
@@ -195,13 +196,16 @@ fn flight_booking_capture_person() {
             email: "alice@example.com".to_string(),
             phone: Some("+44-7700-900000".to_string()),
         })
-        .then_expect_events(vec![JourneyEvent::PersonCaptured {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            name: "Alice Smith".to_string(),
-            email: "alice@example.com".to_string(),
-            phone: Some("+44-7700-900000".to_string()),
-        }]);
+        .then_expect_events(vec![
+            JourneyEvent::SubjectCaptured {
+                subject_id,
+                email: "alice@example.com".to_string(),
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "persons/passenger_0".parse().unwrap(),
+                subject_id,
+            },
+        ]);
 }
 
 /// `SetAttributes` for person details encrypts secret fields and stores
@@ -294,6 +298,7 @@ fn flight_booking_capture_person_details_requires_prior_capture_person() {
 
 /// Two passengers with independent subject IDs.
 #[test]
+#[allow(deprecated)]
 fn flight_booking_capture_two_passengers() {
     let id = Uuid::new_v4();
     let subject_a = Uuid::new_v4();
@@ -317,13 +322,16 @@ fn flight_booking_capture_two_passengers() {
             email: "bob@example.com".to_string(),
             phone: None,
         })
-        .then_expect_events(vec![JourneyEvent::PersonCaptured {
-            person_ref: "passenger_1".to_string(),
-            subject_id: subject_b,
-            name: "Bob Jones".to_string(),
-            email: "bob@example.com".to_string(),
-            phone: None,
-        }]);
+        .then_expect_events(vec![
+            JourneyEvent::SubjectCaptured {
+                subject_id: subject_b,
+                email: "bob@example.com".to_string(),
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "persons/passenger_1".parse().unwrap(),
+                subject_id: subject_b,
+            },
+        ]);
 }
 
 // ── Passenger readiness ───────────────────────────────────────────────────────

@@ -116,9 +116,11 @@ impl Aggregate for Journey {
             JourneyCommand::CapturePerson {
                 person_ref,
                 subject_id,
-                name,
                 email,
-                phone,
+                // name and phone were identity fields on the legacy PersonCaptured
+                // event; they are not carried forward in the new subject model.
+                name: _,
+                phone: _,
             } => {
                 if self.id == Uuid::default() {
                     return Err(JourneyError::NotFound);
@@ -126,23 +128,35 @@ impl Aggregate for Journey {
                 if JourneyState::Complete == self.state {
                     return Err(JourneyError::AlreadyCompleted);
                 }
-                // If the slot already exists, the subject_id must match.
-                if let Some(slot) = self.persons.get(&person_ref)
-                    && slot.subject_id != subject_id
+                // Derive the role path and check for a conflicting binding.
+                let role_path: AttributePath = format!("persons/{person_ref}")
+                    .parse()
+                    .map_err(|_| JourneyError::PersonRefConflict(person_ref.clone()))?;
+                if let Some(&existing) = self.bindings.get(&role_path)
+                    && existing != subject_id
                 {
                     return Err(JourneyError::PersonRefConflict(person_ref));
                 }
-                sink.write(
-                    JourneyEvent::PersonCaptured {
-                        person_ref,
-                        subject_id,
-                        name,
-                        email,
-                        phone,
-                    },
-                    self,
-                )
-                .await;
+                // Emit SubjectCaptured if the subject is new or email changed.
+                if self
+                    .subjects
+                    .get(&subject_id)
+                    .is_none_or(|reg| reg.email != email)
+                {
+                    sink.write(JourneyEvent::SubjectCaptured { subject_id, email }, self)
+                        .await;
+                }
+                // Emit SubjectBound if the role path is not yet bound.
+                if !self.bindings.contains_key(&role_path) {
+                    sink.write(
+                        JourneyEvent::SubjectBound {
+                            role_path,
+                            subject_id,
+                        },
+                        self,
+                    )
+                    .await;
+                }
                 Ok(())
             }
 
@@ -153,10 +167,16 @@ impl Aggregate for Journey {
                 if JourneyState::Complete == self.state {
                     return Err(JourneyError::AlreadyCompleted);
                 }
-                // The slot must already exist so we know which subject_id to use.
-                let subject_id = match self.persons.get(&person_ref) {
-                    Some(slot) => slot.subject_id,
-                    None => return Err(JourneyError::PersonNotFound(person_ref)),
+                // Resolve subject_id: check bindings (new path) then persons (legacy).
+                let subject_id = {
+                    let role_path: AttributePath = format!("persons/{person_ref}")
+                        .parse()
+                        .map_err(|_| JourneyError::PersonNotFound(person_ref.clone()))?;
+                    self.bindings
+                        .get(&role_path)
+                        .copied()
+                        .or_else(|| self.persons.get(&person_ref).map(|slot| slot.subject_id))
+                        .ok_or_else(|| JourneyError::PersonNotFound(person_ref.clone()))?
                 };
                 sink.write(
                     JourneyEvent::PersonDetailsUpdated {
@@ -500,9 +520,23 @@ impl Aggregate for Journey {
                 email,
                 phone,
             } => {
-                // `or_insert_with` creates the slot on first capture; on subsequent
-                // captures (same person_ref, same subject_id) it returns the existing
-                // slot so we can update the identity fields in place.
+                // Populate the new subjects/bindings maps so that SetAttributes
+                // resolves correctly for journeys using the legacy CapturePerson path.
+                let role_path: AttributePath =
+                    format!("persons/{person_ref}").parse().unwrap_or_else(|_| {
+                        // person_ref values stored in old events are always valid
+                        // path segments; this branch exists only for safety.
+                        AttributePath::new("persons/unknown").expect("static fallback")
+                    });
+                self.subjects
+                    .entry(subject_id)
+                    .and_modify(|reg| reg.email.clone_from(&email))
+                    .or_insert_with(|| SubjectRegistration {
+                        email: email.clone(),
+                        forgotten: false,
+                    });
+                self.bindings.insert(role_path, subject_id);
+                // Also maintain the legacy persons map for backward compat.
                 let slot = self
                     .persons
                     .entry(person_ref)
@@ -1091,13 +1125,16 @@ mod tests {
                 email: "alice@example.com".to_string(),
                 phone: Some("+44-7700-900000".to_string()),
             })
-            .then_expect_events(vec![JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
-                subject_id,
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: Some("+44-7700-900000".to_string()),
-            }]);
+            .then_expect_events(vec![
+                JourneyEvent::SubjectCaptured {
+                    subject_id,
+                    email: "alice@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: "persons/passenger_0".parse().unwrap(),
+                    subject_id,
+                },
+            ]);
     }
 
     #[test]
@@ -1125,12 +1162,10 @@ mod tests {
                 email: "alice.new@example.com".to_string(),
                 phone: Some("+44-7700-900001".to_string()),
             })
-            .then_expect_events(vec![JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            // email changed → SubjectCaptured; binding already exists → no SubjectBound
+            .then_expect_events(vec![JourneyEvent::SubjectCaptured {
                 subject_id,
-                name: "Alice J. Smith".to_string(),
                 email: "alice.new@example.com".to_string(),
-                phone: Some("+44-7700-900001".to_string()),
             }]);
     }
 
@@ -1187,13 +1222,16 @@ mod tests {
                 email: "bob@example.com".to_string(),
                 phone: None,
             })
-            .then_expect_events(vec![JourneyEvent::PersonCaptured {
-                person_ref: "passenger_1".to_string(),
-                subject_id: subject_b,
-                name: "Bob Jones".to_string(),
-                email: "bob@example.com".to_string(),
-                phone: None,
-            }]);
+            .then_expect_events(vec![
+                JourneyEvent::SubjectCaptured {
+                    subject_id: subject_b,
+                    email: "bob@example.com".to_string(),
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: "persons/passenger_1".parse().unwrap(),
+                    subject_id: subject_b,
+                },
+            ]);
     }
 
     #[test]

@@ -322,14 +322,11 @@ jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
 # All person slots present and not yet forgotten
 jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == false
-jsonpath "$.persons[0].name" == "Alice Johnson"
 jsonpath "$.persons[0].email" == "alice.johnson@email.com"
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Bob Johnson"
 jsonpath "$.persons[2].person_ref" == "passenger_2"
 jsonpath "$.persons[2].forgotten" == false
-jsonpath "$.persons[2].name" == "Charlie Johnson"
 
 
 # ===========================================
@@ -408,11 +405,9 @@ jsonpath "$.persons[0].phone" == null
 # passenger_1 (Bob) — different DEK, completely unaffected
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Bob Johnson"
 jsonpath "$.persons[1].email" == "bob.johnson@email.com"
 
 # passenger_2 (Charlie) — different DEK, completely unaffected
 jsonpath "$.persons[2].person_ref" == "passenger_2"
 jsonpath "$.persons[2].forgotten" == false
-jsonpath "$.persons[2].name" == "Charlie Johnson"
 jsonpath "$.persons[2].email" == "charlie.johnson@email.com"
