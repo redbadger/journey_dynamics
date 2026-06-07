@@ -10,6 +10,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`RegisterSubject` command** — registers a data subject (`email` →
+  `subject_id` mapping) within a journey. Re-registering the same subject with
+  the same email is a no-op; registering with a different email updates the
+  stored address. Email is required so the subject can be located by GDPR
+  erasure requests.
+
+- **`BindSubject` command** — binds an already-registered subject to a role
+  path (e.g. `"persons/passenger_0"`). Rejects binding a role path that is
+  already bound to a *different* subject; rebinding the same subject to the
+  same path is idempotent.
+
+- **`RegisterAndBindSubject` command** — convenience composite that performs a
+  `RegisterSubject` followed by `BindSubject` in a single command, avoiding a
+  round-trip when both are needed together. This is the recommended
+  replacement for the deprecated `CapturePerson` command.
+
+- **`SubjectRegistered` / `SubjectBound` events** — the domain events emitted
+  by the commands above. `SubjectRegistered { subject_id, email }` feeds the
+  subject-lookup projection used by `find_journeys_by_subject`; `SubjectBound
+  { role_path, subject_id }` records the role-path → subject binding.
+
 - **`SetAttributes` command** — a single command that accepts a flat map of
   `AttributePath → Value` and replaces the step-scoped `Capture` /
   `CapturePersonDetails` commands. A single submission may touch attributes
@@ -58,7 +79,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `rehydrate` for reading and writing deeply nested `serde_json::Value` trees
   using `AttributePath` keys.
 
+- **Subject-registration migration** (`20260606000001_subject_registration`) —
+  adds indexes on `SubjectRegistered` and `SubjectBound` events to support
+  `find_journeys_by_subject` on the new write path, and updates the
+  `journey_person` table documentation. Existing journeys remain covered by
+  the pre-existing `PersonCaptured` index.
+
+### Changed
+
+- **`SecretPartitionData` is now keyed by `role_path`** — the
+  `person_ref: String` field is replaced by `role_path: AttributePath` (the
+  full schema path, e.g. `"persons/passenger_0"`), which is used as the crypto
+  label (AAD) so the partition identity is meaningful on the read path. A
+  custom `Deserialize` impl preserves backward compatibility: events written
+  with the old `person_ref` field are read by synthesising
+  `"persons/{person_ref}"` as the role path.
+
+- **`SubjectLookupHook` projects `SubjectRegistered`** in addition to the
+  legacy `PersonCaptured` event when maintaining the `subject_lookup` table,
+  so subjects registered via the new commands are discoverable by email for
+  erasure requests.
+
+- **`CapturePerson` now emits `SubjectRegistered` + `SubjectBound`** instead of
+  `PersonCaptured`, and **silently discards the `name` and `phone` fields** —
+  the new subject model carries only the `email` (for erasure lookup) and the
+  role-path binding. To retain a subject's name or phone, send them as
+  path-keyed attributes via `SetAttributes` (e.g. `persons/<ref>/firstName`).
+  `PersonCaptured` is now emitted only by historical replay.
+
 ### Deprecated
+
+- `JourneyCommand::CapturePerson`. Use `JourneyCommand::RegisterAndBindSubject`
+  (or `RegisterSubject` + `BindSubject`) followed by
+  `JourneyCommand::SetAttributes` for path-keyed PII fields instead.
 
 - `JourneyCommand::Capture` and `JourneyCommand::CapturePersonDetails`.
   Use `JourneyCommand::SetAttributes` instead.
