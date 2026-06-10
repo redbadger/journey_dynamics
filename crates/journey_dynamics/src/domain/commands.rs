@@ -22,7 +22,7 @@ pub enum JourneyCommand {
 
     /// Set one or more journey attributes in a single command.
     ///
-    /// `changes` is a flat map of [`AttributePath`] to value. A single
+    /// `changes` is a flat map of [`PointerBuf`] to value. A single
     /// `SetAttributes` may touch attributes for **multiple subjects** (e.g.
     /// two passengers' passport numbers in one form submission). The
     /// aggregate classifies each path as plaintext or secret, validates

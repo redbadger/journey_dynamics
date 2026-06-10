@@ -58,7 +58,7 @@
 //! ```
 //!
 //! Each partition's payload is the JSON serialisation of the corresponding
-//! `changes: BTreeMap<AttributePath, Value>`.  The label equals `person_ref`,
+//! `changes: BTreeMap<PointerBuf, Value>`.  The label equals `person_ref`,
 //! allowing `reconstruct` and `redact_partitions` to route decrypted bytes
 //! back to the correct `SecretPartitionData` entry.
 
