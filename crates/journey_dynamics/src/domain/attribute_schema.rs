@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 // ── PiiClass ─────────────────────────────────────────────────────────────────
 
@@ -19,9 +19,9 @@ pub enum PiiClass {
     /// The value may be stored and indexed in plaintext.
     Plaintext,
     /// The value must be encrypted under the DEK belonging to `subject`.
-    /// `subject` is itself an `AttributePath` that points to the slot name
-    /// (e.g. `"persons/0"`) whose `subject_id` field provides the DEK key.
-    Secret { subject: AttributePath },
+    /// `subject` is a `PointerBuf` that points to the slot name
+    /// (e.g. `/persons/0`) whose `subject_id` field provides the DEK key.
+    Secret { subject: PointerBuf },
 }
 
 // ── NamespacePattern ──────────────────────────────────────────────────────────
@@ -62,7 +62,7 @@ pub struct NamespacePattern {
 /// Namespace patterns (see [`NamespacePattern`]) can be layered on top of
 /// either mode via [`with_namespace_patterns`](Self::with_namespace_patterns).
 pub struct AttributeSchema {
-    paths: BTreeMap<AttributePath, PiiClass>,
+    paths: BTreeMap<PointerBuf, PiiClass>,
     json_schema: Option<Value>,
     /// When `true`, [`classify`](Self::classify) returns `Some(Plaintext)` for
     /// any path not matched by an exact entry, namespace pattern, or prefix.
@@ -84,7 +84,7 @@ impl AttributeSchema {
     /// Construct a schema from an explicit path-to-class map and an optional
     /// JSON Schema used for structural validation.
     #[must_use]
-    pub const fn new(paths: BTreeMap<AttributePath, PiiClass>, json_schema: Option<Value>) -> Self {
+    pub const fn new(paths: BTreeMap<PointerBuf, PiiClass>, json_schema: Option<Value>) -> Self {
         Self {
             paths,
             json_schema,
@@ -144,36 +144,37 @@ impl AttributeSchema {
     /// borrowed while dynamically-constructed `Secret` values (whose subject
     /// path is built at call time) are owned.
     #[must_use]
-    pub fn classify<'a>(&'a self, path: &AttributePath) -> Option<Cow<'a, PiiClass>> {
+    pub fn classify<'a>(&'a self, path: &PointerBuf) -> Option<Cow<'a, PiiClass>> {
         // 1. Exact match.
         if let Some(cls) = self.paths.get(path) {
             return Some(Cow::Borrowed(cls));
         }
 
         // 2. Namespace pattern: only applies to exactly three segments.
-        let segs: Vec<&str> = path.segments().collect();
+        let segs: Vec<String> = path.tokens().map(|t| t.decoded().to_string()).collect();
         if segs.len() == 3 {
             for pattern in &self.namespace_patterns {
                 if segs[0] != pattern.namespace {
                     continue;
                 }
-                let field = segs[2];
+                let field = segs[2].as_str();
                 if pattern.plaintext_fields.contains(field) {
                     return Some(Cow::Borrowed(&PLAINTEXT));
                 }
                 if pattern.secret_fields.contains(field) {
-                    // Build subject path dynamically: namespace/ref
-                    let subject_str = format!("{}/{}", segs[0], segs[1]);
-                    if let Ok(subject) = subject_str.parse::<AttributePath>() {
-                        return Some(Cow::Owned(PiiClass::Secret { subject }));
-                    }
+                    // Build subject pointer dynamically: /namespace/ref
+                    let subject = PointerBuf::from_tokens([&segs[0], &segs[1]]);
+                    return Some(Cow::Owned(PiiClass::Secret { subject }));
                 }
             }
         }
 
         // 3. Plaintext prefix.
         if let Some(first) = segs.first()
-            && self.plaintext_prefixes.iter().any(|p| p.as_str() == *first)
+            && self
+                .plaintext_prefixes
+                .iter()
+                .any(|p| p.as_str() == first.as_str())
         {
             return Some(Cow::Borrowed(&PLAINTEXT));
         }
@@ -193,7 +194,7 @@ impl AttributeSchema {
     }
 
     /// Iterates over all explicitly registered paths.
-    pub fn known_paths(&self) -> impl Iterator<Item = &AttributePath> {
+    pub fn known_paths(&self) -> impl Iterator<Item = &PointerBuf> {
         self.paths.keys()
     }
 }
@@ -272,15 +273,15 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Classification {
     /// Changes that may be stored in plaintext.
-    pub plaintext: BTreeMap<AttributePath, Value>,
+    pub plaintext: BTreeMap<PointerBuf, Value>,
     /// Changes grouped by subject UUID — each group must be encrypted under
     /// that subject's DEK.
-    pub secret_by_subject: BTreeMap<Uuid, BTreeMap<AttributePath, Value>>,
+    pub secret_by_subject: BTreeMap<Uuid, BTreeMap<PointerBuf, Value>>,
     /// Paths that are neither in the schema nor handled by permissive mode.
     /// Also includes secret paths whose subject UUID could not be resolved by
     /// the caller-supplied lookup.  The caller decides how to react (typically
     /// an error).
-    pub unknown: Vec<AttributePath>,
+    pub unknown: Vec<PointerBuf>,
 }
 
 /// Classify a flat map of attribute changes against `schema`.
@@ -290,12 +291,12 @@ pub struct Classification {
 /// a secret path, that path is routed to [`Classification::unknown`].
 pub fn classify_changes(
     schema: &AttributeSchema,
-    changes: &BTreeMap<AttributePath, Value>,
-    subject_lookup: impl Fn(&AttributePath) -> Option<Uuid>,
+    changes: &BTreeMap<PointerBuf, Value>,
+    subject_lookup: impl Fn(&PointerBuf) -> Option<Uuid>,
 ) -> Classification {
-    let mut plaintext: BTreeMap<AttributePath, Value> = BTreeMap::new();
-    let mut secret_by_subject: BTreeMap<Uuid, BTreeMap<AttributePath, Value>> = BTreeMap::new();
-    let mut unknown: Vec<AttributePath> = Vec::new();
+    let mut plaintext: BTreeMap<PointerBuf, Value> = BTreeMap::new();
+    let mut secret_by_subject: BTreeMap<Uuid, BTreeMap<PointerBuf, Value>> = BTreeMap::new();
+    let mut unknown: Vec<PointerBuf> = Vec::new();
 
     for (path, value) in changes {
         match schema.classify(path) {
@@ -306,7 +307,7 @@ pub fn classify_changes(
                 PiiClass::Plaintext => {
                     plaintext.insert(path.clone(), value.clone());
                 }
-                PiiClass::Secret { subject } => match subject_lookup(subject) {
+                PiiClass::Secret { subject } => match subject_lookup(&subject) {
                     None => {
                         unknown.push(path.clone());
                     }
@@ -336,8 +337,8 @@ mod tests {
 
     use super::*;
 
-    fn path(s: &str) -> AttributePath {
-        s.parse().unwrap()
+    fn path(s: &str) -> PointerBuf {
+        PointerBuf::parse(s).unwrap()
     }
 
     fn subject_a() -> Uuid {
@@ -350,27 +351,27 @@ mod tests {
 
     fn simple_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
-        paths.insert(path("search/origin"), PiiClass::Plaintext);
-        paths.insert(path("search/destination"), PiiClass::Plaintext);
+        paths.insert(path("/search/origin"), PiiClass::Plaintext);
+        paths.insert(path("/search/destination"), PiiClass::Plaintext);
         paths.insert(
-            path("persons/0/passport"),
+            path("/persons/0/passport"),
             PiiClass::Secret {
-                subject: path("persons/0"),
+                subject: path("/persons/0"),
             },
         );
         paths.insert(
-            path("persons/1/passport"),
+            path("/persons/1/passport"),
             PiiClass::Secret {
-                subject: path("persons/1"),
+                subject: path("/persons/1"),
             },
         );
         AttributeSchema::new(paths, None)
     }
 
-    fn lookup_both(subject_path: &AttributePath) -> Option<Uuid> {
-        match subject_path.as_str() {
-            "persons/0" => Some(subject_a()),
-            "persons/1" => Some(subject_b()),
+    fn lookup_both(subject_path: &PointerBuf) -> Option<Uuid> {
+        match subject_path.to_string().as_str() {
+            "/persons/0" => Some(subject_a()),
+            "/persons/1" => Some(subject_b()),
             _ => None,
         }
     }
@@ -381,15 +382,15 @@ mod tests {
     fn all_plaintext_changes_land_in_plaintext_bucket() {
         let schema = simple_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("search/origin"), json!("LHR"));
-        changes.insert(path("search/destination"), json!("JFK"));
+        changes.insert(path("/search/origin"), json!("LHR"));
+        changes.insert(path("/search/destination"), json!("JFK"));
 
         let result = classify_changes(&schema, &changes, lookup_both);
 
         assert_eq!(result.plaintext.len(), 2);
         assert!(result.secret_by_subject.is_empty());
         assert!(result.unknown.is_empty());
-        assert_eq!(result.plaintext[&path("search/origin")], json!("LHR"));
+        assert_eq!(result.plaintext[&path("/search/origin")], json!("LHR"));
     }
 
     // ── mixed plaintext + single secret subject ───────────────────────────
@@ -398,8 +399,8 @@ mod tests {
     fn mixed_changes_split_correctly_for_one_subject() {
         let schema = simple_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("search/origin"), json!("LHR"));
-        changes.insert(path("persons/0/passport"), json!("AB123456"));
+        changes.insert(path("/search/origin"), json!("LHR"));
+        changes.insert(path("/persons/0/passport"), json!("AB123456"));
 
         let result = classify_changes(&schema, &changes, lookup_both);
 
@@ -407,7 +408,7 @@ mod tests {
         assert_eq!(result.secret_by_subject.len(), 1);
         assert!(result.unknown.is_empty());
         let slot = result.secret_by_subject.get(&subject_a()).unwrap();
-        assert_eq!(slot[&path("persons/0/passport")], json!("AB123456"));
+        assert_eq!(slot[&path("/persons/0/passport")], json!("AB123456"));
     }
 
     // ── two subjects in one batch ─────────────────────────────────────────
@@ -416,8 +417,8 @@ mod tests {
     fn two_subjects_produce_two_keys_in_secret_map() {
         let schema = simple_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("persons/0/passport"), json!("AB111111"));
-        changes.insert(path("persons/1/passport"), json!("CD222222"));
+        changes.insert(path("/persons/0/passport"), json!("AB111111"));
+        changes.insert(path("/persons/1/passport"), json!("CD222222"));
 
         let result = classify_changes(&schema, &changes, lookup_both);
 
@@ -434,14 +435,14 @@ mod tests {
     fn unknown_path_lands_in_unknown_bucket_and_is_not_lost() {
         let schema = simple_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("search/origin"), json!("LHR"));
-        changes.insert(path("mystery/field"), json!("surprise"));
+        changes.insert(path("/search/origin"), json!("LHR"));
+        changes.insert(path("/mystery/field"), json!("surprise"));
 
         let result = classify_changes(&schema, &changes, lookup_both);
 
         assert_eq!(result.plaintext.len(), 1);
         assert!(result.secret_by_subject.is_empty());
-        assert_eq!(result.unknown, vec![path("mystery/field")]);
+        assert_eq!(result.unknown, vec![path("/mystery/field")]);
     }
 
     // ── secret path with no resolvable subject ────────────────────────────
@@ -450,13 +451,13 @@ mod tests {
     fn secret_with_unresolvable_subject_lands_in_unknown() {
         let schema = simple_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("persons/0/passport"), json!("AB123456"));
+        changes.insert(path("/persons/0/passport"), json!("AB123456"));
 
         let result = classify_changes(&schema, &changes, |_| None);
 
         assert!(result.plaintext.is_empty());
         assert!(result.secret_by_subject.is_empty());
-        assert_eq!(result.unknown, vec![path("persons/0/passport")]);
+        assert_eq!(result.unknown, vec![path("/persons/0/passport")]);
     }
 
     // ── permissive schema ─────────────────────────────────────────────────
@@ -465,8 +466,8 @@ mod tests {
     fn permissive_schema_classifies_all_paths_as_plaintext() {
         let schema = AttributeSchema::permissive();
         let mut changes = BTreeMap::new();
-        changes.insert(path("anything/at/all"), json!(42));
-        changes.insert(path("another/one"), json!(true));
+        changes.insert(path("/anything/at/all"), json!(42));
+        changes.insert(path("/another/one"), json!(true));
 
         let result = classify_changes(&schema, &changes, |_| None);
 
@@ -491,10 +492,10 @@ mod tests {
         AttributeSchema::permissive().with_namespace_patterns(vec![pattern])
     }
 
-    fn lookup_passenger(subject_path: &AttributePath) -> Option<Uuid> {
-        match subject_path.as_str() {
-            "persons/passenger_0" => Some(subject_a()),
-            "persons/passenger_1" => Some(subject_b()),
+    fn lookup_passenger(subject_path: &PointerBuf) -> Option<Uuid> {
+        match subject_path.to_string().as_str() {
+            "/persons/passenger_0" => Some(subject_a()),
+            "/persons/passenger_1" => Some(subject_b()),
             _ => None,
         }
     }
@@ -502,17 +503,17 @@ mod tests {
     #[test]
     fn namespace_pattern_classifies_secret_field_as_secret() {
         let schema = persons_namespace_schema();
-        let result = schema.classify(&path("persons/passenger_0/firstName"));
+        let result = schema.classify(&path("/persons/passenger_0/firstName"));
         assert!(matches!(
             result.as_deref(),
-            Some(PiiClass::Secret { subject }) if subject.as_str() == "persons/passenger_0"
+            Some(PiiClass::Secret { subject }) if subject.to_string().as_str() == "/persons/passenger_0"
         ));
     }
 
     #[test]
     fn namespace_pattern_classifies_plaintext_field_as_plaintext() {
         let schema = persons_namespace_schema();
-        let result = schema.classify(&path("persons/passenger_0/passengerType"));
+        let result = schema.classify(&path("/persons/passenger_0/passengerType"));
         assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
     }
 
@@ -521,7 +522,7 @@ mod tests {
         let schema = persons_namespace_schema();
         // "role" is in neither secret_fields nor plaintext_fields,
         // but the schema is permissive so it falls through to Plaintext.
-        let result = schema.classify(&path("persons/passenger_0/role"));
+        let result = schema.classify(&path("/persons/passenger_0/role"));
         assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
     }
 
@@ -529,19 +530,22 @@ mod tests {
     fn namespace_pattern_routes_secret_to_correct_subject() {
         let schema = persons_namespace_schema();
         let mut changes = BTreeMap::new();
-        changes.insert(path("persons/passenger_0/firstName"), json!("Alice"));
-        changes.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+        changes.insert(path("/persons/passenger_0/firstName"), json!("Alice"));
+        changes.insert(path("/persons/passenger_0/passengerType"), json!("adult"));
 
         let result = classify_changes(&schema, &changes, lookup_passenger);
 
         assert_eq!(result.plaintext.len(), 1);
         assert_eq!(
-            result.plaintext[&path("persons/passenger_0/passengerType")],
+            result.plaintext[&path("/persons/passenger_0/passengerType")],
             json!("adult")
         );
         assert_eq!(result.secret_by_subject.len(), 1);
         let slot = result.secret_by_subject.get(&subject_a()).unwrap();
-        assert_eq!(slot[&path("persons/passenger_0/firstName")], json!("Alice"));
+        assert_eq!(
+            slot[&path("/persons/passenger_0/firstName")],
+            json!("Alice")
+        );
         assert!(result.unknown.is_empty());
     }
 
@@ -550,11 +554,11 @@ mod tests {
         let schema = persons_namespace_schema();
         let mut changes = BTreeMap::new();
         changes.insert(
-            path("persons/passenger_0/passportNumber"),
+            path("/persons/passenger_0/passportNumber"),
             json!("AB111111"),
         );
         changes.insert(
-            path("persons/passenger_1/passportNumber"),
+            path("/persons/passenger_1/passportNumber"),
             json!("CD222222"),
         );
 

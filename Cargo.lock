@@ -967,6 +967,7 @@ version = "0.1.0"
 dependencies = [
  "cqrs-es",
  "journey_dynamics",
+ "jsonptr",
  "schemars",
  "serde",
  "serde_json",
@@ -1772,6 +1773,7 @@ dependencies = [
  "futures-util",
  "hegeltest",
  "json-patch",
+ "jsonptr",
  "jsonschema 0.46.2",
  "postgres-es",
  "serde",

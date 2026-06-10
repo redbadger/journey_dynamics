@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
@@ -29,7 +29,7 @@ pub enum JourneyCommand {
     /// plaintext changes against the JSON Schema, and encrypts secret
     /// changes under the appropriate subject's DEK.
     SetAttributes {
-        changes: BTreeMap<AttributePath, Value>,
+        changes: BTreeMap<PointerBuf, Value>,
     },
 
     /// Register or update a person's identity fields in a named slot.

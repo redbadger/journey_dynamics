@@ -7,9 +7,10 @@ use uuid::Uuid;
 use serde_json::json;
 
 use crate::{
-    domain::{AttributePath, events::JourneyEvent, journey::Journey, rehydrate, set_at_path},
+    domain::{events::JourneyEvent, journey::Journey, rehydrate},
     queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
 };
+use jsonptr::PointerBuf;
 
 /// Deep-merge `patch` into `target` using JSON Merge Patch (RFC 7396).
 /// This is the Rust equivalent of what `PostgreSQL`'s `||` should do but
@@ -726,7 +727,7 @@ impl StructuredJourneyViewRepository {
                 // non-identity attributes.
                 for partition in secret_partitions {
                     for (path, value) in &partition.changes {
-                        set_at_path(&mut data_update, path, value.clone());
+                        let _ = path.assign(&mut data_update, value.clone());
                     }
                 }
 
@@ -763,12 +764,12 @@ impl StructuredJourneyViewRepository {
                 // Mirror secret changes into journey_person.details using the
                 // suffix path (the part after "persons/<ref>/").
                 for partition in secret_partitions {
-                    let prefix = format!("persons/{}/", partition.person_ref);
+                    let prefix =
+                        PointerBuf::parse(&format!("/persons/{}", partition.person_ref)).unwrap();
                     let mut details_update = json!({});
                     for (path, value) in &partition.changes {
-                        let suffix = path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
-                        if let Ok(suffix_path) = suffix.parse::<AttributePath>() {
-                            set_at_path(&mut details_update, &suffix_path, value.clone());
+                        if let Some(suffix_path) = path.strip_prefix(&prefix) {
+                            let _ = suffix_path.assign(&mut details_update, value.clone());
                         }
                     }
                     sqlx::query(
