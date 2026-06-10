@@ -307,7 +307,7 @@ pub fn classify_changes(
                 PiiClass::Plaintext => {
                     plaintext.insert(path.clone(), value.clone());
                 }
-                PiiClass::Secret { subject } => match subject_lookup(&subject) {
+                PiiClass::Secret { subject } => match subject_lookup(subject) {
                     None => {
                         unknown.push(path.clone());
                     }

@@ -765,7 +765,7 @@ impl StructuredJourneyViewRepository {
                 // suffix path (the part after "/persons/<ref>/").
                 for partition in secret_partitions {
                     let prefix =
-                        PointerBuf::parse(&format!("/persons/{}", partition.person_ref)).unwrap();
+                        PointerBuf::parse(format!("/persons/{}", partition.person_ref)).unwrap();
                     let mut details_update = json!({});
                     for (path, value) in &partition.changes {
                         if let Some(suffix_path) = path.strip_prefix(&prefix) {

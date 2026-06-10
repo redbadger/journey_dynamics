@@ -429,7 +429,7 @@ impl Aggregate for Journey {
                         // Build pointer for prefix /persons/{ref} and strip it
                         // from the stored pointer to get the suffix directly.
                         let prefix =
-                            PointerBuf::parse(&format!("/persons/{}", partition.person_ref))
+                            PointerBuf::parse(format!("/persons/{}", partition.person_ref))
                                 .unwrap();
                         for (path, value) in &partition.changes {
                             if let Some(suffix_path) = path.strip_prefix(&prefix) {
