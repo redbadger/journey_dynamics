@@ -322,8 +322,8 @@ impl PiiEventCodec for JourneyPiiCodec {
                         && let Some(arr) = event.payload[key]["secret_partitions"].as_array_mut()
                         && let Some(obj) = arr[i].as_object_mut()
                     {
-                        // Project sentinel convention: `{"redacted": true}`.
-                        obj.insert("changes".to_string(), json!({ "redacted": true }));
+                        // Project sentinel convention: `{"/redacted": true}`.
+                        obj.insert("changes".to_string(), json!({ "/redacted": true }));
                     }
                 }
                 Ok(())
@@ -1429,7 +1429,7 @@ mod tests {
             .find(|p| p["person_ref"].as_str() == Some("passenger_0"))
             .unwrap();
         assert!(
-            p_a["changes"]["redacted"].as_bool().unwrap(),
+            p_a["changes"]["/redacted"].as_bool().unwrap(),
             "subject A's changes must carry the redaction sentinel"
         );
 
