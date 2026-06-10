@@ -30,9 +30,9 @@ pub enum PiiClass {
 /// form `<namespace>/<ref>/<field>`.
 ///
 /// For example, with `namespace = "persons"`:
-/// - `persons/passenger_0/firstName` → `Secret { subject: "persons/passenger_0" }`
+/// - `/persons/passenger_0/firstName` → `Secret { subject: "/persons/passenger_0" }`
 ///   (if `"firstName"` is in `secret_fields`)
-/// - `persons/passenger_0/passengerType` → `Plaintext`
+/// - `/persons/passenger_0/passengerType` → `Plaintext`
 ///   (if `"passengerType"` is in `plaintext_fields`)
 ///
 /// Any field not listed in either set is treated as unknown (or falls through
@@ -286,7 +286,7 @@ pub struct Classification {
 
 /// Classify a flat map of attribute changes against `schema`.
 ///
-/// `subject_lookup` resolves a *subject path* (e.g. `"persons/0"`) to the
+/// `subject_lookup` resolves a *subject path* (e.g. `"/persons/0"`) to the
 /// `Uuid` of the underlying data-subject.  When the lookup returns `None` for
 /// a secret path, that path is routed to [`Classification::unknown`].
 pub fn classify_changes(

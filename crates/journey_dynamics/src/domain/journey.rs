@@ -228,7 +228,7 @@ impl Aggregate for Journey {
                 }
 
                 // Classify every path against the attribute schema.
-                // The subject_lookup resolves "persons/<ref>" → slot UUID.
+                // The subject_lookup resolves "/persons/<ref>" → slot UUID.
                 let schema = services.attribute_schema();
                 let classification = {
                     let persons = &self.persons;
@@ -422,7 +422,7 @@ impl Aggregate for Journey {
                         let _ = path.assign(&mut self.shared_data, value.clone());
                     }
                     // Permanent mirror-write into slot.details using the suffix
-                    // path (the part after "persons/<ref>/").  This keeps the
+                    // path (the part after "/persons/<ref>/").  This keeps the
                     // legacy `journey_person.details` column populated for
                     // downstream consumers that still read from it.
                     if let Some(slot) = self.persons.get_mut(&partition.person_ref) {
@@ -1496,7 +1496,7 @@ mod tests {
     #[test]
     fn set_attributes_secret_writes_under_slot() {
         // apply() should write secret changes both into shared_data (full path)
-        // and into slot.details (suffix path after "persons/<ref>/").
+        // and into slot.details (suffix path after "/persons/<ref>/").
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 

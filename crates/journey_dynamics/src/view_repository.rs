@@ -762,7 +762,7 @@ impl StructuredJourneyViewRepository {
                 .await?;
 
                 // Mirror secret changes into journey_person.details using the
-                // suffix path (the part after "persons/<ref>/").
+                // suffix path (the part after "/persons/<ref>/").
                 for partition in secret_partitions {
                     let prefix =
                         PointerBuf::parse(&format!("/persons/{}", partition.person_ref)).unwrap();
