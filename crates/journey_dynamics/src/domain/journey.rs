@@ -298,9 +298,7 @@ impl Aggregate for Journey {
                 if !classification.plaintext.is_empty() {
                     let mut merged_data = self.shared_data.clone();
 
-                    if let Err(e) = assign_all(&mut merged_data, &classification.plaintext) {
-                        return Err(JourneyError::InvalidJsonPointer(e.to_string()));
-                    }
+                    assign_all(&mut merged_data, &classification.plaintext)?;
 
                     if let Err(e) = services.schema_validator().validate(&merged_data) {
                         return Err(JourneyError::InvalidData(e.to_string()));
@@ -488,7 +486,7 @@ pub enum JourneyError {
     #[error("Unknown attribute paths: {0:?}")]
     UnknownAttributePath(Vec<PointerBuf>),
     #[error("Invalid JSON pointer: {0}")]
-    InvalidJsonPointer(String),
+    InvalidJsonPointer(#[from] jsonptr::assign::Error),
 }
 
 pub struct JourneyServices {
@@ -581,6 +579,7 @@ mod tests {
     #![allow(deprecated)]
     use cqrs_es::test::TestFramework;
     use serde_json::json;
+    use std::assert_matches;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use uuid::Uuid;
@@ -1655,13 +1654,17 @@ mod tests {
             json!("Jimbob"),
         );
 
-        JourneyTester::with(services())
+        let result = JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::InvalidJsonPointer(
-                "assign failed: json pointer token at offset 10 failed to parse as an array index"
-                    .to_string(),
-            ));
+            .inspect_result();
+
+        assert_matches!(
+            result,
+            Err(JourneyError::InvalidJsonPointer(
+                jsonptr::assign::Error::FailedToParseIndex { .. }
+            ))
+        );
     }
 
     #[test]
@@ -1674,12 +1677,17 @@ mod tests {
             json!("Jimbob"),
         );
 
-        JourneyTester::with(services())
+        let result = JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::InvalidJsonPointer(
-                "assign failed: json pointer token at offset 10 is out of bounds".to_string(),
-            ));
+            .inspect_result();
+
+        assert_matches!(
+            result,
+            Err(JourneyError::InvalidJsonPointer(
+                jsonptr::assign::Error::OutOfBounds { .. }
+            ))
+        );
     }
 
     #[test]
