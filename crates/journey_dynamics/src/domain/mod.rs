@@ -14,4 +14,4 @@ pub use attribute_schema::{
     AttributeSchema, AttributeSchemaConfig, Classification, NamespacePattern,
     NamespacePatternConfig, PiiClass, classify_changes,
 };
-pub use json_path::{flatten, rehydrate};
+pub use json_path::{assign_all, flatten};

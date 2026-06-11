@@ -13,7 +13,10 @@ use zen_engine::{
     DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions, model::DecisionContent,
 };
 
-use crate::domain::journey::{Journey, JourneyState};
+use crate::domain::{
+    assign_all,
+    journey::{Journey, JourneyState},
+};
 use jsonptr::PointerBuf;
 
 // ---------------------------------------------------------------------------
@@ -80,7 +83,7 @@ pub trait DecisionEngine: Send + Sync {
         pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
         let mut merged = journey.shared_data().clone();
-        json_patch::merge(&mut merged, &crate::domain::rehydrate(pending_changes));
+        assign_all(&mut merged, pending_changes)?;
         self.evaluate_next_steps(journey, "", &merged).await
     }
 }
@@ -275,7 +278,7 @@ impl DecisionEngine for GoRulesDecisionEngine {
         pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
         let mut data = journey.shared_data().clone();
-        json_patch::merge(&mut data, &crate::domain::rehydrate(pending_changes));
+        assign_all(&mut data, pending_changes)?;
         self.run(data).await
     }
 }

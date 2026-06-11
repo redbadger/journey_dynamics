@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use jsonptr::PointerBuf;
+use jsonptr::{Pointer, PointerBuf, assign::Error as AssignError};
 
 // ── flatten ───────────────────────────────────────────────────────────────────
 
@@ -42,16 +42,24 @@ fn flatten_into(value: &Value, result: &mut BTreeMap<PointerBuf, Value>, prefix:
     }
 }
 
-// ── rehydrate ─────────────────────────────────────────────────────────────────
+// ── assign_all ────────────────────────────────────────────────────────────────
 
-/// Reconstruct a nested JSON value from a flat map of pointer → leaf value.
-#[must_use]
-pub fn rehydrate(changes: &BTreeMap<PointerBuf, Value>) -> Value {
-    let mut root = Value::Object(serde_json::Map::new());
+/// Assign a group of values, keyed by [`PointerBuf`], into an existing JSON value.
+///
+/// # Errors
+///
+/// Invalid JSON pointer errors are propagated as [`AssignError`].
+///
+pub fn assign_all<'a, I, P>(dest: &mut Value, changes: I) -> Result<(), AssignError>
+where
+    I: IntoIterator<Item = (P, &'a Value)>,
+    P: AsRef<Pointer>,
+{
     for (ptr, value) in changes {
-        let _ = ptr.assign(&mut root, value.clone());
+        ptr.as_ref().assign(dest, value.clone())?;
     }
-    root
+
+    Ok(())
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -63,6 +71,13 @@ mod tests {
 
     fn path(s: &str) -> PointerBuf {
         s.parse().unwrap()
+    }
+
+    fn rehydrate(changes: &BTreeMap<PointerBuf, Value>) -> Value {
+        let mut v = json!({});
+        assign_all(&mut v, changes).unwrap();
+
+        v
     }
 
     // ── flatten ───────────────────────────────────────────────────────────
@@ -99,17 +114,21 @@ mod tests {
         assert_eq!(flat[&path("/flag")], json!(null));
     }
 
-    // ── rehydrate ─────────────────────────────────────────────────────────
+    // ── assign_all ────────────────────────────────────────────────────────
 
     #[test]
-    fn rehydrate_flat_map_to_nested() {
+    fn assign_all_flat_map_to_nested() {
         let mut changes = BTreeMap::new();
         changes.insert(path("/search/origin"), json!("LHR"));
         changes.insert(path("/search/destination"), json!("JFK"));
-        let v = rehydrate(&changes);
+
+        let mut v = json!({"search": {"date": "2026-06-11"}});
+
+        assign_all(&mut v, &changes).unwrap();
+
         assert_eq!(
             v,
-            json!({"search": {"origin": "LHR", "destination": "JFK"}})
+            json!({"search": {"date": "2026-06-11", "origin": "LHR", "destination": "JFK"}})
         );
     }
 

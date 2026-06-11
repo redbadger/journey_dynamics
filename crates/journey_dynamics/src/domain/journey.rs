@@ -8,11 +8,10 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        AttributeSchema,
+        AttributeSchema, assign_all,
         attribute_schema::{PiiClass, classify_changes},
         commands::JourneyCommand,
         events::{JourneyEvent, SecretPartitionData},
-        rehydrate,
     },
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
@@ -298,7 +297,11 @@ impl Aggregate for Journey {
                 // Validate plaintext changes merged with current shared_data.
                 if !classification.plaintext.is_empty() {
                     let mut merged_data = self.shared_data.clone();
-                    json_patch::merge(&mut merged_data, &rehydrate(&classification.plaintext));
+
+                    if let Err(e) = assign_all(&mut merged_data, &classification.plaintext) {
+                        return Err(JourneyError::InvalidJsonPointer(e.to_string()));
+                    }
+
                     if let Err(e) = services.schema_validator().validate(&merged_data) {
                         return Err(JourneyError::InvalidData(e.to_string()));
                     }
@@ -412,15 +415,12 @@ impl Aggregate for Journey {
                 secret_partitions,
             } => {
                 // Apply plaintext changes directly into shared_data.
-                for (path, value) in &plaintext {
-                    let _ = path.assign(&mut self.shared_data, value.clone());
-                }
+                assign_all(&mut self.shared_data, &plaintext).unwrap();
                 // Apply secret changes.
                 for partition in &secret_partitions {
                     // Write every change at its full path into shared_data.
-                    for (path, value) in &partition.changes {
-                        let _ = path.assign(&mut self.shared_data, value.clone());
-                    }
+                    assign_all(&mut self.shared_data, &partition.changes).unwrap();
+
                     // Permanent mirror-write into slot.details using the suffix
                     // path (the part after "/persons/<ref>/").  This keeps the
                     // legacy `journey_person.details` column populated for
@@ -431,11 +431,14 @@ impl Aggregate for Journey {
                         let prefix =
                             PointerBuf::parse(format!("/persons/{}", partition.person_ref))
                                 .unwrap();
-                        for (path, value) in &partition.changes {
-                            if let Some(suffix_path) = path.strip_prefix(&prefix) {
-                                let _ = suffix_path.assign(&mut slot.details, value.clone());
-                            }
-                        }
+
+                        let prefixed_changes =
+                            partition.changes.iter().filter_map(|(path, value)| {
+                                path.strip_prefix(&prefix)
+                                    .map(|suffix_path| (suffix_path, value))
+                            });
+
+                        assign_all(&mut slot.details, prefixed_changes).unwrap();
                     }
                 }
             }
@@ -484,6 +487,8 @@ pub enum JourneyError {
     PersonNotFound(String),
     #[error("Unknown attribute paths: {0:?}")]
     UnknownAttributePath(Vec<PointerBuf>),
+    #[error("Invalid JSON pointer: {0}")]
+    InvalidJsonPointer(String),
 }
 
 pub struct JourneyServices {
@@ -599,7 +604,8 @@ mod tests {
                         "step":       { "type": "string" },
                         "email":      { "type": "string", "format": "email" },
                         "name":       { "type": "string" },
-                        "first_name": { "type": "string" }
+                        "first_name": { "type": "string" },
+                        "nicknames":  { "type": "array", "items": { "type": "string" }}
                     },
                     "additionalProperties": true
                 }
@@ -1636,6 +1642,43 @@ mod tests {
             .then_expect_error(JourneyError::InvalidData(
                 "Schema validation failed: {\"alpha\":\"not_a_number\"} is not valid under any of the schemas listed in the 'oneOf' keyword"
                     .to_string(),
+            ));
+    }
+
+    #[test]
+    fn set_attributes_non_numeric_array_index() {
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
+        changes.insert(
+            "/nicknames/one".parse::<PointerBuf>().unwrap(),
+            json!("Jimbob"),
+        );
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::InvalidJsonPointer(
+                "assign failed: json pointer token at offset 10 failed to parse as an array index"
+                    .to_string(),
+            ));
+    }
+
+    #[test]
+    fn set_attributes_array_index_out_of_range() {
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
+        changes.insert(
+            "/nicknames/2".parse::<PointerBuf>().unwrap(),
+            json!("Jimbob"),
+        );
+
+        JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_error(JourneyError::InvalidJsonPointer(
+                "assign failed: json pointer token at offset 10 is out of bounds".to_string(),
             ));
     }
 
