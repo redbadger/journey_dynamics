@@ -417,7 +417,8 @@ impl Aggregate for Journey {
                 // Apply secret changes.
                 for partition in &secret_partitions {
                     // Write every change at its full path into shared_data.
-                    assign_all(&mut self.shared_data, &partition.changes).unwrap();
+                    assign_all(&mut self.shared_data, &partition.changes)
+                        .expect("events should have valid JSON pointers");
 
                     // Permanent mirror-write into slot.details using the suffix
                     // path (the part after "/persons/<ref>/").  This keeps the
@@ -436,7 +437,8 @@ impl Aggregate for Journey {
                                     .map(|suffix_path| (suffix_path, value))
                             });
 
-                        assign_all(&mut slot.details, prefixed_changes).unwrap();
+                        assign_all(&mut slot.details, prefixed_changes)
+                            .expect("events should have valid JSON pointers");
                     }
                 }
             }
