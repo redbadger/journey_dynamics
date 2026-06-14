@@ -50,17 +50,15 @@ body contains "not found"
 
 
 # ===========================================
-# Error: CapturePerson on non-existent journey
+# Error: RegisterAndBindSubject on non-existent journey
 # ===========================================
 POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "lead_booker",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/lead_booker",
         "subject_id": "{{newUuid}}",
-        "name": "Test",
-        "email": "test@example.com",
-        "phone": null
+        "email": "test@example.com"
     }
 }
 

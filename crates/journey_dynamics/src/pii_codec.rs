@@ -165,7 +165,8 @@ impl PiiEventCodec for JourneyPiiCodec {
                     else {
                         continue;
                     };
-                    let Some(person_ref) = event.payload[key]["secret_partitions"][i]["person_ref"]
+                    // Use role_path as the crypto label (new format).
+                    let Some(role_path) = event.payload[key]["secret_partitions"][i]["role_path"]
                         .as_str()
                         .map(str::to_string)
                     else {
@@ -187,7 +188,7 @@ impl PiiEventCodec for JourneyPiiCodec {
 
                     result.push(SecretPartition {
                         subject_id,
-                        label: person_ref,
+                        label: role_path,
                         payload: serde_json::to_vec(&changes)?,
                     });
                 }
@@ -247,11 +248,15 @@ impl PiiEventCodec for JourneyPiiCodec {
                         .map_or(0, Vec::len);
 
                     for i in 0..n {
-                        let person_ref = event.payload[key]["secret_partitions"][i]["person_ref"]
+                        // Try role_path (new format) then person_ref (old format).
+                        let label = event.payload[key]["secret_partitions"][i]["role_path"]
                             .as_str()
+                            .or_else(|| {
+                                event.payload[key]["secret_partitions"][i]["person_ref"].as_str()
+                            })
                             .map(str::to_string);
 
-                        if person_ref.as_deref() == Some(&part.label) {
+                        if label.as_deref() == Some(&part.label) {
                             let changes: Value = serde_json::from_slice(&part.payload)?;
                             if let Some(arr) =
                                 event.payload[key]["secret_partitions"].as_array_mut()
@@ -309,14 +314,18 @@ impl PiiEventCodec for JourneyPiiCodec {
                     .map_or(0, Vec::len);
 
                 for i in 0..n {
-                    // Read the person_ref (owned String) before any mutable borrow.
-                    let person_ref = event.payload[key]["secret_partitions"][i]["person_ref"]
+                    // Try role_path (new format) then person_ref (old format).
+                    // Read as owned String before any mutable borrow.
+                    let label = event.payload[key]["secret_partitions"][i]["role_path"]
                         .as_str()
+                        .or_else(|| {
+                            event.payload[key]["secret_partitions"][i]["person_ref"].as_str()
+                        })
                         .map(str::to_string);
 
-                    let should_redact = person_ref
+                    let should_redact = label
                         .as_deref()
-                        .is_some_and(|pr| labels.iter().any(|l| l == pr));
+                        .is_some_and(|lbl| labels.iter().any(|l| l == lbl));
 
                     if should_redact
                         && let Some(arr) = event.payload[key]["secret_partitions"].as_array_mut()
@@ -503,9 +512,9 @@ mod tests {
         )
     }
 
-    /// Build an `AttributesSet` serialised event.
+    /// Build an `AttributesSet` serialised event (new `role_path` format).
     ///
-    /// `secret_partitions` is a list of `(person_ref, subject_id, changes)`
+    /// `secret_partitions` is a list of `(role_path, subject_id, changes)`
     /// triples that will appear in the `secret_partitions` JSON array.
     fn attributes_set_event(
         aggregate_id: &str,
@@ -514,9 +523,9 @@ mod tests {
     ) -> SerializedEvent {
         let parts: Vec<serde_json::Value> = secret_partitions
             .into_iter()
-            .map(|(person_ref, subject_id, changes)| {
+            .map(|(role_path, subject_id, changes)| {
                 serde_json::json!({
-                    "person_ref": person_ref,
+                    "role_path": role_path,
                     "subject_id": subject_id.to_string(),
                     "changes":    changes,
                 })
@@ -1293,7 +1302,7 @@ mod tests {
             aggregate_id,
             1,
             vec![(
-                "passenger_0".to_string(),
+                "persons/passenger_0".to_string(),
                 subject_id,
                 serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
             )],
@@ -1317,8 +1326,8 @@ mod tests {
         assert_eq!(enc_parts.len(), 1);
         assert_eq!(
             enc_parts[0]["label"].as_str().unwrap(),
-            "passenger_0",
-            "label must equal person_ref"
+            "persons/passenger_0",
+            "label must equal role_path"
         );
         // The plaintext field must be intact.
         assert_eq!(
@@ -1343,12 +1352,12 @@ mod tests {
             1,
             vec![
                 (
-                    "passenger_0".to_string(),
+                    "persons/passenger_0".to_string(),
                     subject_a,
                     serde_json::json!({ "persons/passenger_0/passport": "AB111111" }),
                 ),
                 (
-                    "passenger_1".to_string(),
+                    "persons/passenger_1".to_string(),
                     subject_b,
                     serde_json::json!({ "persons/passenger_1/passport": "CD222222" }),
                 ),
@@ -1367,8 +1376,8 @@ mod tests {
 
         let p0 = parts
             .iter()
-            .find(|p| p["person_ref"].as_str() == Some("passenger_0"))
-            .expect("passenger_0 partition must be present");
+            .find(|p| p["role_path"].as_str() == Some("persons/passenger_0"))
+            .expect("persons/passenger_0 partition must be present");
         assert_eq!(
             p0["changes"]["persons/passenger_0/passport"]
                 .as_str()
@@ -1378,8 +1387,8 @@ mod tests {
 
         let p1 = parts
             .iter()
-            .find(|p| p["person_ref"].as_str() == Some("passenger_1"))
-            .expect("passenger_1 partition must be present");
+            .find(|p| p["role_path"].as_str() == Some("persons/passenger_1"))
+            .expect("persons/passenger_1 partition must be present");
         assert_eq!(
             p1["changes"]["persons/passenger_1/passport"]
                 .as_str()
@@ -1402,12 +1411,12 @@ mod tests {
             1,
             vec![
                 (
-                    "passenger_0".to_string(),
+                    "persons/passenger_0".to_string(),
                     subject_a,
                     serde_json::json!({ "persons/passenger_0/passport": "AB111111" }),
                 ),
                 (
-                    "passenger_1".to_string(),
+                    "persons/passenger_1".to_string(),
                     subject_b,
                     serde_json::json!({ "persons/passenger_1/passport": "CD222222" }),
                 ),
@@ -1426,7 +1435,7 @@ mod tests {
 
         let p_a = parts
             .iter()
-            .find(|p| p["person_ref"].as_str() == Some("passenger_0"))
+            .find(|p| p["role_path"].as_str() == Some("persons/passenger_0"))
             .unwrap();
         assert!(
             p_a["changes"]["redacted"].as_bool().unwrap(),
@@ -1435,7 +1444,7 @@ mod tests {
 
         let p_b = parts
             .iter()
-            .find(|p| p["person_ref"].as_str() == Some("passenger_1"))
+            .find(|p| p["role_path"].as_str() == Some("persons/passenger_1"))
             .unwrap();
         assert_eq!(
             p_b["changes"]["persons/passenger_1/passport"]
@@ -1458,7 +1467,7 @@ mod tests {
             aggregate_id,
             1,
             vec![(
-                "passenger_0".to_string(),
+                "persons/passenger_0".to_string(),
                 subject_id,
                 serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
             )],
@@ -1467,7 +1476,7 @@ mod tests {
             aggregate_id,
             2,
             vec![(
-                "passenger_0".to_string(),
+                "persons/passenger_0".to_string(),
                 subject_id,
                 serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
             )],
@@ -1486,6 +1495,61 @@ mod tests {
         assert_ne!(
             ct1, ct2,
             "identical plaintext at different sequence numbers must produce different ciphertexts"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_attributes_set_old_person_ref_format_decrypts_correctly() {
+        // Events written before the person_ref → role_path rename used
+        // `person_ref: "passenger_0"` (short slot name, no prefix) as both the
+        // JSON field name and the encryption label.  The codec must still be
+        // able to decrypt such events after the rename.
+        let repo = make_repo();
+        let aggregate_id = "journey-attrs-legacy-person-ref";
+        let subject_id = Uuid::new_v4();
+
+        // Build the event in the OLD format (person_ref key, no prefix).
+        let old_format_event = {
+            let parts = serde_json::json!([{
+                "person_ref": "passenger_0",
+                "subject_id": subject_id.to_string(),
+                "changes":    { "persons/passenger_0/passport": "AB123456" },
+            }]);
+            SerializedEvent::new(
+                aggregate_id.to_string(),
+                1,
+                "Journey".to_string(),
+                "AttributesSet".to_string(),
+                "1.0".to_string(),
+                serde_json::json!({
+                    "AttributesSet": {
+                        "plaintext":         {},
+                        "secret_partitions": parts,
+                    }
+                }),
+                serde_json::json!({}),
+            )
+        };
+
+        repo.persist::<Journey>(&[old_format_event], None)
+            .await
+            .unwrap();
+
+        // The event was encrypted with the label "passenger_0" (old person_ref).
+        // Decrypting must route the plaintext back to the correct partition.
+        let events = repo.get_events::<Journey>(aggregate_id).await.unwrap();
+        assert_eq!(events.len(), 1);
+
+        let parts = events[0].payload["AttributesSet"]["secret_partitions"]
+            .as_array()
+            .expect("secret_partitions must be present");
+        assert_eq!(parts.len(), 1);
+        assert_eq!(
+            parts[0]["changes"]["persons/passenger_0/passport"]
+                .as_str()
+                .unwrap(),
+            "AB123456",
+            "old person_ref event must decrypt correctly"
         );
     }
 }

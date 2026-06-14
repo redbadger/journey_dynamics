@@ -98,17 +98,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture passenger 0 identity (PII — encrypted at rest)
+# Step 6: Register passenger 0 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_0",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
-        "name": "Alice Johnson",
-        "email": "alice.johnson@email.com",
-        "phone": "+1-555-123-4567"
+        "email": "alice.johnson@email.com"
     }
 }
 
@@ -140,17 +138,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 8: Capture passenger 1 identity (PII — encrypted at rest)
+# Step 8: Register passenger 1 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_1",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
-        "name": "Bob Johnson",
-        "email": "bob.johnson@email.com",
-        "phone": null
+        "email": "bob.johnson@email.com"
     }
 }
 
@@ -180,17 +176,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 10: Capture passenger 2 identity (PII — encrypted at rest)
+# Step 10: Register passenger 2 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_2",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_2",
         "subject_id": "{{newUuid}}",
-        "name": "Charlie Johnson",
-        "email": "charlie.johnson@email.com",
-        "phone": null
+        "email": "charlie.johnson@email.com"
     }
 }
 

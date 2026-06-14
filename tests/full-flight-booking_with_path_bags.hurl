@@ -96,18 +96,15 @@ jsonpath "$.shared_data.booking.selectedReturnFlight.flightId" == "AA5678"
 
 
 # ===========================================
-# Step 4: Capture passenger 0 identity (PII — encrypted at rest)
-# CapturePerson registers a named person slot and must be sent individually.
+# Step 4: Register passenger 0 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_0",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
-        "name": "Alice Johnson",
-        "email": "alice.johnson@email.com",
-        "phone": "+1-555-123-4567"
+        "email": "alice.johnson@email.com"
     }
 }
 
@@ -115,17 +112,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 5: Capture passenger 1 identity
+# Step 5: Register passenger 1 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_1",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
-        "name": "Bob Johnson",
-        "email": "bob.johnson@email.com",
-        "phone": null
+        "email": "bob.johnson@email.com"
     }
 }
 
@@ -133,17 +128,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture passenger 2 identity
+# Step 6: Register passenger 2 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_2",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_2",
         "subject_id": "{{newUuid}}",
-        "name": "Charlie Johnson",
-        "email": "charlie.johnson@email.com",
-        "phone": null
+        "email": "charlie.johnson@email.com"
     }
 }
 
@@ -157,8 +150,8 @@ HTTP 204
 # Secret fields (firstName, lastName, dateOfBirth, passportNumber) are
 # encrypted under each passenger's individual DEK. passengerType is
 # plaintext and lands in shared_data. This replaces six requests in the
-# original (three CapturePerson + three SetAttributes) with three
-# CapturePerson + one batched SetAttributes.
+# original (three RegisterAndBindSubject + three SetAttributes) with three
+# RegisterAndBindSubject + one batched SetAttributes.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json

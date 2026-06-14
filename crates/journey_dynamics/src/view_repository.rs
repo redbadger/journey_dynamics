@@ -347,12 +347,10 @@ impl StructuredJourneyViewRepository {
 
     /// Find all journey aggregate IDs that have referenced the given subject.
     ///
-    /// Searches three event types in the event store — all carry `subject_id`
-    /// in plaintext or in an unencrypted index array, so no decryption is
-    /// needed:
+    /// Searches event types that carry `subject_id` in plaintext:
     ///
-    /// - `PersonCaptured` / `PersonDetailsUpdated` — legacy and current
-    ///   identity-capture events; subject UUID is a top-level string field.
+    /// - `PersonCaptured` / `PersonDetailsUpdated` — legacy identity-capture events.
+    /// - `SubjectRegistered` — new-style subject registration.
     /// - `AttributesSet` — new path-keyed command; the crypto layer writes a
     ///   `subjects` array of UUID strings alongside the encrypted partitions.
     ///   Queried with a GIN array-containment predicate backed by
@@ -376,6 +374,9 @@ impl StructuredJourneyViewRepository {
                 OR
                 (event_type = 'PersonDetailsUpdated'
                  AND payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
+                OR
+                (event_type = 'SubjectRegistered'
+                 AND payload -> 'SubjectRegistered' ->> 'subject_id' = $1)
                 OR
                 (event_type = 'AttributesSet'
                  AND payload -> 'AttributesSet' -> 'subjects'
@@ -763,7 +764,15 @@ impl StructuredJourneyViewRepository {
                 // Mirror secret changes into journey_person.details using the
                 // suffix path (the part after "persons/<ref>/").
                 for partition in secret_partitions {
-                    let prefix = format!("persons/{}/", partition.person_ref);
+                    // Derive the short person_ref from the full role path
+                    // (e.g. "persons/passenger_0" → "passenger_0") for the
+                    // legacy journey_person table lookup.
+                    let Some(person_ref_str) =
+                        partition.role_path.as_str().strip_prefix("persons/")
+                    else {
+                        continue;
+                    };
+                    let prefix = format!("{}/", partition.role_path.as_str());
                     let mut details_update = json!({});
                     for (path, value) in &partition.changes {
                         let suffix = path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
@@ -780,11 +789,73 @@ impl StructuredJourneyViewRepository {
                         ",
                     )
                     .bind(journey_id)
-                    .bind(&partition.person_ref)
+                    .bind(person_ref_str)
                     .bind(&details_update)
                     .execute(&mut **tx)
                     .await?;
                 }
+            }
+
+            // SubjectRegistered: update email on any existing journey_person row
+            // for this subject in this journey (handles re-capture email updates).
+            JourneyEvent::SubjectRegistered { subject_id, email } => {
+                sqlx::query(
+                    r"
+                    UPDATE journey_person
+                    SET email      = $3,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE journey_id = $1 AND subject_id = $2
+                    ",
+                )
+                .bind(journey_id)
+                .bind(subject_id)
+                .bind(email)
+                .execute(&mut **tx)
+                .await?;
+            }
+
+            // SubjectBound: create the journey_person row for this role.
+            // Only handles role paths under "persons/"; other namespaces are
+            // deferred to the journey_subject table in Layer 7.
+            // Email is looked up from subject_lookup (populated by SubjectLookupHook
+            // in the same persist transaction).
+            JourneyEvent::SubjectBound {
+                role_path,
+                subject_id,
+            } => {
+                let Some(person_ref) = role_path.as_str().strip_prefix("persons/") else {
+                    // Non-persons namespace — deferred to Layer 7.
+                    return Ok(());
+                };
+                sqlx::query(
+                    r"
+                    INSERT INTO journey_person
+                        (journey_id, person_ref, subject_id, email)
+                    VALUES ($1, $2, $3,
+                        (SELECT email_lower FROM subject_lookup WHERE subject_id = $3))
+                    ON CONFLICT (journey_id, person_ref) DO UPDATE
+                    SET subject_id = EXCLUDED.subject_id,
+                        email      = COALESCE(EXCLUDED.email, journey_person.email),
+                        updated_at = CURRENT_TIMESTAMP
+                    ",
+                )
+                .bind(journey_id)
+                .bind(person_ref)
+                .bind(subject_id)
+                .execute(&mut **tx)
+                .await?;
+
+                sqlx::query(
+                    r"
+                    UPDATE journey_view
+                    SET version = $1, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = $2
+                    ",
+                )
+                .bind(event.sequence as i64)
+                .bind(journey_id)
+                .execute(&mut **tx)
+                .await?;
             }
         }
 

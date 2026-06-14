@@ -40,20 +40,12 @@ impl TryFrom<&JourneyView> for FlightBookingSchema {
 /// - `persons/<ref>/firstName`, `lastName`, `dateOfBirth`, `passportNumber`,
 ///   `nationality` → `Secret` encrypted under `persons/<ref>`
 /// - `persons/<ref>/passengerType` → Plaintext
+///
+/// # Panics
+/// Never panics; the `"persons"` prefix literal is a valid `AttributePath`.
 #[must_use]
 pub fn attribute_schema() -> AttributeSchema {
-    let secret_fields: BTreeSet<String> = [
-        "firstName",
-        "lastName",
-        "dateOfBirth",
-        "passportNumber",
-        "nationality",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
-
-    let plaintext_fields: BTreeSet<String> = std::iter::once("passengerType")
+    let plaintext_suffixes: BTreeSet<String> = std::iter::once("passengerType")
         .map(str::to_string)
         .collect();
 
@@ -65,14 +57,18 @@ pub fn attribute_schema() -> AttributeSchema {
                 .collect(),
         )
         .with_namespace_patterns(vec![NamespacePattern {
-            namespace: "persons".to_string(),
-            secret_fields,
-            plaintext_fields,
+            prefix: "persons"
+                .parse()
+                .expect("'persons' is a valid AttributePath"),
+            plaintext_suffixes,
         }])
 }
 
 /// Serialised form of [`attribute_schema()`] suitable for writing to the JSON
 /// file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
+///
+/// # Panics
+/// Never panics; the `"persons"` prefix literal is a valid `AttributePath`.
 #[must_use]
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
     AttributeSchemaConfig {
@@ -82,18 +78,10 @@ pub fn attribute_schema_config() -> AttributeSchemaConfig {
             .map(|s| (*s).to_string())
             .collect(),
         namespace_patterns: vec![NamespacePatternConfig {
-            namespace: "persons".to_string(),
-            secret_fields: [
-                "firstName",
-                "lastName",
-                "dateOfBirth",
-                "passportNumber",
-                "nationality",
-            ]
-            .iter()
-            .map(|s| (*s).to_string())
-            .collect(),
-            plaintext_fields: std::iter::once("passengerType")
+            prefix: "persons"
+                .parse()
+                .expect("'persons' is a valid AttributePath"),
+            plaintext_suffixes: std::iter::once("passengerType")
                 .map(str::to_string)
                 .collect(),
         }],

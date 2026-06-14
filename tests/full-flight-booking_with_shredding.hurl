@@ -103,7 +103,7 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture lead booker identity (PII — encrypted at rest)
+# Step 6: Register passenger 0 and bind to role path.
 # Capture the subject_id so we can shred it later.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
@@ -111,12 +111,10 @@ Content-Type: application/json
 [Options]
 variable: subject_id={{newUuid}}
 {
-    "CapturePerson": {
-        "person_ref": "passenger_0",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_0",
         "subject_id": "{{subject_id}}",
-        "name": "Alice Johnson",
-        "email": "alice.johnson@email.com",
-        "phone": "+1-555-123-4567"
+        "email": "alice.johnson@email.com"
     }
 }
 
@@ -148,17 +146,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 8: Capture passenger 1 identity (PII — encrypted under a different DEK)
+# Step 8: Register passenger 1 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_1",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
-        "name": "Bob Johnson",
-        "email": "bob.johnson@email.com",
-        "phone": null
+        "email": "bob.johnson@email.com"
     }
 }
 
@@ -188,17 +184,15 @@ HTTP 204
 
 
 # ===========================================
-# Step 10: Capture passenger 2 identity (PII — encrypted under a different DEK)
+# Step 10: Register passenger 2 and bind to role path
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_2",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_2",
         "subject_id": "{{newUuid}}",
-        "name": "Charlie Johnson",
-        "email": "charlie.johnson@email.com",
-        "phone": null
+        "email": "charlie.johnson@email.com"
     }
 }
 
@@ -322,19 +316,16 @@ jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_abc123xyz"
 # All person slots present and not yet forgotten
 jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == false
-jsonpath "$.persons[0].name" == "Alice Johnson"
 jsonpath "$.persons[0].email" == "alice.johnson@email.com"
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Bob Johnson"
 jsonpath "$.persons[2].person_ref" == "passenger_2"
 jsonpath "$.persons[2].forgotten" == false
-jsonpath "$.persons[2].name" == "Charlie Johnson"
 
 
 # ===========================================
 # Step 17: GDPR erasure — shred passenger_0's DEK
-# This permanently destroys Alice's PersonCaptured and AttributesSet
+# This permanently destroys Alice's SubjectRegistered and AttributesSet
 # event payloads.  All other passengers' data and all shared_data survive.
 # ===========================================
 DELETE {{host}}/subjects/{{subject_id}}
@@ -408,11 +399,9 @@ jsonpath "$.persons[0].phone" == null
 # passenger_1 (Bob) — different DEK, completely unaffected
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Bob Johnson"
 jsonpath "$.persons[1].email" == "bob.johnson@email.com"
 
 # passenger_2 (Charlie) — different DEK, completely unaffected
 jsonpath "$.persons[2].person_ref" == "passenger_2"
 jsonpath "$.persons[2].forgotten" == false
-jsonpath "$.persons[2].name" == "Charlie Johnson"
 jsonpath "$.persons[2].email" == "charlie.johnson@email.com"

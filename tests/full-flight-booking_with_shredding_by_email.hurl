@@ -74,19 +74,17 @@ HTTP 204
 
 
 # ===========================================
-# Step 4: Capture lead passenger identity (PII — encrypted at rest)
+# Step 4: Register lead passenger and bind to role path.
 # The subject_id is opaque to support staff — the by-email endpoint removes
 # the need to ever surface it to them.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_0",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_0",
         "subject_id": "{{newUuid}}",
-        "name": "Clara Dupont",
-        "email": "Clara.Dupont@example.com",
-        "phone": "+33-6-12-34-56-78"
+        "email": "Clara.Dupont@example.com"
     }
 }
 
@@ -118,18 +116,16 @@ HTTP 204
 
 
 # ===========================================
-# Step 6: Capture second passenger identity (PII — different DEK)
+# Step 6: Register second passenger and bind to role path.
 # This passenger must survive the erasure of passenger_0.
 # ===========================================
 POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
-    "CapturePerson": {
-        "person_ref": "passenger_1",
+    "RegisterAndBindSubject": {
+        "role_path": "persons/passenger_1",
         "subject_id": "{{newUuid}}",
-        "name": "Henri Dubois",
-        "email": "henri.dubois@example.com",
-        "phone": null
+        "email": "henri.dubois@example.com"
     }
 }
 
@@ -215,11 +211,9 @@ jsonpath "$.shared_data.booking.payment.transaction_id" == "txn_email_erase_demo
 # Both person slots present and not yet forgotten
 jsonpath "$.persons[0].person_ref" == "passenger_0"
 jsonpath "$.persons[0].forgotten" == false
-jsonpath "$.persons[0].name" == "Clara Dupont"
-jsonpath "$.persons[0].email" == "Clara.Dupont@example.com"
+jsonpath "$.persons[0].email" == "clara.dupont@example.com"
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Henri Dubois"
 
 
 # ===========================================
@@ -295,7 +289,6 @@ jsonpath "$.persons[0].phone" == null
 # passenger_1 (Henri) — different subject, completely unaffected
 jsonpath "$.persons[1].person_ref" == "passenger_1"
 jsonpath "$.persons[1].forgotten" == false
-jsonpath "$.persons[1].name" == "Henri Dubois"
 jsonpath "$.persons[1].email" == "henri.dubois@example.com"
 
 
