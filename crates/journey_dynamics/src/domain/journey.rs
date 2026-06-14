@@ -557,22 +557,15 @@ mod tests {
     /// - `persons/passenger_1/passport` → Secret (subject = `persons/passenger_1`)
     fn explicit_attribute_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
+        paths.insert("/search/origin".parse().unwrap(), PiiClass::Plaintext);
         paths.insert(
-            "/search/origin".parse::<PointerBuf>().unwrap(),
-            PiiClass::Plaintext,
-        );
-        paths.insert(
-            "/persons/passenger_0/passport"
-                .parse::<PointerBuf>()
-                .unwrap(),
+            "/persons/passenger_0/passport".parse().unwrap(),
             PiiClass::Secret {
                 subject: "/persons/passenger_0".parse().unwrap(),
             },
         );
         paths.insert(
-            "/persons/passenger_1/passport"
-                .parse::<PointerBuf>()
-                .unwrap(),
+            "/persons/passenger_1/passport".parse().unwrap(),
             PiiClass::Secret {
                 subject: "/persons/passenger_1".parse().unwrap(),
             },
@@ -1099,10 +1092,7 @@ mod tests {
     #[test]
     fn set_attributes_requires_started() {
         let mut changes = BTreeMap::new();
-        changes.insert(
-            "/search/origin".parse::<PointerBuf>().unwrap(),
-            json!("LHR"),
-        );
+        changes.insert("/search/origin".parse().unwrap(), json!("LHR"));
 
         JourneyTester::with(services())
             .given_no_previous_events()
@@ -1114,10 +1104,7 @@ mod tests {
     fn set_attributes_rejects_after_complete() {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
-        changes.insert(
-            "/search/origin".parse::<PointerBuf>().unwrap(),
-            json!("LHR"),
-        );
+        changes.insert("/search/origin".parse().unwrap(), json!("LHR"));
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }, JourneyEvent::Completed])
@@ -1157,14 +1144,8 @@ mod tests {
         // into shared_data via assign_all.
         let id = Uuid::new_v4();
         let mut plaintext = BTreeMap::new();
-        plaintext.insert(
-            "/search/origin".parse::<PointerBuf>().unwrap(),
-            json!("LHR"),
-        );
-        plaintext.insert(
-            "/search/destination".parse::<PointerBuf>().unwrap(),
-            json!("JFK"),
-        );
+        plaintext.insert("/search/origin".parse().unwrap(), json!("LHR"));
+        plaintext.insert("/search/destination".parse().unwrap(), json!("JFK"));
 
         let mut journey = Journey::default();
         journey.apply(JourneyEvent::Started { id });
@@ -1183,9 +1164,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
         changes.insert(
-            "/persons/passenger_0/passport"
-                .parse::<PointerBuf>()
-                .unwrap(),
+            "/persons/passenger_0/passport".parse().unwrap(),
             json!("AB123456"),
         );
 
@@ -1235,7 +1214,7 @@ mod tests {
         // via the evaluate_attributes default impl (current_step = "").
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
-        changes.insert("/first_name".parse::<PointerBuf>().unwrap(), json!("Alice"));
+        changes.insert("/first_name".parse().unwrap(), json!("Alice"));
         let expected_plaintext = changes.clone();
 
         JourneyTester::with(services())
@@ -1369,9 +1348,7 @@ mod tests {
 
         let mut changes = BTreeMap::new();
         changes.insert(
-            "/persons/passenger_0/passport"
-                .parse::<PointerBuf>()
-                .unwrap(),
+            "/persons/passenger_0/passport".parse().unwrap(),
             json!("AB123456"),
         );
 
@@ -1400,10 +1377,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
         // The test schema requires `alpha` to be a number; a string fails.
-        changes.insert(
-            "/alpha".parse::<PointerBuf>().unwrap(),
-            json!("not_a_number"),
-        );
+        changes.insert("/alpha".parse().unwrap(), json!("not_a_number"));
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
@@ -1418,11 +1392,8 @@ mod tests {
     fn set_attributes_non_numeric_array_index() {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
-        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
-        changes.insert(
-            "/nicknames/one".parse::<PointerBuf>().unwrap(),
-            json!("Jimbob"),
-        );
+        changes.insert("/nicknames/0".parse().unwrap(), json!("Joey"));
+        changes.insert("/nicknames/one".parse().unwrap(), json!("Jimbob"));
 
         let result = JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
@@ -1441,11 +1412,8 @@ mod tests {
     fn set_attributes_array_index_out_of_range() {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
-        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
-        changes.insert(
-            "/nicknames/2".parse::<PointerBuf>().unwrap(),
-            json!("Jimbob"),
-        );
+        changes.insert("/nicknames/0".parse().unwrap(), json!("Joey"));
+        changes.insert("/nicknames/2".parse().unwrap(), json!("Jimbob"));
 
         let result = JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
@@ -1471,9 +1439,7 @@ mod tests {
 
         let mut changes = BTreeMap::new();
         changes.insert(
-            "/persons/passenger_0/passport"
-                .parse::<PointerBuf>()
-                .unwrap(),
+            "/persons/passenger_0/passport".parse().unwrap(),
             json!("AB123456"),
         );
 

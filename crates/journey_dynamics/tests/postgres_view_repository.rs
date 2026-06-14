@@ -11,7 +11,7 @@
 //! They are deliberately kept out of `--lib` runs so that
 //! `cargo nextest run --lib` succeeds without a database being present.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
@@ -1146,15 +1146,9 @@ async fn test_attributes_set_plaintext_updates_shared_data(
     .await;
 
     // Dispatch an AttributesSet event with plaintext path-keyed changes.
-    let mut plaintext = std::collections::BTreeMap::new();
-    plaintext.insert(
-        "/search/origin".parse::<PointerBuf>().unwrap(),
-        json!("LHR"),
-    );
-    plaintext.insert(
-        "/search/destination".parse::<PointerBuf>().unwrap(),
-        json!("JFK"),
-    );
+    let mut plaintext: BTreeMap<PointerBuf, _> = BTreeMap::new();
+    plaintext.insert("/search/origin".parse().unwrap(), json!("LHR"));
+    plaintext.insert("/search/destination".parse().unwrap(), json!("JFK"));
 
     repo.dispatch(
         &journey_id.to_string(),

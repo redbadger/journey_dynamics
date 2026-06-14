@@ -12,15 +12,15 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
-use journey_dynamics::SimpleLoggingQuery;
-use journey_dynamics::domain::commands::JourneyCommand;
-use journey_dynamics::domain::{
-    AttributeSchema,
-    journey::{Journey, JourneyServices},
+use journey_dynamics::{
+    SimpleLoggingQuery,
+    domain::{
+        AttributeSchema,
+        commands::JourneyCommand,
+        journey::{Journey, JourneyServices},
+    },
+    services::{decision_engine::SimpleDecisionEngine, schema_validator::NoOpValidator},
 };
-use journey_dynamics::services::decision_engine::SimpleDecisionEngine;
-use journey_dynamics::services::schema_validator::NoOpValidator;
-use jsonptr::PointerBuf;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -58,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::RegisterAndBindSubject {
-            role_path: "/persons/lead_booker".parse::<PointerBuf>()?,
+            role_path: "/persons/lead_booker".parse()?,
             subject_id: lead_booker_id,
             email: "alice.johnson@example.com".to_string(),
         },
@@ -69,18 +69,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Set the lead booker's attributes via SetAttributes.
     let mut changes = BTreeMap::new();
-    changes.insert(
-        "/persons/lead_booker/firstName".parse::<PointerBuf>()?,
-        json!("Alice"),
-    );
-    changes.insert(
-        "/persons/lead_booker/lastName".parse::<PointerBuf>()?,
-        json!("Johnson"),
-    );
-    changes.insert(
-        "/persons/lead_booker/phone".parse::<PointerBuf>()?,
-        json!("+1-555-0123"),
-    );
+    changes.insert("/persons/lead_booker/firstName".parse()?, json!("Alice"));
+    changes.insert("/persons/lead_booker/lastName".parse()?, json!("Johnson"));
+    changes.insert("/persons/lead_booker/phone".parse()?, json!("+1-555-0123"));
 
     println!("Setting lead booker attributes...");
     cqrs.execute(
@@ -97,7 +88,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::RegisterAndBindSubject {
-            role_path: "/persons/passenger_0".parse::<PointerBuf>()?,
+            role_path: "/persons/passenger_0".parse()?,
             subject_id: passenger_id,
             email: "bob.smith@example.com".to_string(),
         },

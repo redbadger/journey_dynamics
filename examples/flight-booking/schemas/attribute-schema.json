@@ -1,15 +1,15 @@
 {
   "permissive": false,
   "plaintext_prefixes": [
-    "search",
-    "searchResults",
-    "booking"
+    "/search",
+    "/searchResults",
+    "/booking"
   ],
   "namespace_patterns": [
     {
       "prefix": "/persons",
       "plaintext_suffixes": [
-        "passengerType"
+        "/passengerType"
       ]
     }
   ]

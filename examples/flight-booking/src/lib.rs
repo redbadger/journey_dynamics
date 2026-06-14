@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use journey_dynamics::domain::{
     attribute_schema::{AttributeSchemaConfig, NamespacePatternConfig},
     AttributeSchema, NamespacePattern,
@@ -45,22 +43,21 @@ impl TryFrom<&JourneyView> for FlightBookingSchema {
 /// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
 #[must_use]
 pub fn attribute_schema() -> AttributeSchema {
-    let plaintext_suffixes: BTreeSet<String> = std::iter::once("passengerType")
-        .map(str::to_string)
-        .collect();
-
     AttributeSchema::new(std::collections::BTreeMap::new(), None)
         .with_plaintext_prefixes(
-            ["search", "searchResults", "booking"]
+            ["/search", "/searchResults", "/booking"]
                 .iter()
-                .map(|s| (*s).to_string())
+                .map(|s| s.parse().expect("valid JSON pointer"))
                 .collect(),
         )
         .with_namespace_patterns(vec![NamespacePattern {
             prefix: "/persons"
                 .parse()
                 .expect("'/persons' is a valid JSON pointer"),
-            plaintext_suffixes,
+            plaintext_suffixes: std::iter::once(
+                "/passengerType".parse().expect("valid JSON pointer"),
+            )
+            .collect(),
         }])
 }
 
@@ -73,17 +70,18 @@ pub fn attribute_schema() -> AttributeSchema {
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
     AttributeSchemaConfig {
         permissive: false,
-        plaintext_prefixes: ["search", "searchResults", "booking"]
+        plaintext_prefixes: ["/search", "/searchResults", "/booking"]
             .iter()
-            .map(|s| (*s).to_string())
+            .map(|s| s.parse().expect("valid JSON pointer"))
             .collect(),
         namespace_patterns: vec![NamespacePatternConfig {
             prefix: "/persons"
                 .parse()
                 .expect("'/persons' is a valid JSON pointer"),
-            plaintext_suffixes: std::iter::once("passengerType")
-                .map(str::to_string)
-                .collect(),
+            plaintext_suffixes: std::iter::once(
+                "/passengerType".parse().expect("valid JSON pointer"),
+            )
+            .collect(),
         }],
     }
 }
