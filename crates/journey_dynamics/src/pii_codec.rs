@@ -58,7 +58,7 @@
 //! ```
 //!
 //! Each partition's payload is the JSON serialisation of the corresponding
-//! `changes: BTreeMap<AttributePath, Value>`.  The label equals `person_ref`,
+//! `changes: BTreeMap<PointerBuf, Value>`.  The label equals `person_ref`,
 //! allowing `reconstruct` and `redact_partitions` to route decrypted bytes
 //! back to the correct `SecretPartitionData` entry.
 
@@ -322,8 +322,8 @@ impl PiiEventCodec for JourneyPiiCodec {
                         && let Some(arr) = event.payload[key]["secret_partitions"].as_array_mut()
                         && let Some(obj) = arr[i].as_object_mut()
                     {
-                        // Project sentinel convention: `{"redacted": true}`.
-                        obj.insert("changes".to_string(), json!({ "redacted": true }));
+                        // Project sentinel convention: `{"/redacted": true}`.
+                        obj.insert("changes".to_string(), json!({ "/redacted": true }));
                     }
                 }
                 Ok(())
@@ -1295,7 +1295,7 @@ mod tests {
             vec![(
                 "passenger_0".to_string(),
                 subject_id,
-                serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
+                serde_json::json!({ "/persons/passenger_0/passport": "AB123456" }),
             )],
         );
 
@@ -1345,12 +1345,12 @@ mod tests {
                 (
                     "passenger_0".to_string(),
                     subject_a,
-                    serde_json::json!({ "persons/passenger_0/passport": "AB111111" }),
+                    serde_json::json!({ "/persons/passenger_0/passport": "AB111111" }),
                 ),
                 (
                     "passenger_1".to_string(),
                     subject_b,
-                    serde_json::json!({ "persons/passenger_1/passport": "CD222222" }),
+                    serde_json::json!({ "/persons/passenger_1/passport": "CD222222" }),
                 ),
             ],
         );
@@ -1370,7 +1370,7 @@ mod tests {
             .find(|p| p["person_ref"].as_str() == Some("passenger_0"))
             .expect("passenger_0 partition must be present");
         assert_eq!(
-            p0["changes"]["persons/passenger_0/passport"]
+            p0["changes"]["/persons/passenger_0/passport"]
                 .as_str()
                 .unwrap(),
             "AB111111"
@@ -1381,7 +1381,7 @@ mod tests {
             .find(|p| p["person_ref"].as_str() == Some("passenger_1"))
             .expect("passenger_1 partition must be present");
         assert_eq!(
-            p1["changes"]["persons/passenger_1/passport"]
+            p1["changes"]["/persons/passenger_1/passport"]
                 .as_str()
                 .unwrap(),
             "CD222222"
@@ -1404,12 +1404,12 @@ mod tests {
                 (
                     "passenger_0".to_string(),
                     subject_a,
-                    serde_json::json!({ "persons/passenger_0/passport": "AB111111" }),
+                    serde_json::json!({ "/persons/passenger_0/passport": "AB111111" }),
                 ),
                 (
                     "passenger_1".to_string(),
                     subject_b,
-                    serde_json::json!({ "persons/passenger_1/passport": "CD222222" }),
+                    serde_json::json!({ "/persons/passenger_1/passport": "CD222222" }),
                 ),
             ],
         );
@@ -1429,7 +1429,7 @@ mod tests {
             .find(|p| p["person_ref"].as_str() == Some("passenger_0"))
             .unwrap();
         assert!(
-            p_a["changes"]["redacted"].as_bool().unwrap(),
+            p_a["changes"]["/redacted"].as_bool().unwrap(),
             "subject A's changes must carry the redaction sentinel"
         );
 
@@ -1438,7 +1438,7 @@ mod tests {
             .find(|p| p["person_ref"].as_str() == Some("passenger_1"))
             .unwrap();
         assert_eq!(
-            p_b["changes"]["persons/passenger_1/passport"]
+            p_b["changes"]["/persons/passenger_1/passport"]
                 .as_str()
                 .unwrap(),
             "CD222222",
@@ -1460,7 +1460,7 @@ mod tests {
             vec![(
                 "passenger_0".to_string(),
                 subject_id,
-                serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
+                serde_json::json!({ "/persons/passenger_0/passport": "AB123456" }),
             )],
         );
         let ev2 = attributes_set_event(
@@ -1469,7 +1469,7 @@ mod tests {
             vec![(
                 "passenger_0".to_string(),
                 subject_id,
-                serde_json::json!({ "persons/passenger_0/passport": "AB123456" }),
+                serde_json::json!({ "/persons/passenger_0/passport": "AB123456" }),
             )],
         );
 

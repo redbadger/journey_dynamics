@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
@@ -22,14 +22,14 @@ pub enum JourneyCommand {
 
     /// Set one or more journey attributes in a single command.
     ///
-    /// `changes` is a flat map of [`AttributePath`] to value. A single
+    /// `changes` is a flat map of [`PointerBuf`] to value. A single
     /// `SetAttributes` may touch attributes for **multiple subjects** (e.g.
     /// two passengers' passport numbers in one form submission). The
     /// aggregate classifies each path as plaintext or secret, validates
     /// plaintext changes against the JSON Schema, and encrypts secret
     /// changes under the appropriate subject's DEK.
     SetAttributes {
-        changes: BTreeMap<AttributePath, Value>,
+        changes: BTreeMap<PointerBuf, Value>,
     },
 
     /// Register or update a person's identity fields in a named slot.

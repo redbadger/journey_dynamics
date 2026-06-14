@@ -16,10 +16,10 @@ use std::collections::HashMap;
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
-    domain::{AttributePath, events::JourneyEvent},
-    queries::JourneyState,
+    domain::events::JourneyEvent, queries::JourneyState,
     view_repository::StructuredJourneyViewRepository,
 };
+use jsonptr::PointerBuf;
 use serde_json::json;
 use sqlx::{Pool, Postgres, postgres::PgPoolOptions};
 use test_context::{AsyncTestContext, test_context};
@@ -1080,11 +1080,11 @@ async fn test_attributes_set_plaintext_updates_shared_data(
     // Dispatch an AttributesSet event with plaintext path-keyed changes.
     let mut plaintext = std::collections::BTreeMap::new();
     plaintext.insert(
-        "search/origin".parse::<AttributePath>().unwrap(),
+        "/search/origin".parse::<PointerBuf>().unwrap(),
         json!("LHR"),
     );
     plaintext.insert(
-        "search/destination".parse::<AttributePath>().unwrap(),
+        "/search/destination".parse::<PointerBuf>().unwrap(),
         json!("JFK"),
     );
 

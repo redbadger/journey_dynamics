@@ -4,18 +4,19 @@ use sqlx::{Pool, Postgres, Row};
 use std::collections::{HashMap, VecDeque};
 use uuid::Uuid;
 
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::{
-    domain::{AttributePath, events::JourneyEvent, journey::Journey, rehydrate, set_at_path},
+    domain::{assign_all, events::JourneyEvent, journey::Journey},
     queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
 };
+use jsonptr::PointerBuf;
 
 /// Deep-merge `patch` into `target` using JSON Merge Patch (RFC 7396).
 /// This is the Rust equivalent of what `PostgreSQL`'s `||` should do but
 /// doesn't — `||` is a shallow merge that replaces top-level keys entirely.
 #[inline]
-fn deep_merge(target: &mut serde_json::Value, patch: &serde_json::Value) {
+fn deep_merge(target: &mut Value, patch: &Value) {
     json_patch::merge(target, patch);
 }
 
@@ -79,7 +80,7 @@ impl StructuredJourneyViewRepository {
             _ => JourneyState::InProgress,
         };
         let current_step: Option<String> = row.get("current_step");
-        let shared_data: serde_json::Value = row.get("shared_data");
+        let shared_data: Value = row.get("shared_data");
 
         let workflow_row = sqlx::query(
             r"
@@ -505,7 +506,7 @@ impl StructuredJourneyViewRepository {
                 // PostgreSQL's || operator, which only does a shallow (top-level)
                 // key merge and would overwrite sibling keys within the same
                 // top-level namespace.
-                let current: serde_json::Value =
+                let current: Value =
                     sqlx::query_scalar("SELECT shared_data FROM journey_view WHERE id = $1")
                         .bind(journey_id)
                         .fetch_one(&mut **tx)
@@ -719,31 +720,24 @@ impl StructuredJourneyViewRepository {
                 plaintext,
                 secret_partitions,
             } => {
-                // Rehydrate plaintext changes into a nested JSON value.
-                let mut data_update = rehydrate(plaintext);
-                // Also write full-path secret changes into shared_data (as the
-                // aggregate does), so the read model has a unified view of all
-                // non-identity attributes.
-                for partition in secret_partitions {
-                    for (path, value) in &partition.changes {
-                        set_at_path(&mut data_update, path, value.clone());
-                    }
-                }
-
                 // Deep-merge into shared_data. PostgreSQL's || operator only
                 // does a shallow (top-level) merge, so successive SetAttributes
                 // commands touching the same top-level namespace (e.g. multiple
                 // updates to `booking/*`) would overwrite each other. We load,
                 // merge in Rust with json_patch::merge (RFC 7396), and write
                 // back the fully-merged value instead.
-                let current: serde_json::Value =
+                let current: Value =
                     sqlx::query_scalar("SELECT shared_data FROM journey_view WHERE id = $1")
                         .bind(journey_id)
                         .fetch_one(&mut **tx)
                         .await?;
 
                 let mut merged = current;
-                deep_merge(&mut merged, &data_update);
+                assign_all(&mut merged, plaintext).unwrap();
+
+                for partition in secret_partitions {
+                    assign_all(&mut merged, &partition.changes).unwrap();
+                }
 
                 sqlx::query(
                     r"
@@ -761,16 +755,16 @@ impl StructuredJourneyViewRepository {
                 .await?;
 
                 // Mirror secret changes into journey_person.details using the
-                // suffix path (the part after "persons/<ref>/").
+                // suffix path (the part after "/persons/<ref>/").
                 for partition in secret_partitions {
-                    let prefix = format!("persons/{}/", partition.person_ref);
+                    let prefix =
+                        PointerBuf::parse(format!("/persons/{}", partition.person_ref)).unwrap();
                     let mut details_update = json!({});
-                    for (path, value) in &partition.changes {
-                        let suffix = path.as_str().strip_prefix(&prefix).unwrap_or(path.as_str());
-                        if let Ok(suffix_path) = suffix.parse::<AttributePath>() {
-                            set_at_path(&mut details_update, &suffix_path, value.clone());
-                        }
-                    }
+                    let prefixed_changes = partition.changes.iter().filter_map(|(path, value)| {
+                        path.strip_prefix(&prefix)
+                            .map(|suffix_path| (suffix_path, value))
+                    });
+                    assign_all(&mut details_update, prefixed_changes).unwrap();
                     sqlx::query(
                         r"
                         UPDATE journey_person

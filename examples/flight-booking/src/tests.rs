@@ -12,10 +12,10 @@ use journey_dynamics::{
         events::{JourneyEvent, SecretPartitionData},
         flatten,
         journey::{Journey, JourneyError, JourneyServices},
-        AttributePath,
     },
     services::{decision_engine::GoRulesDecisionEngine, schema_validator::JsonSchemaValidator},
 };
+use jsonptr::PointerBuf;
 
 type JourneyTester = TestFramework<Journey>;
 
@@ -211,23 +211,26 @@ fn flight_booking_capture_person_details() {
     let id = Uuid::new_v4();
     let subject_id = Uuid::new_v4();
 
-    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
+    let path = |s: &str| -> PointerBuf { s.parse().unwrap() };
 
     let expected_secret = {
         let mut m = BTreeMap::new();
-        m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
-        m.insert(path("persons/passenger_0/lastName"), json!("Smith"));
-        m.insert(path("persons/passenger_0/dateOfBirth"), json!("1990-05-15"));
+        m.insert(path("/persons/passenger_0/firstName"), json!("Alice"));
+        m.insert(path("/persons/passenger_0/lastName"), json!("Smith"));
         m.insert(
-            path("persons/passenger_0/passportNumber"),
+            path("/persons/passenger_0/dateOfBirth"),
+            json!("1990-05-15"),
+        );
+        m.insert(
+            path("/persons/passenger_0/passportNumber"),
             json!("GB123456789"),
         );
-        m.insert(path("persons/passenger_0/nationality"), json!("GB"));
+        m.insert(path("/persons/passenger_0/nationality"), json!("GB"));
         m
     };
     let expected_plaintext = {
         let mut m = BTreeMap::new();
-        m.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+        m.insert(path("/persons/passenger_0/passengerType"), json!("adult"));
         m
     };
 
@@ -245,15 +248,18 @@ fn flight_booking_capture_person_details() {
         .when(JourneyCommand::SetAttributes {
             changes: {
                 let mut m = BTreeMap::new();
-                m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
-                m.insert(path("persons/passenger_0/lastName"), json!("Smith"));
-                m.insert(path("persons/passenger_0/dateOfBirth"), json!("1990-05-15"));
+                m.insert(path("/persons/passenger_0/firstName"), json!("Alice"));
+                m.insert(path("/persons/passenger_0/lastName"), json!("Smith"));
                 m.insert(
-                    path("persons/passenger_0/passportNumber"),
+                    path("/persons/passenger_0/dateOfBirth"),
+                    json!("1990-05-15"),
+                );
+                m.insert(
+                    path("/persons/passenger_0/passportNumber"),
                     json!("GB123456789"),
                 );
-                m.insert(path("persons/passenger_0/nationality"), json!("GB"));
-                m.insert(path("persons/passenger_0/passengerType"), json!("adult"));
+                m.insert(path("/persons/passenger_0/nationality"), json!("GB"));
+                m.insert(path("/persons/passenger_0/passengerType"), json!("adult"));
                 m
             },
         })
@@ -278,14 +284,14 @@ fn flight_booking_capture_person_details() {
 #[test]
 fn flight_booking_capture_person_details_requires_prior_capture_person() {
     let id = Uuid::new_v4();
-    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
+    let path = |s: &str| -> PointerBuf { s.parse().unwrap() };
 
     JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
         .when(JourneyCommand::SetAttributes {
             changes: {
                 let mut m = BTreeMap::new();
-                m.insert(path("persons/passenger_0/firstName"), json!("Alice"));
+                m.insert(path("/persons/passenger_0/firstName"), json!("Alice"));
                 m
             },
         })
@@ -622,16 +628,16 @@ fn flight_booking_set_person_secret_attributes() {
     let subject_a = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let subject_b = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
-    let path = |s: &str| -> AttributePath { s.parse().unwrap() };
+    let path = |s: &str| -> PointerBuf { s.parse().unwrap() };
 
     let mut expected_secret_a = BTreeMap::new();
     expected_secret_a.insert(
-        path("persons/passenger_0/passportNumber"),
+        path("/persons/passenger_0/passportNumber"),
         json!("GB111111"),
     );
     let mut expected_secret_b = BTreeMap::new();
     expected_secret_b.insert(
-        path("persons/passenger_1/passportNumber"),
+        path("/persons/passenger_1/passportNumber"),
         json!("GB222222"),
     );
 
@@ -657,11 +663,11 @@ fn flight_booking_set_person_secret_attributes() {
             changes: {
                 let mut m = BTreeMap::new();
                 m.insert(
-                    path("persons/passenger_0/passportNumber"),
+                    path("/persons/passenger_0/passportNumber"),
                     json!("GB111111"),
                 );
                 m.insert(
-                    path("persons/passenger_1/passportNumber"),
+                    path("/persons/passenger_1/passportNumber"),
                     json!("GB222222"),
                 );
                 m

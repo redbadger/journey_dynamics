@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 /// Per-subject secret data carried by an [`JourneyEvent::AttributesSet`] event.
 ///
@@ -20,7 +20,7 @@ pub struct SecretPartitionData {
     /// The subject's identity key, copied from `PersonSlot.subject_id`.
     pub subject_id: Uuid,
     /// Path → value changes. Encrypted under `subject_id`'s DEK from A7.
-    pub changes: BTreeMap<AttributePath, Value>,
+    pub changes: BTreeMap<PointerBuf, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,7 +73,7 @@ pub enum JourneyEvent {
     /// `changes` map is encrypted under that subject's DEK.
     AttributesSet {
         /// Non-sensitive path → value changes.
-        plaintext: BTreeMap<AttributePath, Value>,
+        plaintext: BTreeMap<PointerBuf, Value>,
         /// One entry per subject whose secret attributes were updated.
         /// Empty when the command set only plaintext attributes.
         #[serde(default)]
