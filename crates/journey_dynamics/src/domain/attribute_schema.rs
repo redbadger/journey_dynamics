@@ -24,6 +24,29 @@ pub enum PiiClass {
     Secret { subject: PointerBuf },
 }
 
+// ── AttributeEntry ────────────────────────────────────────────────────────────
+
+/// Metadata associated with a single known attribute path.
+///
+/// Currently carries only the privacy/encryption classification, but is
+/// designed to hold additional per-attribute information in the future
+/// (e.g. field type, validation rules, display name).
+///
+/// Obtain one via [`AttributeSchema::entry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeEntry {
+    /// How the value at this path should be handled for privacy / encryption.
+    pub pii_class: PiiClass,
+}
+
+impl AttributeEntry {
+    /// Construct an entry with the given encryption classification.
+    #[must_use]
+    pub const fn new(pii_class: PiiClass) -> Self {
+        Self { pii_class }
+    }
+}
+
 // ── NamespacePattern ──────────────────────────────────────────────────────────
 
 /// A prefix-based classification rule for dynamic three-segment paths of the
@@ -53,7 +76,7 @@ pub struct NamespacePattern {
 
 // ── AttributeSchema ───────────────────────────────────────────────────────────
 
-/// Schema that maps known attribute paths to their [`PiiClass`].
+/// Schema that maps known attribute paths to their [`AttributeEntry`].
 ///
 /// An `AttributeSchema` can be constructed in two modes:
 ///
@@ -66,7 +89,7 @@ pub struct NamespacePattern {
 /// Namespace patterns (see [`NamespacePattern`]) can be layered on top of
 /// either mode via [`with_namespace_patterns`](Self::with_namespace_patterns).
 pub struct AttributeSchema {
-    paths: BTreeMap<PointerBuf, PiiClass>,
+    paths: BTreeMap<PointerBuf, AttributeEntry>,
     json_schema: Option<Value>,
     /// When `true`, [`classify`](Self::classify) returns `Some(Plaintext)` for
     /// any path not matched by an exact entry, namespace pattern, or prefix.
@@ -85,10 +108,13 @@ pub struct AttributeSchema {
 static PLAINTEXT: PiiClass = PiiClass::Plaintext;
 
 impl AttributeSchema {
-    /// Construct a schema from an explicit path-to-class map and an optional
+    /// Construct a schema from an explicit path-to-entry map and an optional
     /// JSON Schema used for structural validation.
     #[must_use]
-    pub const fn new(paths: BTreeMap<PointerBuf, PiiClass>, json_schema: Option<Value>) -> Self {
+    pub const fn new(
+        paths: BTreeMap<PointerBuf, AttributeEntry>,
+        json_schema: Option<Value>,
+    ) -> Self {
         Self {
             paths,
             json_schema,
@@ -152,8 +178,8 @@ impl AttributeSchema {
     #[must_use]
     pub fn classify<'a>(&'a self, path: &PointerBuf) -> Option<Cow<'a, PiiClass>> {
         // 1. Exact match.
-        if let Some(cls) = self.paths.get(path) {
-            return Some(Cow::Borrowed(cls));
+        if let Some(entry) = self.paths.get(path) {
+            return Some(Cow::Borrowed(&entry.pii_class));
         }
 
         // 2. Namespace pattern (matches `prefix/{ref}/suffix...`).
@@ -217,6 +243,21 @@ impl AttributeSchema {
     #[must_use]
     pub const fn json_schema(&self) -> Option<&Value> {
         self.json_schema.as_ref()
+    }
+
+    /// Returns the full [`AttributeEntry`] for an explicitly registered path,
+    /// or `None` if the path is not in the exact-match map.
+    ///
+    /// Unlike [`classify`](Self::classify), this does not consult namespace
+    /// patterns, plaintext prefixes, or the permissive fallback.
+    #[must_use]
+    pub fn entry(&self, path: &PointerBuf) -> Option<&AttributeEntry> {
+        self.paths.get(path)
+    }
+
+    /// Iterates over all explicitly registered paths and their [`AttributeEntry`].
+    pub fn entries(&self) -> impl Iterator<Item = (&PointerBuf, &AttributeEntry)> {
+        self.paths.iter()
     }
 
     /// Iterates over all explicitly registered paths.
@@ -475,19 +516,25 @@ mod tests {
 
     fn simple_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
-        paths.insert(path("/search/origin"), PiiClass::Plaintext);
-        paths.insert(path("/search/destination"), PiiClass::Plaintext);
+        paths.insert(
+            path("/search/origin"),
+            AttributeEntry::new(PiiClass::Plaintext),
+        );
+        paths.insert(
+            path("/search/destination"),
+            AttributeEntry::new(PiiClass::Plaintext),
+        );
         paths.insert(
             path("/persons/0/passport"),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: path("/persons/0"),
-            },
+            }),
         );
         paths.insert(
             path("/persons/1/passport"),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: path("/persons/1"),
-            },
+            }),
         );
         AttributeSchema::new(paths, None)
     }
@@ -738,7 +785,7 @@ mod tests {
         let mut paths = BTreeMap::new();
         paths.insert(
             path("/persons/0/role"),
-            PiiClass::Plaintext, // explicit one-off exemption
+            AttributeEntry::new(PiiClass::Plaintext), // explicit one-off exemption
         );
         let schema =
             AttributeSchema::new(paths, None).with_namespace_patterns(vec![NamespacePattern {

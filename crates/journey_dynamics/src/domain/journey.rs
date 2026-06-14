@@ -514,7 +514,11 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::{AttributeSchema, attribute_schema::PiiClass, events::SecretPartitionData};
+    use crate::domain::{
+        AttributeSchema,
+        attribute_schema::{AttributeEntry, PiiClass},
+        events::SecretPartitionData,
+    };
     use crate::services::decision_engine::SimpleDecisionEngine;
     use crate::services::schema_validator::JsonSchemaValidator;
 
@@ -557,18 +561,21 @@ mod tests {
     /// - `persons/passenger_1/passport` → Secret (subject = `persons/passenger_1`)
     fn explicit_attribute_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
-        paths.insert("/search/origin".parse().unwrap(), PiiClass::Plaintext);
+        paths.insert(
+            "/search/origin".parse().unwrap(),
+            AttributeEntry::new(PiiClass::Plaintext),
+        );
         paths.insert(
             "/persons/passenger_0/passport".parse().unwrap(),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: "/persons/passenger_0".parse().unwrap(),
-            },
+            }),
         );
         paths.insert(
             "/persons/passenger_1/passport".parse().unwrap(),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: "/persons/passenger_1".parse().unwrap(),
-            },
+            }),
         );
         AttributeSchema::new(paths, None)
     }
