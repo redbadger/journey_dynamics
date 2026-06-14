@@ -4,7 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 #[derive(Debug, Deserialize)]
 pub enum JourneyCommand {
@@ -13,14 +13,14 @@ pub enum JourneyCommand {
 
     /// Set one or more journey attributes in a single command.
     ///
-    /// `changes` is a flat map of [`AttributePath`] to value. A single
+    /// `changes` is a flat map of [`PointerBuf`] to value. A single
     /// `SetAttributes` may touch attributes for **multiple subjects** (e.g.
     /// two passengers' passport numbers in one form submission). The
     /// aggregate classifies each path as plaintext or secret, validates
     /// plaintext changes against the JSON Schema, and encrypts secret
     /// changes under the appropriate subject's DEK.
     SetAttributes {
-        changes: BTreeMap<AttributePath, Value>,
+        changes: BTreeMap<PointerBuf, Value>,
     },
 
     /// Register a data subject (email → `subject_id` mapping) in this journey.
@@ -31,13 +31,13 @@ pub enum JourneyCommand {
     /// Email is required so the subject can be found by GDPR erasure requests.
     RegisterSubject { subject_id: Uuid, email: String },
 
-    /// Bind a registered subject to a role path (e.g. `"persons/passenger_0"`).
+    /// Bind a registered subject to a role path (e.g. `"/persons/passenger_0"`).
     ///
     /// The subject must have been registered by a prior `RegisterSubject`
     /// command. The role path must not already be bound to a *different*
     /// subject; binding the same subject to the same path is idempotent.
     BindSubject {
-        role_path: AttributePath,
+        role_path: PointerBuf,
         subject_id: Uuid,
     },
 
@@ -45,7 +45,7 @@ pub enum JourneyCommand {
     /// in a single command. Equivalent to `RegisterSubject` followed by
     /// `BindSubject` but avoids a round-trip when both are needed together.
     RegisterAndBindSubject {
-        role_path: AttributePath,
+        role_path: PointerBuf,
         subject_id: Uuid,
         email: String,
     },

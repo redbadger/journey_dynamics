@@ -49,26 +49,26 @@ Content-Type: application/json
 {
     "SetAttributes": {
         "changes": {
-            "search/tripType":                              "round-trip",
-            "search/origin":                               "JFK",
-            "search/destination":                          "LAX",
-            "search/departureDate":                        "2024-03-15",
-            "search/returnDate":                           "2024-03-22",
-            "search/passengers/adults":                    2,
-            "search/passengers/children":                  1,
-            "search/passengers/infants":                   0,
-            "booking/selectedOutboundFlight/flightId":     "AA1234",
-            "booking/selectedOutboundFlight/flightNumber": "AA1234",
-            "booking/selectedOutboundFlight/departure":    "2024-03-15T08:30:00",
-            "booking/selectedOutboundFlight/arrival":      "2024-03-15T11:45:00",
-            "booking/selectedOutboundFlight/price":        299.99,
-            "booking/selectedOutboundFlight/airline":      "American Airlines",
-            "booking/selectedReturnFlight/flightId":       "AA5678",
-            "booking/selectedReturnFlight/flightNumber":   "AA5678",
-            "booking/selectedReturnFlight/departure":      "2024-03-22T14:00:00",
-            "booking/selectedReturnFlight/arrival":        "2024-03-22T22:15:00",
-            "booking/selectedReturnFlight/price":          279.99,
-            "booking/selectedReturnFlight/airline":        "American Airlines"
+            "/search/tripType":                              "round-trip",
+            "/search/origin":                               "JFK",
+            "/search/destination":                          "LAX",
+            "/search/departureDate":                        "2024-03-15",
+            "/search/returnDate":                           "2024-03-22",
+            "/search/passengers/adults":                    2,
+            "/search/passengers/children":                  1,
+            "/search/passengers/infants":                   0,
+            "/booking/selectedOutboundFlight/flightId":     "AA1234",
+            "/booking/selectedOutboundFlight/flightNumber": "AA1234",
+            "/booking/selectedOutboundFlight/departure":    "2024-03-15T08:30:00",
+            "/booking/selectedOutboundFlight/arrival":      "2024-03-15T11:45:00",
+            "/booking/selectedOutboundFlight/price":        299.99,
+            "/booking/selectedOutboundFlight/airline":      "American Airlines",
+            "/booking/selectedReturnFlight/flightId":       "AA5678",
+            "/booking/selectedReturnFlight/flightNumber":   "AA5678",
+            "/booking/selectedReturnFlight/departure":      "2024-03-22T14:00:00",
+            "/booking/selectedReturnFlight/arrival":        "2024-03-22T22:15:00",
+            "/booking/selectedReturnFlight/price":          279.99,
+            "/booking/selectedReturnFlight/airline":        "American Airlines"
         }
     }
 }
@@ -102,7 +102,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_0",
+        "role_path": "/persons/passenger_0",
         "subject_id": "{{newUuid}}",
         "email": "alice.johnson@email.com"
     }
@@ -118,7 +118,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_1",
+        "role_path": "/persons/passenger_1",
         "subject_id": "{{newUuid}}",
         "email": "bob.johnson@email.com"
     }
@@ -134,7 +134,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_2",
+        "role_path": "/persons/passenger_2",
         "subject_id": "{{newUuid}}",
         "email": "charlie.johnson@email.com"
     }
@@ -158,20 +158,20 @@ Content-Type: application/json
 {
     "SetAttributes": {
         "changes": {
-            "persons/passenger_0/firstName":      "Alice",
-            "persons/passenger_0/lastName":       "Johnson",
-            "persons/passenger_0/dateOfBirth":    "1985-06-15",
-            "persons/passenger_0/passportNumber": "AB123456",
-            "persons/passenger_0/passengerType":  "adult",
-            "persons/passenger_1/firstName":      "Bob",
-            "persons/passenger_1/lastName":       "Johnson",
-            "persons/passenger_1/dateOfBirth":    "1983-09-22",
-            "persons/passenger_1/passportNumber": "CD789012",
-            "persons/passenger_1/passengerType":  "adult",
-            "persons/passenger_2/firstName":      "Charlie",
-            "persons/passenger_2/lastName":       "Johnson",
-            "persons/passenger_2/dateOfBirth":    "2016-03-10",
-            "persons/passenger_2/passengerType":  "child"
+            "/persons/passenger_0/firstName":      "Alice",
+            "/persons/passenger_0/lastName":       "Johnson",
+            "/persons/passenger_0/dateOfBirth":    "1985-06-15",
+            "/persons/passenger_0/passportNumber": "AB123456",
+            "/persons/passenger_0/passengerType":  "adult",
+            "/persons/passenger_1/firstName":      "Bob",
+            "/persons/passenger_1/lastName":       "Johnson",
+            "/persons/passenger_1/dateOfBirth":    "1983-09-22",
+            "/persons/passenger_1/passportNumber": "CD789012",
+            "/persons/passenger_1/passengerType":  "adult",
+            "/persons/passenger_2/firstName":      "Charlie",
+            "/persons/passenger_2/lastName":       "Johnson",
+            "/persons/passenger_2/dateOfBirth":    "2016-03-10",
+            "/persons/passenger_2/passengerType":  "child"
         }
     }
 }
@@ -192,20 +192,20 @@ Content-Type: application/json
 {
     "SetAttributes": {
         "changes": {
-            "booking/selectedSeats/outbound": ["12A", "12B", "12C"],
-            "booking/selectedSeats/return": ["14A", "14B", "14C"],
-            "booking/seatUpgradeTotal": 45.00,
-            "booking/insurance/selected": true,
-            "booking/insurance/insurance_type": "comprehensive",
-            "booking/insurance/price": 45.00,
-            "booking/paymentStatus": "completed",
-            "booking/payment/method": "credit_card",
-            "booking/payment/status": "completed",
-            "booking/payment/transaction_id": "txn_abc123xyz",
-            "booking/pricing/basePrice": 579.98,
-            "booking/pricing/taxes": 180.00,
-            "booking/pricing/totalPrice": 759.98,
-            "booking/pricing/currency": "USD"
+            "/booking/selectedSeats/outbound": ["12A", "12B", "12C"],
+            "/booking/selectedSeats/return": ["14A", "14B", "14C"],
+            "/booking/seatUpgradeTotal": 45.00,
+            "/booking/insurance/selected": true,
+            "/booking/insurance/insurance_type": "comprehensive",
+            "/booking/insurance/price": 45.00,
+            "/booking/paymentStatus": "completed",
+            "/booking/payment/method": "credit_card",
+            "/booking/payment/status": "completed",
+            "/booking/payment/transaction_id": "txn_abc123xyz",
+            "/booking/pricing/basePrice": 579.98,
+            "/booking/pricing/taxes": 180.00,
+            "/booking/pricing/totalPrice": 759.98,
+            "/booking/pricing/currency": "USD"
         }
     }
 }

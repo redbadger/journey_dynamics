@@ -8,15 +8,14 @@ use uuid::Uuid;
 
 use crate::{
     domain::{
-        AttributePath, AttributeSchema,
+        AttributeSchema, assign_all,
         attribute_schema::{PiiClass, classify_changes},
         commands::JourneyCommand,
         events::{JourneyEvent, SecretPartitionData},
-        json_path::set_at_path,
-        rehydrate,
     },
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
+use jsonptr::PointerBuf;
 
 /// Registration record for a data subject captured via [`JourneyCommand::RegisterSubject`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,7 +36,7 @@ pub struct Journey {
     /// Registered subjects, keyed by subject UUID.
     subjects: BTreeMap<Uuid, SubjectRegistration>,
     /// Role-path → subject-UUID bindings established by `BindSubject`.
-    bindings: BTreeMap<AttributePath, Uuid>,
+    bindings: BTreeMap<PointerBuf, Uuid>,
     latest_workflow_decision: Option<WorkflowDecisionState>,
 }
 
@@ -93,8 +92,9 @@ impl Aggregate for Journey {
                 }
 
                 // Classify every path against the attribute schema.
-                // Forgotten subjects return `None` so their paths land in `unknown`
-                // and the command is rejected.
+                // The subject_lookup resolves a role path to its bound subject
+                // UUID via `self.bindings`.  Forgotten subjects return `None` so
+                // their paths land in `unknown` and the command is rejected.
                 let schema = services.attribute_schema();
                 let classification = {
                     let bindings = &self.bindings;
@@ -109,7 +109,7 @@ impl Aggregate for Journey {
                 };
 
                 // Reject paths that are not registered in the schema at all.
-                let truly_unknown: Vec<AttributePath> = classification
+                let truly_unknown: Vec<PointerBuf> = classification
                     .unknown
                     .iter()
                     .filter(|p| schema.classify(p).is_none())
@@ -129,7 +129,7 @@ impl Aggregate for Journey {
                     };
                     let person_ref = subject
                         .as_str()
-                        .strip_prefix("persons/")
+                        .strip_prefix("/persons/")
                         .unwrap_or(subject.as_str())
                         .to_string();
                     return Err(JourneyError::PersonNotFound(person_ref));
@@ -154,7 +154,9 @@ impl Aggregate for Journey {
                 // Validate plaintext changes merged with current shared_data.
                 if !classification.plaintext.is_empty() {
                     let mut merged_data = self.shared_data.clone();
-                    json_patch::merge(&mut merged_data, &rehydrate(&classification.plaintext));
+
+                    assign_all(&mut merged_data, &classification.plaintext)?;
+
                     if let Err(e) = services.schema_validator().validate(&merged_data) {
                         return Err(JourneyError::InvalidData(e.to_string()));
                     }
@@ -327,9 +329,9 @@ impl Aggregate for Journey {
             } => {
                 // Populate subjects/bindings so that SetAttributes and
                 // ForgetSubject resolve correctly when replaying legacy events.
-                let role_path: AttributePath =
-                    format!("persons/{person_ref}").parse().unwrap_or_else(|_| {
-                        AttributePath::new("persons/unknown").expect("static fallback")
+                let role_path: PointerBuf = PointerBuf::parse(format!("/persons/{person_ref}"))
+                    .unwrap_or_else(|_| {
+                        PointerBuf::parse("/persons/unknown").expect("static fallback")
                     });
                 self.subjects
                     .entry(subject_id)
@@ -348,13 +350,13 @@ impl Aggregate for Journey {
                 plaintext,
                 secret_partitions,
             } => {
-                for (path, value) in &plaintext {
-                    set_at_path(&mut self.shared_data, path, value.clone());
-                }
+                // Apply plaintext changes directly into shared_data.
+                assign_all(&mut self.shared_data, &plaintext).unwrap();
+                // Apply secret changes.
                 for partition in &secret_partitions {
-                    for (path, value) in &partition.changes {
-                        set_at_path(&mut self.shared_data, path, value.clone());
-                    }
+                    // Write every change at its full path into shared_data.
+                    assign_all(&mut self.shared_data, &partition.changes)
+                        .expect("events should have valid JSON pointers");
                 }
             }
 
@@ -411,11 +413,13 @@ pub enum JourneyError {
     #[error("Person slot '{0}' does not exist — call CapturePerson first")]
     PersonNotFound(String),
     #[error("Unknown attribute paths: {0:?}")]
-    UnknownAttributePath(Vec<AttributePath>),
+    UnknownAttributePath(Vec<PointerBuf>),
+    #[error("Invalid JSON pointer: {0}")]
+    InvalidJsonPointer(#[from] jsonptr::assign::Error),
     #[error("Subject not registered — call RegisterSubject first")]
     SubjectNotRegistered,
     #[error("Role path '{0}' is already bound to a different subject")]
-    RolePathConflict(AttributePath),
+    RolePathConflict(PointerBuf),
 }
 
 pub struct JourneyServices {
@@ -480,7 +484,7 @@ impl Journey {
     }
 
     #[must_use]
-    pub const fn bindings(&self) -> &BTreeMap<AttributePath, Uuid> {
+    pub const fn bindings(&self) -> &BTreeMap<PointerBuf, Uuid> {
         &self.bindings
     }
 }
@@ -504,14 +508,13 @@ mod tests {
     #![allow(deprecated)]
     use cqrs_es::test::TestFramework;
     use serde_json::json;
+    use std::assert_matches;
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use uuid::Uuid;
 
     use super::*;
-    use crate::domain::{
-        AttributePath, AttributeSchema, attribute_schema::PiiClass, events::SecretPartitionData,
-    };
+    use crate::domain::{AttributeSchema, attribute_schema::PiiClass, events::SecretPartitionData};
     use crate::services::decision_engine::SimpleDecisionEngine;
     use crate::services::schema_validator::JsonSchemaValidator;
 
@@ -529,7 +532,8 @@ mod tests {
                         "step":       { "type": "string" },
                         "email":      { "type": "string", "format": "email" },
                         "name":       { "type": "string" },
-                        "first_name": { "type": "string" }
+                        "first_name": { "type": "string" },
+                        "nicknames":  { "type": "array", "items": { "type": "string" }}
                     },
                     "additionalProperties": true
                 }
@@ -554,23 +558,23 @@ mod tests {
     fn explicit_attribute_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
         paths.insert(
-            "search/origin".parse::<AttributePath>().unwrap(),
+            "/search/origin".parse::<PointerBuf>().unwrap(),
             PiiClass::Plaintext,
         );
         paths.insert(
-            "persons/passenger_0/passport"
-                .parse::<AttributePath>()
+            "/persons/passenger_0/passport"
+                .parse::<PointerBuf>()
                 .unwrap(),
             PiiClass::Secret {
-                subject: "persons/passenger_0".parse().unwrap(),
+                subject: "/persons/passenger_0".parse().unwrap(),
             },
         );
         paths.insert(
-            "persons/passenger_1/passport"
-                .parse::<AttributePath>()
+            "/persons/passenger_1/passport"
+                .parse::<PointerBuf>()
                 .unwrap(),
             PiiClass::Secret {
-                subject: "persons/passenger_1".parse().unwrap(),
+                subject: "/persons/passenger_1".parse().unwrap(),
             },
         );
         AttributeSchema::new(paths, None)
@@ -862,7 +866,7 @@ mod tests {
     fn bind_subject_emits_subject_bound() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![
@@ -886,7 +890,7 @@ mod tests {
     fn bind_subject_is_idempotent() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![
@@ -913,7 +917,7 @@ mod tests {
         let id = Uuid::new_v4();
         let subject_a = Uuid::new_v4();
         let subject_b = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![
@@ -946,7 +950,7 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::BindSubject {
-                role_path: "persons/passenger_0".parse().unwrap(),
+                role_path: "/persons/passenger_0".parse().unwrap(),
                 subject_id,
             })
             .then_expect_error(JourneyError::SubjectNotRegistered);
@@ -956,7 +960,7 @@ mod tests {
     fn register_and_bind_subject_emits_both_events() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![JourneyEvent::Started { id }])
@@ -981,7 +985,7 @@ mod tests {
     fn register_and_bind_subject_is_idempotent() {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![
@@ -1008,7 +1012,7 @@ mod tests {
         let id = Uuid::new_v4();
         let subject_a = Uuid::new_v4();
         let subject_b = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
         JourneyTester::with(services())
             .given(vec![
@@ -1096,7 +1100,7 @@ mod tests {
     fn set_attributes_requires_started() {
         let mut changes = BTreeMap::new();
         changes.insert(
-            "search/origin".parse::<AttributePath>().unwrap(),
+            "/search/origin".parse::<PointerBuf>().unwrap(),
             json!("LHR"),
         );
 
@@ -1111,7 +1115,7 @@ mod tests {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
         changes.insert(
-            "search/origin".parse::<AttributePath>().unwrap(),
+            "/search/origin".parse::<PointerBuf>().unwrap(),
             json!("LHR"),
         );
 
@@ -1137,7 +1141,7 @@ mod tests {
     fn set_attributes_rejects_unknown_path() {
         let id = Uuid::new_v4();
         // Use the explicit (non-permissive) schema; `mystery/field` is not in it.
-        let unknown_path: AttributePath = "mystery/field".parse().unwrap();
+        let unknown_path: PointerBuf = "/mystery/field".parse().unwrap();
         let mut changes = BTreeMap::new();
         changes.insert(unknown_path.clone(), json!("value"));
 
@@ -1150,15 +1154,15 @@ mod tests {
     #[test]
     fn set_attributes_plaintext_merges_into_shared_data() {
         // Test the apply() side directly: AttributesSet writes path-keyed values
-        // into shared_data via set_at_path.
+        // into shared_data via assign_all.
         let id = Uuid::new_v4();
         let mut plaintext = BTreeMap::new();
         plaintext.insert(
-            "search/origin".parse::<AttributePath>().unwrap(),
+            "/search/origin".parse::<PointerBuf>().unwrap(),
             json!("LHR"),
         );
         plaintext.insert(
-            "search/destination".parse::<AttributePath>().unwrap(),
+            "/search/destination".parse::<PointerBuf>().unwrap(),
             json!("JFK"),
         );
 
@@ -1179,8 +1183,8 @@ mod tests {
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
         changes.insert(
-            "persons/passenger_0/passport"
-                .parse::<AttributePath>()
+            "/persons/passenger_0/passport"
+                .parse::<PointerBuf>()
                 .unwrap(),
             json!("AB123456"),
         );
@@ -1197,7 +1201,7 @@ mod tests {
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
 
-        let passport_path: AttributePath = "persons/passenger_0/passport".parse().unwrap();
+        let passport_path: PointerBuf = "/persons/passenger_0/passport".parse().unwrap();
         let mut secret_changes = BTreeMap::new();
         secret_changes.insert(passport_path, json!("AB123456"));
 
@@ -1213,7 +1217,7 @@ mod tests {
         journey.apply(JourneyEvent::AttributesSet {
             plaintext: BTreeMap::new(),
             secret_partitions: vec![SecretPartitionData {
-                role_path: "persons/passenger_0".parse().unwrap(),
+                role_path: "/persons/passenger_0".parse().unwrap(),
                 subject_id,
                 changes: secret_changes,
             }],
@@ -1231,10 +1235,7 @@ mod tests {
         // via the evaluate_attributes default impl (current_step = "").
         let id = Uuid::new_v4();
         let mut changes = BTreeMap::new();
-        changes.insert(
-            "first_name".parse::<AttributePath>().unwrap(),
-            json!("Alice"),
-        );
+        changes.insert("/first_name".parse::<PointerBuf>().unwrap(), json!("Alice"));
         let expected_plaintext = changes.clone();
 
         JourneyTester::with(services())
@@ -1260,8 +1261,8 @@ mod tests {
         let subject_id_0 = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
         let subject_id_1 = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
 
-        let path_0: AttributePath = "persons/passenger_0/passport".parse().unwrap();
-        let path_1: AttributePath = "persons/passenger_1/passport".parse().unwrap();
+        let path_0: PointerBuf = "/persons/passenger_0/passport".parse().unwrap();
+        let path_1: PointerBuf = "/persons/passenger_1/passport".parse().unwrap();
         let mut changes = BTreeMap::new();
         changes.insert(path_0.clone(), json!("AB111111"));
         changes.insert(path_1.clone(), json!("CD222222"));
@@ -1295,12 +1296,12 @@ mod tests {
                     plaintext: BTreeMap::new(),
                     secret_partitions: vec![
                         SecretPartitionData {
-                            role_path: "persons/passenger_0".parse().unwrap(),
+                            role_path: "/persons/passenger_0".parse().unwrap(),
                             subject_id: subject_id_0,
                             changes: changes_0,
                         },
                         SecretPartitionData {
-                            role_path: "persons/passenger_1".parse().unwrap(),
+                            role_path: "/persons/passenger_1".parse().unwrap(),
                             subject_id: subject_id_1,
                             changes: changes_1,
                         },
@@ -1321,9 +1322,9 @@ mod tests {
         // via RegisterAndBindSubject) must be encrypted successfully.
         let id = Uuid::new_v4();
         let subject_id = Uuid::new_v4();
-        let role_path: AttributePath = "persons/passenger_0".parse().unwrap();
+        let role_path: PointerBuf = "/persons/passenger_0".parse().unwrap();
 
-        let passport_path: AttributePath = "persons/passenger_0/passport".parse().unwrap();
+        let passport_path: PointerBuf = "/persons/passenger_0/passport".parse().unwrap();
         let mut changes = BTreeMap::new();
         changes.insert(passport_path.clone(), json!("AB123456"));
 
@@ -1368,8 +1369,8 @@ mod tests {
 
         let mut changes = BTreeMap::new();
         changes.insert(
-            "persons/passenger_0/passport"
-                .parse::<AttributePath>()
+            "/persons/passenger_0/passport"
+                .parse::<PointerBuf>()
                 .unwrap(),
             json!("AB123456"),
         );
@@ -1382,7 +1383,7 @@ mod tests {
                     email: "alice@example.com".to_string(),
                 },
                 JourneyEvent::SubjectBound {
-                    role_path: "persons/passenger_0".parse().unwrap(),
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
                 },
                 JourneyEvent::SubjectForgotten { subject_id },
@@ -1400,7 +1401,7 @@ mod tests {
         let mut changes = BTreeMap::new();
         // The test schema requires `alpha` to be a number; a string fails.
         changes.insert(
-            "alpha".parse::<AttributePath>().unwrap(),
+            "/alpha".parse::<PointerBuf>().unwrap(),
             json!("not_a_number"),
         );
 
@@ -1414,6 +1415,52 @@ mod tests {
     }
 
     #[test]
+    fn set_attributes_non_numeric_array_index() {
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
+        changes.insert(
+            "/nicknames/one".parse::<PointerBuf>().unwrap(),
+            json!("Jimbob"),
+        );
+
+        let result = JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .inspect_result();
+
+        assert_matches!(
+            result,
+            Err(JourneyError::InvalidJsonPointer(
+                jsonptr::assign::Error::FailedToParseIndex { .. }
+            ))
+        );
+    }
+
+    #[test]
+    fn set_attributes_array_index_out_of_range() {
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/nicknames/0".parse::<PointerBuf>().unwrap(), json!("Joey"));
+        changes.insert(
+            "/nicknames/2".parse::<PointerBuf>().unwrap(),
+            json!("Jimbob"),
+        );
+
+        let result = JourneyTester::with(services())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .inspect_result();
+
+        assert_matches!(
+            result,
+            Err(JourneyError::InvalidJsonPointer(
+                jsonptr::assign::Error::OutOfBounds { .. }
+            ))
+        );
+    }
+
+    #[test]
     fn set_attributes_rejects_secret_path_when_subject_forgotten_via_person_captured() {
         // A PersonCaptured event followed by SubjectForgotten must prevent
         // SetAttributes from using that subject's secret paths. This validates
@@ -1424,8 +1471,8 @@ mod tests {
 
         let mut changes = BTreeMap::new();
         changes.insert(
-            "persons/passenger_0/passport"
-                .parse::<AttributePath>()
+            "/persons/passenger_0/passport"
+                .parse::<PointerBuf>()
                 .unwrap(),
             json!("AB123456"),
         );

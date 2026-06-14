@@ -5,11 +5,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::AttributePath;
+use jsonptr::PointerBuf;
 
 /// Per-role secret data carried by an [`JourneyEvent::AttributesSet`] event.
 ///
-/// Each entry corresponds to one role path (e.g. `"persons/passenger_0"`) whose
+/// Each entry corresponds to one role path (e.g. `"/persons/passenger_0"`) whose
 /// secret attributes were touched by the originating `SetAttributes` command.
 /// The `changes` map is encrypted under the subject's DEK; `role_path` is used
 /// as the crypto label (AAD) so the partition identity is meaningful on the
@@ -19,16 +19,16 @@ use super::AttributePath;
 /// Events written before this rename stored `person_ref: "passenger_0"` (the
 /// short slot name without the `"persons/"` prefix). The custom [`Deserialize`]
 /// impl accepts both formats: if `role_path` is absent it reads `person_ref`
-/// and synthesises `"persons/{person_ref}"` as the role path.
+/// and synthesises `"/persons/{person_ref}"` as the role path.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SecretPartitionData {
-    /// Full schema path at which the subject is bound, e.g. `"persons/passenger_0"`.
+    /// Full schema path at which the subject is bound, e.g. `"/persons/passenger_0"`.
     /// Used as the crypto label (AAD).
-    pub role_path: AttributePath,
+    pub role_path: PointerBuf,
     /// The subject's identity key — used to look up the DEK.
     pub subject_id: Uuid,
-    /// Path → value changes. Encrypted under `subject_id`'s DEK.
-    pub changes: BTreeMap<AttributePath, Value>,
+    /// Path → value changes. Encrypted under `subject_id`'s DEK from A7.
+    pub changes: BTreeMap<PointerBuf, Value>,
 }
 
 impl<'de> Deserialize<'de> for SecretPartitionData {
@@ -40,12 +40,12 @@ impl<'de> Deserialize<'de> for SecretPartitionData {
         #[derive(Deserialize)]
         struct Raw {
             /// Current field name.
-            role_path: Option<AttributePath>,
+            role_path: Option<PointerBuf>,
             /// Legacy field name — present in events written before the rename.
             person_ref: Option<String>,
             subject_id: Uuid,
             #[serde(default)]
-            changes: BTreeMap<AttributePath, Value>,
+            changes: BTreeMap<PointerBuf, Value>,
         }
 
         let raw = Raw::deserialize(deserializer)?;
@@ -53,8 +53,8 @@ impl<'de> Deserialize<'de> for SecretPartitionData {
             rp
         } else if let Some(pr) = raw.person_ref {
             // Old events stored only the short slot name; synthesise the full path.
-            format!("persons/{pr}")
-                .parse::<AttributePath>()
+            format!("/persons/{pr}")
+                .parse::<PointerBuf>()
                 .map_err(serde::de::Error::custom)?
         } else {
             return Err(serde::de::Error::missing_field("role_path"));
@@ -117,7 +117,7 @@ pub enum JourneyEvent {
     },
     /// A registered subject was bound to a role path within this journey.
     SubjectBound {
-        role_path: AttributePath,
+        role_path: PointerBuf,
         subject_id: Uuid,
     },
     /// Path-keyed attribute changes produced by a `SetAttributes` command.
@@ -128,7 +128,7 @@ pub enum JourneyEvent {
     /// `changes` map is encrypted under that subject's DEK.
     AttributesSet {
         /// Non-sensitive path → value changes.
-        plaintext: BTreeMap<AttributePath, Value>,
+        plaintext: BTreeMap<PointerBuf, Value>,
         /// One entry per subject whose secret attributes were updated.
         /// Empty when the command set only plaintext attributes.
         #[serde(default)]

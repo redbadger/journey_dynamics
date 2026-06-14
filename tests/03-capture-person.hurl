@@ -6,7 +6,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/lead_booker",
+        "role_path": "/persons/lead_booker",
         "subject_id": "{{newUuid}}",
         "email": "alice@example.com"
     }

@@ -82,7 +82,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_0",
+        "role_path": "/persons/passenger_0",
         "subject_id": "{{newUuid}}",
         "email": "Clara.Dupont@example.com"
     }
@@ -123,7 +123,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_1",
+        "role_path": "/persons/passenger_1",
         "subject_id": "{{newUuid}}",
         "email": "henri.dubois@example.com"
     }

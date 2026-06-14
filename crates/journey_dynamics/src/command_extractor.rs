@@ -137,7 +137,8 @@ impl From<serde_json::Error> for CommandExtractionError {
 mod tests {
     use serde_json::json;
 
-    use crate::domain::{AttributePath, commands::JourneyCommand};
+    use crate::domain::commands::JourneyCommand;
+    use jsonptr::PointerBuf;
 
     use super::normalize_set_attributes;
 
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn set_attributes_canonical_form_deserializes() {
         let body =
-            r#"{"SetAttributes":{"changes":{"search/origin":"LHR","search/destination":"JFK"}}}"#;
+            r#"{"SetAttributes":{"changes":{"/search/origin":"LHR","/search/destination":"JFK"}}}"#;
         let cmd: JourneyCommand = serde_json::from_str(body).unwrap();
 
         let JourneyCommand::SetAttributes { changes } = cmd else {
@@ -159,8 +160,8 @@ mod tests {
         };
 
         assert_eq!(changes.len(), 2);
-        let origin: AttributePath = "search/origin".parse().unwrap();
-        let dest: AttributePath = "search/destination".parse().unwrap();
+        let origin: PointerBuf = "/search/origin".parse().unwrap();
+        let dest: PointerBuf = "/search/destination".parse().unwrap();
         assert_eq!(changes[&origin], json!("LHR"));
         assert_eq!(changes[&dest], json!("JFK"));
     }
@@ -202,8 +203,8 @@ mod tests {
             json!({
                 "SetAttributes": {
                     "changes": {
-                        "search/destination": "JFK",
-                        "search/origin": "LHR"
+                        "/search/destination": "JFK",
+                        "/search/origin": "LHR"
                     }
                 }
             })
@@ -225,8 +226,8 @@ mod tests {
         };
 
         assert_eq!(changes.len(), 2);
-        let origin: AttributePath = "search/origin".parse().unwrap();
-        let dest: AttributePath = "search/destination".parse().unwrap();
+        let origin: PointerBuf = "/search/origin".parse().unwrap();
+        let dest: PointerBuf = "/search/destination".parse().unwrap();
         assert_eq!(changes[&origin], json!("LHR"));
         assert_eq!(changes[&dest], json!("JFK"));
     }
@@ -248,11 +249,11 @@ mod tests {
         };
         assert_eq!(changes.len(), 2);
         assert_eq!(
-            changes[&"search/origin".parse::<AttributePath>().unwrap()],
+            changes[&"/search/origin".parse::<PointerBuf>().unwrap()],
             json!("LHR")
         );
         assert_eq!(
-            changes[&"booking/class".parse::<AttributePath>().unwrap()],
+            changes[&"/booking/class".parse::<PointerBuf>().unwrap()],
             json!("economy")
         );
     }
@@ -275,11 +276,11 @@ mod tests {
         };
         assert_eq!(changes.len(), 2);
         assert_eq!(
-            changes[&"persons/0/firstName".parse::<AttributePath>().unwrap()],
+            changes[&"/persons/0/firstName".parse::<PointerBuf>().unwrap()],
             json!("Alice")
         );
         assert_eq!(
-            changes[&"persons/0/passportNumber".parse::<AttributePath>().unwrap()],
+            changes[&"/persons/0/passportNumber".parse::<PointerBuf>().unwrap()],
             json!("X123")
         );
     }

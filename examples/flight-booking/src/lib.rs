@@ -42,7 +42,7 @@ impl TryFrom<&JourneyView> for FlightBookingSchema {
 /// - `persons/<ref>/passengerType` → Plaintext
 ///
 /// # Panics
-/// Never panics; the `"persons"` prefix literal is a valid `AttributePath`.
+/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
 #[must_use]
 pub fn attribute_schema() -> AttributeSchema {
     let plaintext_suffixes: BTreeSet<String> = std::iter::once("passengerType")
@@ -57,9 +57,9 @@ pub fn attribute_schema() -> AttributeSchema {
                 .collect(),
         )
         .with_namespace_patterns(vec![NamespacePattern {
-            prefix: "persons"
+            prefix: "/persons"
                 .parse()
-                .expect("'persons' is a valid AttributePath"),
+                .expect("'/persons' is a valid JSON pointer"),
             plaintext_suffixes,
         }])
 }
@@ -68,7 +68,7 @@ pub fn attribute_schema() -> AttributeSchema {
 /// file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
 ///
 /// # Panics
-/// Never panics; the `"persons"` prefix literal is a valid `AttributePath`.
+/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
 #[must_use]
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
     AttributeSchemaConfig {
@@ -78,9 +78,9 @@ pub fn attribute_schema_config() -> AttributeSchemaConfig {
             .map(|s| (*s).to_string())
             .collect(),
         namespace_patterns: vec![NamespacePatternConfig {
-            prefix: "persons"
+            prefix: "/persons"
                 .parse()
-                .expect("'persons' is a valid AttributePath"),
+                .expect("'/persons' is a valid JSON pointer"),
             plaintext_suffixes: std::iter::once("passengerType")
                 .map(str::to_string)
                 .collect(),

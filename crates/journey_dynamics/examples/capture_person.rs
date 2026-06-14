@@ -15,11 +15,12 @@ use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
 use journey_dynamics::SimpleLoggingQuery;
 use journey_dynamics::domain::commands::JourneyCommand;
 use journey_dynamics::domain::{
-    AttributePath, AttributeSchema,
+    AttributeSchema,
     journey::{Journey, JourneyServices},
 };
 use journey_dynamics::services::decision_engine::SimpleDecisionEngine;
 use journey_dynamics::services::schema_validator::NoOpValidator;
+use jsonptr::PointerBuf;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -57,7 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::RegisterAndBindSubject {
-            role_path: "persons/lead_booker".parse::<AttributePath>()?,
+            role_path: "/persons/lead_booker".parse::<PointerBuf>()?,
             subject_id: lead_booker_id,
             email: "alice.johnson@example.com".to_string(),
         },
@@ -69,15 +70,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Set the lead booker's attributes via SetAttributes.
     let mut changes = BTreeMap::new();
     changes.insert(
-        "persons/lead_booker/firstName".parse::<AttributePath>()?,
+        "/persons/lead_booker/firstName".parse::<PointerBuf>()?,
         json!("Alice"),
     );
     changes.insert(
-        "persons/lead_booker/lastName".parse::<AttributePath>()?,
+        "/persons/lead_booker/lastName".parse::<PointerBuf>()?,
         json!("Johnson"),
     );
     changes.insert(
-        "persons/lead_booker/phone".parse::<AttributePath>()?,
+        "/persons/lead_booker/phone".parse::<PointerBuf>()?,
         json!("+1-555-0123"),
     );
 
@@ -96,7 +97,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::RegisterAndBindSubject {
-            role_path: "persons/passenger_0".parse::<AttributePath>()?,
+            role_path: "/persons/passenger_0".parse::<PointerBuf>()?,
             subject_id: passenger_id,
             email: "bob.smith@example.com".to_string(),
         },

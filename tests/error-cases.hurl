@@ -56,7 +56,7 @@ POST {{host}}/journeys/00000000-0000-0000-0000-000000000000
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/lead_booker",
+        "role_path": "/persons/lead_booker",
         "subject_id": "{{newUuid}}",
         "email": "test@example.com"
     }

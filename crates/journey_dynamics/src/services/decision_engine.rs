@@ -14,9 +14,10 @@ use zen_engine::{
 };
 
 use crate::domain::{
-    AttributePath,
+    assign_all,
     journey::{Journey, JourneyState},
 };
+use jsonptr::PointerBuf;
 
 // ---------------------------------------------------------------------------
 // Thread-pinned worker pool
@@ -79,10 +80,10 @@ pub trait DecisionEngine: Send + Sync {
     async fn evaluate_attributes(
         &self,
         journey: &Journey,
-        pending_changes: &BTreeMap<AttributePath, Value>,
+        pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
         let mut merged = journey.shared_data().clone();
-        json_patch::merge(&mut merged, &crate::domain::rehydrate(pending_changes));
+        assign_all(&mut merged, pending_changes)?;
         self.evaluate_next_steps(journey, "", &merged).await
     }
 }
@@ -274,10 +275,10 @@ impl DecisionEngine for GoRulesDecisionEngine {
     async fn evaluate_attributes(
         &self,
         journey: &Journey,
-        pending_changes: &BTreeMap<crate::domain::AttributePath, Value>,
+        pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
         let mut data = journey.shared_data().clone();
-        json_patch::merge(&mut data, &crate::domain::rehydrate(pending_changes));
+        assign_all(&mut data, pending_changes)?;
         self.run(data).await
     }
 }

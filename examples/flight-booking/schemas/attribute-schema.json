@@ -7,7 +7,7 @@
   ],
   "namespace_patterns": [
     {
-      "prefix": "persons",
+      "prefix": "/persons",
       "plaintext_suffixes": [
         "passengerType"
       ]

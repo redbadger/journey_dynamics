@@ -112,7 +112,7 @@ Content-Type: application/json
 variable: subject_id={{newUuid}}
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_0",
+        "role_path": "/persons/passenger_0",
         "subject_id": "{{subject_id}}",
         "email": "alice.johnson@email.com"
     }
@@ -152,7 +152,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_1",
+        "role_path": "/persons/passenger_1",
         "subject_id": "{{newUuid}}",
         "email": "bob.johnson@email.com"
     }
@@ -190,7 +190,7 @@ POST {{host}}/journeys/{{journey_id}}
 Content-Type: application/json
 {
     "RegisterAndBindSubject": {
-        "role_path": "persons/passenger_2",
+        "role_path": "/persons/passenger_2",
         "subject_id": "{{newUuid}}",
         "email": "charlie.johnson@email.com"
     }
