@@ -7,10 +7,10 @@ that depend on `journey_dynamics`.
 replaces the step-scoped `Capture` / `CapturePersonDetails` and their
 events. A new subject surface (`RegisterSubject` / `BindSubject` /
 `RegisterAndBindSubject` and their `SubjectRegistered` / `SubjectBound`
-events) replaces `CapturePerson`. The old surface still compiles but emits
-deprecation warnings — and note that `CapturePerson` has changed behaviour
-(see the warning in [recipe 2](#2-replace-captureperson-with-registerandbindsubject)).
-This guide shows how to clear the warnings and migrate safely.
+events) replaces `CapturePerson`. **The old write-side commands
+(`Capture`, `CapturePerson`, `CapturePersonDetails`) have been removed
+and will no longer compile.** This guide shows how to migrate each
+call site to the replacement surface.
 
 If you only want the cheat sheet, jump to
 [Quick reference](#quick-reference).
@@ -52,46 +52,36 @@ through an `AttributeSchema`. Secrets are encrypted under the right
 subject's DEK by the crypto layer; plaintext attributes are stored
 verbatim in `shared_data`.
 
-## Backward-compatibility guarantee
+## What was removed
 
-Until a future, separately-scheduled removal RFC:
+The following write-side commands and aggregate internals have been
+deleted. Any code that references them will not compile.
 
-- `JourneyCommand::Capture` and `CapturePersonDetails` are still accepted
-  and behave identically to today.
-- They still emit `JourneyEvent::Modified` and
-  `JourneyEvent::PersonDetailsUpdated` respectively. Pattern-matchers on
-  those variants continue to fire for new submissions made via the
-  deprecated commands.
-- `JourneyCommand::CapturePerson` is still accepted, but its behaviour has
-  **changed**: it now emits `SubjectRegistered` + `SubjectBound` (not
-  `PersonCaptured`) and **silently ignores its `name` and `phone` fields**.
-  `PersonCaptured` is no longer emitted by new commands; it only replays
-  from the historical event log. This is the one place where the legacy
-  surface is *not* behaviour-preserving — see
-  [recipe 2](#2-replace-captureperson-with-registerandbindsubject).
-- `Journey::current_step()` and `JourneyView::current_step` keep being
-  populated while any `StepProgressed` events still replay.
-- `PersonSlot.details` / `PersonView.details` keep being populated **only
-  for subjects that went through `CapturePerson`** (which creates the
-  backing `PersonSlot`). The `AttributesSet` mirror-write keeps that slot's
-  `details` field up to date when new-style `SetAttributes` commands are
-  mixed in. However, subjects registered exclusively through
-  `RegisterAndBindSubject` never have a `PersonSlot` entry, so `details`
-  is never populated for them. Consumers reading `details` for those
-  subjects will see nothing; they must read from `JourneyView::shared_data`
-  under `persons/<ref>/…` instead.
-- The HTTP route accepts both the legacy and the new command shapes.
+| Removed | Replacement |
+| --- | --- |
+| `JourneyCommand::Capture` | `JourneyCommand::SetAttributes` |
+| `JourneyCommand::CapturePerson` | `JourneyCommand::RegisterAndBindSubject` + `SetAttributes` |
+| `JourneyCommand::CapturePersonDetails` | `JourneyCommand::SetAttributes` |
+| `PersonSlot` struct | Read from `JourneyView::shared_data` under `persons/<ref>/…` |
+| `Journey::persons` field | Subjects are now in `Journey::subjects` + `Journey::bindings` |
+| `Journey::current_step` field | Read `WorkflowDecisionView.phase` |
 
-You can migrate writers and readers independently, on your own schedule,
-**with the exception of `PersonSlot.details` readers**: once a journey
-stops going through `CapturePerson`, those readers must switch to
-`shared_data` before that journey is created.
+The **event** variants (`Modified`, `PersonDetailsUpdated`,
+`StepProgressed`, `PersonCaptured`) are **not** removed — they continue to
+replay from the historical event log. Projectors that pattern-match on
+them will keep working; see
+[recipe 7](#7-stop-pattern-matching-modified--persondetailsupdated--stepprogressed-in-projections)
+for guidance on when and how to drop those arms.
+
+`JourneyView::current_step` is still populated by replayed `StepProgressed`
+events, but will not be set by any new command. Prefer
+`WorkflowDecisionView.phase` for new journeys.
 
 ---
 
 ## Quick reference
 
-| Deprecated | Replacement |
+| Removed | Replacement |
 | --- | --- |
 | `JourneyCommand::Capture { step, data }` | `JourneyCommand::SetAttributes { changes }` with paths under `<step>/…` |
 | `JourneyCommand::CapturePerson { person_ref, subject_id, name, email, phone }` | `JourneyCommand::RegisterAndBindSubject { role_path, subject_id, email }` **plus** `SetAttributes` for `name` / `phone` (see [recipe 2](#2-replace-captureperson-with-registerandbindsubject)) |
@@ -180,8 +170,8 @@ concerns are split:
   the crypto label for that subject's secret partition.
 - **`name` and `phone` are no longer identity fields.** They are now
   ordinary path-keyed attributes set via `SetAttributes`. **If you do not
-  send them, they are lost** — the deprecated `CapturePerson` command
-  silently discards both.
+  send them explicitly, they are lost** — the old `CapturePerson` command
+  discarded both.
 
 **Before:**
 
@@ -336,10 +326,8 @@ example flight-booking phases are `collecting_search`,
 
 ### 6. Stop reading `PersonSlot.details` / `PersonView.details`
 
-Per-passenger attributes now live in `shared_data` under
-`persons/<ref>/…`. The deprecated `details` blob is still populated by a
-mirror-write so existing readers don't break, but new readers should
-read from the canonical location.
+`PersonSlot` has been removed. Per-passenger attributes live in
+`shared_data` under `persons/<ref>/…`.
 
 **Before:**
 
@@ -376,23 +364,24 @@ non-PII path `persons/<ref>/passengerType` remains intact.
 If you've written a custom projector or analytics consumer that
 pattern-matches on event variants, you have two options.
 
-**Option A — keep matching the legacy variants.** They are still emitted
-for `Capture` and `CapturePersonDetails` commands. You'll just see
-deprecation warnings on the variants themselves. Wrap the arms in
-`#[allow(deprecated)]` if you want a clean build until you migrate.
+**Option A — keep matching the legacy variants.** `Modified`,
+`PersonDetailsUpdated`, and `StepProgressed` events are no longer emitted
+by new commands, but they still replay from the historical event log.
+Keeping the match arms is safe and harmless for as long as old events
+exist in the store.
 
 ```rust
-#[allow(deprecated)]
 match event.payload {
-    JourneyEvent::Modified { step, data } => { /* still works */ }
-    JourneyEvent::PersonDetailsUpdated { person_ref, data, .. } => { /* still works */ }
+    JourneyEvent::Modified { step, data } => { /* replays from history */ }
+    JourneyEvent::PersonDetailsUpdated { person_ref, data, .. } => { /* replays from history */ }
     // … plus a new arm for AttributesSet
     _ => {}
 }
 ```
 
-**Option B — handle `AttributesSet` and treat the legacy variants as
-equivalent.** Recommended once your writers have migrated.
+**Option B — handle `AttributesSet` and drop the legacy arms** once you
+are confident no old events remain that you care about, or treat the
+legacy arms as a no-op.
 
 ```rust
 match event.payload {
@@ -411,10 +400,8 @@ match event.payload {
     // `person_ref: String` (the bare slot name); events written under the
     // old name still deserialise — the missing prefix is synthesised as
     // "persons/<person_ref>".
-    #[allow(deprecated)]
     JourneyEvent::Modified { step, data } => {
-        // optional: project legacy events too, or assume they no longer
-        // occur once writers have migrated
+        // optional: project legacy events replaying from the event log
     }
     // …
 }
@@ -520,8 +507,9 @@ let schema = Arc::new(AttributeSchema::new(paths, Some(json_schema_value)));
 ```
 
 Note the `firstName` / `lastName` / `phone` secret paths: these carry the
-identity fields that the deprecated `CapturePerson` command used to store,
-so include them in your schema if you are migrating off `CapturePerson`.
+identity fields that the old `CapturePerson` command used to store. Include
+them in your schema when migrating call sites that previously used
+`CapturePerson`.
 
 ### Namespace patterns (default-secret)
 
@@ -587,12 +575,10 @@ shifted:
 - A shredded subject's role-path bindings stop resolving: subsequent
   `SetAttributes` calls targeting that subject's secret paths land in
   `unknown` rather than being re-encrypted under a deleted DEK.
-- `PersonSlot.forgotten` and `PersonView.forgotten` still flip to
-  `true`. Identity fields on the slot still null out.
-- Subjects registered via `RegisterSubject` (rather than the legacy
-  `CapturePerson`) are found by `DELETE /subjects/by-email` through the
-  same `subject_lookup` table, which the `SubjectLookupHook` now also
-  populates from `SubjectRegistered` events.
+- Subjects registered via `RegisterSubject` are found by
+  `DELETE /subjects/by-email` through the `subject_lookup` table, which
+  the `SubjectLookupHook` populates from both `PersonCaptured` (legacy
+  replay) and `SubjectRegistered` events.
 
 ---
 
@@ -614,27 +600,18 @@ from the now-removed `currentStep` input. The flight-booking
 orchestrator (`examples/flight-booking/jdm-models/`) demonstrates the
 pattern.
 
-### "I get a deprecation warning on `JourneyEvent::Modified` in my projector"
+### "I have a match arm on `JourneyEvent::Modified` in my projector — is it still needed?"
 
-Wrap the arm in `#[allow(deprecated)]`. The variant continues to be
-emitted by `Capture` commands and continues to replay from the historical
-event log. There is no rush to delete the arm.
+Yes, for now. `Capture` commands no longer exist, so no new `Modified`
+events will be written, but the variant still replays from the historical
+event log. Keep the arm until you are certain no relevant historical
+events remain, or you are happy to ignore them.
 
 ### "Two passengers' details in one request used to work via two commands; will the new single-command form be atomic?"
 
 Yes. `SetAttributes` is one command, one event, applied atomically.
 Failure (e.g. an invalid path) rejects the entire submission with no
 partial writes.
-
-### "Can I mix `Capture` and `SetAttributes` against the same journey?"
-
-Yes, in any order. The legacy `apply` arms and the new `AttributesSet`
-arm both write into the same `shared_data` document, so reading from
-`shared_data` after the dust settles gives a coherent view regardless of
-which commands were used. Just be aware that `Capture` always writes
-under the namespace of its `step` field — if your `SetAttributes`
-schema disagrees about which path that step corresponds to, you can
-end up with two parallel sub-trees in `shared_data`.
 
 ### "I'm getting `PersonNotFound` from `SetAttributes`"
 
@@ -644,25 +621,25 @@ role path. The subject UUID for a secret partition is resolved from the
 `BindSubject`) must land first. See
 [recipe 2](#2-replace-captureperson-with-registerandbindsubject).
 
-### "What happened to the `name` / `phone` I sent to `CapturePerson`?"
+### "`CapturePerson` no longer compiles — what do I use?"
 
-They are discarded. The deprecated `CapturePerson` command now only
-registers and binds the subject (by `email`) and ignores `name` / `phone`.
-Move those fields to `SetAttributes` under `persons/<ref>/…` secret paths.
-See [recipe 2](#2-replace-captureperson-with-registerandbindsubject).
+`CapturePerson` has been removed. Use `RegisterAndBindSubject` to register
+the subject and bind them to a role path, then send `name` / `phone` as
+path-keyed attributes via `SetAttributes` under `persons/<ref>/…` secret
+paths. See [recipe 2](#2-replace-captureperson-with-registerandbindsubject).
 
 ### "What happens to journeys created before this release?"
 
-They replay unchanged. The aggregate still recognises and applies
-`Modified` / `PersonDetailsUpdated` / `StepProgressed` and `PersonCaptured`
-events; replaying `PersonCaptured` also populates the new
-subjects/bindings maps, so `SetAttributes` resolves secret subjects
-correctly for journeys that were built with the legacy `CapturePerson`
-command. Encrypted historical events use the older single-blob ciphertext
-shape; the `cqrs-es-crypto` read path detects this and decrypts them as a
-single-partition event with `label = "default"`. `SecretPartitionData`
-events written before the field rename (with `person_ref` instead of
-`role_path`) also deserialise transparently.
+They replay unchanged. The aggregate still applies `Modified` /
+`PersonDetailsUpdated` / `StepProgressed` and `PersonCaptured` events from
+the historical log; replaying `PersonCaptured` populates the
+`subjects` / `bindings` maps, so `SetAttributes` still resolves secret
+subjects correctly for journeys that were originally built with the legacy
+`CapturePerson` command. Encrypted historical events use the older
+single-blob ciphertext shape; the `cqrs-es-crypto` read path detects this
+and decrypts them as a single-partition event with `label = "default"`.
+`SecretPartitionData` events written before the field rename (with
+`person_ref` instead of `role_path`) also deserialise transparently.
 
 ---
 
