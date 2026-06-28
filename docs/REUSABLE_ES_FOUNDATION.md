@@ -1,6 +1,46 @@
 # A Reusable Event-Sourcing Foundation
 
-**Status:** Draft · **Audience:** Architects & engineers building new event-sourced systems
+**Status:** Implemented · **Audience:** Architects & engineers building new event-sourced systems
+
+## Implementation status
+
+The extraction described below is **complete**. The domain-agnostic spine now lives in the
+`es-capture` crate and the flight-booking `Journey` is a thin shell over it — proving the
+foundation end-to-end (its full test + hurl suite runs through the generic path).
+
+`crates/es-capture` modules:
+
+| Module | Contents |
+|---|---|
+| `json_path` | `flatten` / `assign_all` over `jsonptr` pointers |
+| `attribute_schema` | `PiiClass`, `AttributeEntry`, `NamespacePattern`, `AttributeSchema`, `classify_changes`, config types |
+| `schema_validator` | `SchemaValidator` trait, `JsonSchemaValidator`, `NoOpValidator` |
+| `decision_engine` | `DecisionEngine` trait (decoupled from any aggregate; takes `&Value` state), `GoRulesDecisionEngine`, `SimpleDecisionEngine`, `WorkflowDecision` |
+| `subject_registry` | `SubjectRegistration`, `SubjectRegistry` (register/bind/forget + the bound-non-forgotten invariant `resolve_active`), `SubjectError` |
+| `capture` | `capture(...)` pipeline → `CaptureOutcome` (classify → validate → optional engine); `SecretSlice`, `CaptureError` |
+| `attributes_set_codec` | `AttributesSetCodec` — the generic partition-aware `PiiEventCodec` for the `AttributesSet` event |
+| `aggregate` | `CaptureAggregate<C: CaptureConfig>` (a `cqrs_es::Aggregate`), shared `CaptureCommand` / `CaptureEvent` (+ `SecretPartitionData`) / `CaptureError` / `CaptureServices` (optional engine) / `CaptureState` |
+
+What a new domain writes — confirmed by `journey_dynamics` now being exactly this: a `CaptureConfig`
+(just the aggregate `TYPE`), an attribute schema, a JSON schema, optional JDM rules, and its
+views/routes. `journey_dynamics::domain::journey` is just
+`pub type Journey = CaptureAggregate<JourneyConfig>` plus re-exports of the generic types under the
+historical `Journey*` names; `commands`/`events` re-export `CaptureCommand`/`CaptureEvent`.
+
+Notable decisions taken during implementation:
+
+- **Legacy events removed.** Backward-compat with previously-persisted event formats is no longer
+  required (no existing users), so `PersonCaptured` / `PersonDetailsUpdated` / `Modified` /
+  `StepProgressed` and all their handling were deleted. This is what let `JourneyEvent` become the
+  pure generic spine and `JourneyPiiCodec` become the fully generic `AttributesSetCodec`.
+- **Decision engine is optional** (`Option<Arc<dyn DecisionEngine>>` in `CaptureServices`):
+  `WorkflowEvaluated` is emitted only when an engine is configured.
+- **Generic error carries the full `role_path`** (`CaptureError::SubjectNotResolved(PointerBuf)`) —
+  no domain-specific `/persons/` stripping.
+- **Vestigial `current_step`** column/field removed (a forward migration).
+
+The blueprint and reference map below remain the guide for building the next domain (e.g. an HR
+system) on the foundation.
 
 ## Problem
 
@@ -201,23 +241,24 @@ Provide **both**:
 Mechanically, parameterise the services bundle (generics or trait objects) so collaborators are
 domain-supplied and the decision-engine slot can be empty.
 
-## Extraction plan (phased, behaviour-preserving)
+## Extraction plan (phased, behaviour-preserving) — **done**
 
-Create `crates/es-capture` and move in dependency order, running the existing test suite after
-each step so behaviour stays identical:
+`crates/es-capture` was created and the spine moved in dependency order, running the full test +
+hurl suite after each step so behaviour stayed identical:
 
-1. **`json_path`** (no internal deps) — move first.
-2. **`attribute_schema`** + `classify_changes` — keep the public API identical.
-3. **`SchemaValidator`** trait + `JsonSchemaValidator`; **`DecisionEngine`** trait + `GoRules`/`Simple`
-   impls — and make the engine optional at the seams.
-4. **Subject registry / bindings** — lift out of `journey.rs` into a reusable component.
-5. **Capture aggregate** — extract the default aggregate + building blocks; reduce `Journey` to a thin
-   domain shell (or type alias) over it.
-6. **Assembly** — generalise `config.rs` (`CryptoCqrs`, `cqrs_framework`) into an `es-capture` builder;
-   generalise the view-projection + persist-hook/secondary-index abstraction.
-7. **Prove it** — repoint `examples/flight-booking` at `es-capture`. The capture event's codec
-   comes from the foundation's generic partition codec (not re-derived per domain); keep
-   `#[derive(PiiCodec)]` only for any fixed-schema auxiliary events the example still has.
+1. ✅ **`json_path`** (no internal deps) — moved first.
+2. ✅ **`attribute_schema`** + `classify_changes` — public API identical (re-exported).
+3. ✅ **`SchemaValidator`** + **`DecisionEngine`** (trait decoupled from the aggregate).
+4. ✅ **Subject registry / bindings** — lifted into `subject_registry`.
+5. ✅ **Capture aggregate** — `capture` pipeline + generic `AttributesSetCodec` + generic
+   `CaptureAggregate`; `Journey` reduced to `CaptureAggregate<JourneyConfig>`. (The engine was made
+   optional here.) Legacy events were removed first, which simplified this step substantially.
+6. ✅ **Assembly** — `journey_dynamics::config` still wires the concrete `Journey` stack; the
+   collaborators it wires (codec, validator, engine, schema, services) are now all generic. A
+   dedicated `es-capture` builder + generic view-projection/persist-hook abstraction is the natural
+   next refinement when the second domain lands.
+7. ✅ **Proven** — `journey_dynamics`/flight-booking run entirely through `es-capture`'s generic
+   aggregate and partition codec; the full hurl suite (incl. shredding) passes unchanged.
 
 ## Blueprint — building a new domain on the foundation
 
