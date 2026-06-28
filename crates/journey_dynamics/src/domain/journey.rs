@@ -95,7 +95,7 @@ impl Aggregate for Journey {
                     self.shared_data(),
                     &changes,
                     services.schema_validator().as_ref(),
-                    Some(services.decision_engine().as_ref()),
+                    services.decision_engine().map(|engine| &**engine),
                 )
                 .await?;
 
@@ -341,27 +341,44 @@ impl From<CaptureError> for JourneyError {
 }
 
 pub struct JourneyServices {
-    decision_engine: Arc<dyn DecisionEngine>,
+    /// The decision engine is optional: when absent, capture still runs but no
+    /// `WorkflowEvaluated` event is emitted.
+    decision_engine: Option<Arc<dyn DecisionEngine>>,
     schema_validator: Arc<dyn SchemaValidator>,
     attribute_schema: Arc<AttributeSchema>,
 }
 
 impl JourneyServices {
+    /// Construct with a decision engine (the common case).
     pub fn new(
         decision_engine: Arc<dyn DecisionEngine>,
         schema_validator: Arc<dyn SchemaValidator>,
         attribute_schema: Arc<AttributeSchema>,
     ) -> Self {
         Self {
-            decision_engine,
+            decision_engine: Some(decision_engine),
+            schema_validator,
+            attribute_schema,
+        }
+    }
+
+    /// Construct without a decision engine — `SetAttributes` accumulates and
+    /// validates attributes but emits no `WorkflowEvaluated` event.
+    #[must_use]
+    pub fn without_decision_engine(
+        schema_validator: Arc<dyn SchemaValidator>,
+        attribute_schema: Arc<AttributeSchema>,
+    ) -> Self {
+        Self {
+            decision_engine: None,
             schema_validator,
             attribute_schema,
         }
     }
 
     #[must_use]
-    pub fn decision_engine(&self) -> &Arc<dyn DecisionEngine> {
-        &self.decision_engine
+    pub fn decision_engine(&self) -> Option<&Arc<dyn DecisionEngine>> {
+        self.decision_engine.as_ref()
     }
 
     #[must_use]
@@ -466,6 +483,13 @@ mod tests {
     fn services() -> JourneyServices {
         JourneyServices::new(
             Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+            Arc::new(AttributeSchema::permissive()),
+        )
+    }
+
+    fn services_without_engine() -> JourneyServices {
+        JourneyServices::without_decision_engine(
             create_test_schema_validator(),
             Arc::new(AttributeSchema::permissive()),
         )
@@ -1135,6 +1159,24 @@ mod tests {
                     phase: None,
                 },
             ]);
+    }
+
+    #[test]
+    fn set_attributes_without_engine_emits_no_workflow_evaluated() {
+        // With no decision engine configured, SetAttributes still accumulates
+        // attributes but emits only AttributesSet — no WorkflowEvaluated.
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/first_name".parse().unwrap(), json!("Alice"));
+        let expected_plaintext = changes.clone();
+
+        JourneyTester::with(services_without_engine())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_events(vec![JourneyEvent::AttributesSet {
+                plaintext: expected_plaintext,
+                secret_partitions: vec![],
+            }]);
     }
 
     #[test]
