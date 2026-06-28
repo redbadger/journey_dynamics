@@ -44,6 +44,10 @@ run-flight-booking:
     JOURNEY_ATTRIBUTE_SCHEMA_PATH=examples/flight-booking/schemas/attribute-schema.json \
         cargo run -p journey_dynamics --bin journey_dynamics
 
+# Run the standalone in-memory HR example end-to-end (no database required)
+run-hr:
+    cargo run -p hr
+
 # Assumes the server is already running on localhost:3030
 test-hurl:
     hurl --variable host=http://localhost:3030 --test \
@@ -57,8 +61,8 @@ test-hurl:
 docs:
     RUSTDOCFLAGS="-D warnings" cargo doc --no-deps --all-features
 
-# Lint, build, test, and run hurl tests (needs a running server)
-ci: lint docs build test test-hurl
+# Lint, build, test, run the HR example, and run hurl tests (needs a running server)
+ci: lint docs build test run-hr test-hurl
 
 # Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io
 publish:
