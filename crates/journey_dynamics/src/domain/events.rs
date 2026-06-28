@@ -14,58 +14,16 @@ use jsonptr::PointerBuf;
 /// The `changes` map is encrypted under the subject's DEK; `role_path` is used
 /// as the crypto label (AAD) so the partition identity is meaningful on the
 /// read path.
-///
-/// # Backward compatibility
-/// Events written before this rename stored `person_ref: "passenger_0"` (the
-/// short slot name without the `"persons/"` prefix). The custom [`Deserialize`]
-/// impl accepts both formats: if `role_path` is absent it reads `person_ref`
-/// and synthesises `"/persons/{person_ref}"` as the role path.
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SecretPartitionData {
     /// Full schema path at which the subject is bound, e.g. `"/persons/passenger_0"`.
     /// Used as the crypto label (AAD).
     pub role_path: PointerBuf,
     /// The subject's identity key — used to look up the DEK.
     pub subject_id: Uuid,
-    /// Path → value changes. Encrypted under `subject_id`'s DEK from A7.
+    /// Path → value changes. Encrypted under `subject_id`'s DEK.
+    #[serde(default)]
     pub changes: BTreeMap<PointerBuf, Value>,
-}
-
-impl<'de> Deserialize<'de> for SecretPartitionData {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        // Intermediate struct that accepts both the current and legacy field names.
-        #[derive(Deserialize)]
-        struct Raw {
-            /// Current field name.
-            role_path: Option<PointerBuf>,
-            /// Legacy field name — present in events written before the rename.
-            person_ref: Option<String>,
-            subject_id: Uuid,
-            #[serde(default)]
-            changes: BTreeMap<PointerBuf, Value>,
-        }
-
-        let raw = Raw::deserialize(deserializer)?;
-        let role_path = if let Some(rp) = raw.role_path {
-            rp
-        } else if let Some(pr) = raw.person_ref {
-            // Old events stored only the short slot name; synthesise the full path.
-            format!("/persons/{pr}")
-                .parse::<PointerBuf>()
-                .map_err(serde::de::Error::custom)?
-        } else {
-            return Err(serde::de::Error::missing_field("role_path"));
-        };
-
-        Ok(Self {
-            role_path,
-            subject_id: raw.subject_id,
-            changes: raw.changes,
-        })
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,38 +31,12 @@ pub enum JourneyEvent {
     Started {
         id: Uuid,
     },
-    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
-    Modified {
-        step: String,
-        data: Value,
-    },
-    PersonCaptured {
-        person_ref: String,
-        subject_id: Uuid,
-        name: String,
-        email: String,
-        phone: Option<String>,
-    },
-    #[deprecated(since = "0.3.0", note = "use SetAttributes (path-keyed attributes)")]
-    PersonDetailsUpdated {
-        person_ref: String,
-        subject_id: Uuid,
-        data: Value,
-    },
     WorkflowEvaluated {
         suggested_actions: Vec<String>,
         /// Phase label from the decision engine; `None` for events written
-        /// before schema version 1.1 (legacy `Capture` arm always writes `None`).
+        /// before schema version 1.1.
         #[serde(default)]
         phase: Option<String>,
-    },
-    #[deprecated(
-        since = "0.3.0",
-        note = "use WorkflowEvaluated.phase instead of tracking step progression"
-    )]
-    StepProgressed {
-        from_step: Option<String>,
-        to_step: String,
     },
     Completed,
     SubjectForgotten {
@@ -124,8 +56,8 @@ pub enum JourneyEvent {
     ///
     /// `plaintext` contains all changes that the attribute schema classified
     /// as non-sensitive. `secret_partitions` holds one entry per data subject
-    /// whose secret attributes were touched; from A7 onwards each entry's
-    /// `changes` map is encrypted under that subject's DEK.
+    /// whose secret attributes were touched; each entry's `changes` map is
+    /// encrypted under that subject's DEK.
     AttributesSet {
         /// Non-sensitive path → value changes.
         plaintext: BTreeMap<PointerBuf, Value>,
@@ -137,15 +69,10 @@ pub enum JourneyEvent {
 }
 
 impl DomainEvent for JourneyEvent {
-    #[allow(deprecated)]
     fn event_type(&self) -> String {
         let event_type: &str = match self {
             Self::Started { .. } => "JourneyOpened",
-            Self::Modified { .. } => "JourneyModified",
-            Self::PersonCaptured { .. } => "PersonCaptured",
-            Self::PersonDetailsUpdated { .. } => "PersonDetailsUpdated",
             Self::WorkflowEvaluated { .. } => "WorkflowEvaluated",
-            Self::StepProgressed { .. } => "StepProgressed",
             Self::Completed => "JourneyClosed",
             Self::SubjectForgotten { .. } => "SubjectForgotten",
             Self::SubjectRegistered { .. } => "SubjectRegistered",

@@ -11,14 +11,6 @@ use crate::{
     queries::{JourneyState, JourneyView, PersonView, WorkflowDecisionView},
 };
 
-/// Deep-merge `patch` into `target` using JSON Merge Patch (RFC 7396).
-/// This is the Rust equivalent of what `PostgreSQL`'s `||` should do but
-/// doesn't — `||` is a shallow merge that replaces top-level keys entirely.
-#[inline]
-fn deep_merge(target: &mut Value, patch: &Value) {
-    json_patch::merge(target, patch);
-}
-
 /// A structured database view repository for journeys.
 #[derive(Clone)]
 pub struct StructuredJourneyViewRepository {
@@ -349,9 +341,8 @@ impl StructuredJourneyViewRepository {
     ///
     /// Searches event types that carry `subject_id` in plaintext:
     ///
-    /// - `PersonCaptured` / `PersonDetailsUpdated` — legacy identity-capture events.
-    /// - `SubjectRegistered` — new-style subject registration.
-    /// - `AttributesSet` — new path-keyed command; the crypto layer writes a
+    /// - `SubjectRegistered` — subject registration.
+    /// - `AttributesSet` — path-keyed command; the crypto layer writes a
     ///   `subjects` array of UUID strings alongside the encrypted partitions.
     ///   Queried with a GIN array-containment predicate backed by
     ///   `idx_events_attributes_set_subjects`.
@@ -369,12 +360,6 @@ impl StructuredJourneyViewRepository {
             FROM events
             WHERE aggregate_type = 'Journey'
               AND (
-                (event_type = 'PersonCaptured'
-                 AND payload -> 'PersonCaptured' ->> 'subject_id' = $1)
-                OR
-                (event_type = 'PersonDetailsUpdated'
-                 AND payload -> 'PersonDetailsUpdated' ->> 'subject_id' = $1)
-                OR
                 (event_type = 'SubjectRegistered'
                  AND payload -> 'SubjectRegistered' ->> 'subject_id' = $1)
                 OR
@@ -499,114 +484,6 @@ impl StructuredJourneyViewRepository {
                 .await?;
             }
 
-            JourneyEvent::Modified { step: _, data } => {
-                // Deep-merge new data into shared_data.
-                // shared_data never contains PII and is never cleared by shredding.
-                // We load, merge in Rust, and write back rather than using
-                // PostgreSQL's || operator, which only does a shallow (top-level)
-                // key merge and would overwrite sibling keys within the same
-                // top-level namespace.
-                let current: Value =
-                    sqlx::query_scalar("SELECT shared_data FROM journey_view WHERE id = $1")
-                        .bind(journey_id)
-                        .fetch_one(&mut **tx)
-                        .await?;
-
-                let mut merged = current;
-                deep_merge(&mut merged, data);
-
-                sqlx::query(
-                    r"
-                    UPDATE journey_view
-                    SET shared_data = $2,
-                        version     = $3,
-                        updated_at  = CURRENT_TIMESTAMP
-                    WHERE id = $1
-                    ",
-                )
-                .bind(journey_id)
-                .bind(&merged)
-                .bind(event.sequence as i64)
-                .execute(&mut **tx)
-                .await?;
-            }
-
-            JourneyEvent::PersonCaptured {
-                person_ref,
-                subject_id,
-                name,
-                email,
-                phone,
-            } => {
-                // Upsert on the composite PK (journey_id, person_ref).
-                // If the slot already exists (identity field update for the same subject),
-                // overwrite identity fields but leave details and forgotten untouched.
-                sqlx::query(
-                    r"
-                    INSERT INTO journey_person
-                        (journey_id, person_ref, subject_id, name, email, phone)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (journey_id, person_ref) DO UPDATE
-                    SET subject_id = $3,
-                        name       = $4,
-                        email      = $5,
-                        phone      = $6,
-                        updated_at = CURRENT_TIMESTAMP
-                    ",
-                )
-                .bind(journey_id)
-                .bind(person_ref)
-                .bind(subject_id)
-                .bind(name)
-                .bind(email)
-                .bind(phone)
-                .execute(&mut **tx)
-                .await?;
-
-                sqlx::query(
-                    r"
-                    UPDATE journey_view
-                    SET version = $1, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $2
-                    ",
-                )
-                .bind(event.sequence as i64)
-                .bind(journey_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-
-            JourneyEvent::PersonDetailsUpdated {
-                person_ref, data, ..
-            } => {
-                // Merge new detail fields into the existing JSONB details column.
-                sqlx::query(
-                    r"
-                    UPDATE journey_person
-                    SET details    = details || $3,
-                        updated_at = CURRENT_TIMESTAMP
-                    WHERE journey_id = $1 AND person_ref = $2
-                    ",
-                )
-                .bind(journey_id)
-                .bind(person_ref)
-                .bind(data)
-                .execute(&mut **tx)
-                .await?;
-
-                sqlx::query(
-                    r"
-                    UPDATE journey_view
-                    SET version = $1, updated_at = CURRENT_TIMESTAMP
-                    WHERE id = $2
-                    ",
-                )
-                .bind(event.sequence as i64)
-                .bind(journey_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-
             JourneyEvent::SubjectForgotten { subject_id } => {
                 // Null out PII for the specific subject in this journey only.
                 // shared_data in journey_view is NOT touched — it never contained PII.
@@ -676,23 +553,6 @@ impl StructuredJourneyViewRepository {
                     WHERE id = $2
                     ",
                 )
-                .bind(event.sequence as i64)
-                .bind(journey_id)
-                .execute(&mut **tx)
-                .await?;
-            }
-
-            JourneyEvent::StepProgressed { to_step, .. } => {
-                sqlx::query(
-                    r"
-                    UPDATE journey_view
-                    SET current_step = $1,
-                        version      = $2,
-                        updated_at   = CURRENT_TIMESTAMP
-                    WHERE id = $3
-                    ",
-                )
-                .bind(to_step)
                 .bind(event.sequence as i64)
                 .bind(journey_id)
                 .execute(&mut **tx)

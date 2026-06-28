@@ -281,34 +281,11 @@ impl Aggregate for Journey {
         }
     }
 
-    #[allow(deprecated, clippy::too_many_lines)]
     fn apply(&mut self, event: Self::Event) {
         match event {
             JourneyEvent::Started { id } => {
                 self.id = id;
                 self.state = JourneyState::InProgress;
-            }
-            JourneyEvent::Modified { data, .. } => {
-                json_patch::merge(&mut self.shared_data, &data);
-            }
-            JourneyEvent::PersonCaptured {
-                person_ref,
-                subject_id,
-                email,
-                ..
-            } => {
-                // Populate subjects/bindings so that SetAttributes and
-                // ForgetSubject resolve correctly when replaying legacy events.
-                let role_path: PointerBuf = PointerBuf::parse(format!("/persons/{person_ref}"))
-                    .unwrap_or_else(|_| {
-                        PointerBuf::parse("/persons/unknown").expect("static fallback")
-                    });
-                self.registry.register(subject_id, email);
-                self.registry.bind(role_path, subject_id);
-            }
-            JourneyEvent::PersonDetailsUpdated { .. } | JourneyEvent::StepProgressed { .. } => {
-                // Legacy events. Projected directly from event payloads by
-                // StructuredJourneyViewRepository; no write-side state to update.
             }
             JourneyEvent::AttributesSet {
                 plaintext,
@@ -578,9 +555,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::Modified {
-                    step: "first_name".to_string(),
-                    data: json!("Joe"),
+                JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::from([("/first_name".parse().unwrap(), json!("Joe"))]),
+                    secret_partitions: vec![],
                 },
             ])
             .when(JourneyCommand::Complete)
@@ -623,12 +600,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
             ])
             .when(JourneyCommand::ForgetSubject { subject_id })
@@ -645,12 +619,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 // The subject was already forgotten in a prior shredding call.
                 JourneyEvent::SubjectForgotten { subject_id },
@@ -670,12 +641,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_a,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
             ])
             // subject_b has no slot in this journey.
@@ -707,19 +675,13 @@ mod tests {
         let mut journey = Journey::default();
         for event in [
             JourneyEvent::Started { id },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_a,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
             },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_1".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_b,
-                name: "Bob Jones".to_string(),
                 email: "bob@example.com".to_string(),
-                phone: None,
             },
             JourneyEvent::SubjectForgotten {
                 subject_id: subject_a,
@@ -1042,13 +1004,16 @@ mod tests {
         let id = Uuid::new_v4();
         let mut journey = Journey::default();
         journey.apply(JourneyEvent::Started { id });
-        journey.apply(JourneyEvent::Modified {
-            step: "search".to_string(),
-            data: json!({ "origin": "LHR", "destination": "JFK" }),
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext: BTreeMap::from([
+                ("/origin".parse().unwrap(), json!("LHR")),
+                ("/destination".parse().unwrap(), json!("JFK")),
+            ]),
+            secret_partitions: vec![],
         });
-        journey.apply(JourneyEvent::Modified {
-            step: "pricing".to_string(),
-            data: json!({ "totalPrice": 450.00 }),
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext: BTreeMap::from([("/totalPrice".parse().unwrap(), json!(450.00))]),
+            secret_partitions: vec![],
         });
 
         assert_eq!(journey.shared_data()["origin"], json!("LHR"));
@@ -1157,13 +1122,6 @@ mod tests {
 
         let mut journey = Journey::default();
         journey.apply(JourneyEvent::Started { id });
-        journey.apply(JourneyEvent::PersonCaptured {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            name: "Alice Smith".to_string(),
-            email: "alice@example.com".to_string(),
-            phone: None,
-        });
         journey.apply(JourneyEvent::AttributesSet {
             plaintext: BTreeMap::new(),
             secret_partitions: vec![SecretPartitionData {
@@ -1225,19 +1183,21 @@ mod tests {
         JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_id_0,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_1".to_string(),
+                JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
+                    subject_id: subject_id_0,
+                },
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_id_1,
-                    name: "Bob Jones".to_string(),
                     email: "bob@example.com".to_string(),
-                    phone: None,
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_1".parse().unwrap(),
+                    subject_id: subject_id_1,
                 },
             ])
             .when(JourneyCommand::SetAttributes { changes })
@@ -1397,36 +1357,5 @@ mod tests {
                 jsonptr::assign::Error::OutOfBounds { .. }
             ))
         );
-    }
-
-    #[test]
-    fn set_attributes_rejects_secret_path_when_subject_forgotten_via_person_captured() {
-        // A PersonCaptured event followed by SubjectForgotten must prevent
-        // SetAttributes from using that subject's secret paths. This validates
-        // that PersonCaptured.apply() correctly populates self.subjects (not
-        // just self.bindings) so that the forgotten check in SetAttributes fires.
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        let mut changes = BTreeMap::new();
-        changes.insert(
-            "/persons/passenger_0/passport".parse().unwrap(),
-            json!("AB123456"),
-        );
-
-        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-                JourneyEvent::SubjectForgotten { subject_id },
-            ])
-            .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
     }
 }
