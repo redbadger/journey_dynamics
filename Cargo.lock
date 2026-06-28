@@ -894,6 +894,8 @@ name = "es-capture"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "cqrs-es",
+ "cqrs-es-crypto",
  "json-patch",
  "jsonptr",
  "jsonschema 0.46.2",
