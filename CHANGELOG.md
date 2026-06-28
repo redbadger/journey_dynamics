@@ -10,8 +10,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Added
 
+- **`RegisterSubject` command** — registers a data subject (`email` →
+  `subject_id` mapping) within a journey. Re-registering the same subject with
+  the same email is a no-op; registering with a different email updates the
+  stored address. Email is required so the subject can be located by GDPR
+  erasure requests.
+
+- **`BindSubject` command** — binds an already-registered subject to a role
+  path (e.g. `"persons/passenger_0"`). Rejects binding a role path that is
+  already bound to a *different* subject; rebinding the same subject to the
+  same path is idempotent.
+
+- **`RegisterAndBindSubject` command** — convenience composite that performs a
+  `RegisterSubject` followed by `BindSubject` in a single command, avoiding a
+  round-trip when both are needed together. This is the replacement for the
+  removed `CapturePerson` command.
+
+- **`SubjectRegistered` / `SubjectBound` events** — the domain events emitted
+  by the commands above. `SubjectRegistered { subject_id, email }` feeds the
+  subject-lookup projection used by `find_journeys_by_subject`; `SubjectBound
+  { role_path, subject_id }` records the role-path → subject binding.
+
 - **`SetAttributes` command** — a single command that accepts a flat map of
-  `AttributePath → Value` and replaces the step-scoped `Capture` /
+  `AttributePath → Value`, replacing the removed `Capture` /
   `CapturePersonDetails` commands. A single submission may touch attributes
   belonging to multiple data subjects; each subject's PII is encrypted under
   its own DEK in one atomic operation.
@@ -19,9 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`AttributesSet` event** — the corresponding domain event emitted by
   `SetAttributes`. Carries a `plaintext` map (non-sensitive paths) and a
   `secret_partitions` list (one entry per subject whose secret attributes were
-  updated). Existing projectors that pattern-match on `Modified` /
-  `PersonDetailsUpdated` continue to fire for commands that use the legacy
-  surface.
+  updated). Legacy `Modified` / `PersonDetailsUpdated` events continue to
+  replay from the historical event log.
 
 - **`AttributePath` newtype** — a validated, slash-separated path string (e.g.
   `"search/origin"`, `"persons/passenger_0/passportNumber"`). Validates that
@@ -58,19 +78,69 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `rehydrate` for reading and writing deeply nested `serde_json::Value` trees
   using `AttributePath` keys.
 
+- **Subject-registration migration** (`20260606000001_subject_registration`) —
+  adds indexes on `SubjectRegistered` and `SubjectBound` events to support
+  `find_journeys_by_subject` on the new write path, and updates the
+  `journey_person` table documentation. Existing journeys remain covered by
+  the pre-existing `PersonCaptured` index.
+
+### Changed
+
+- **`SecretPartitionData` is now keyed by `role_path`** — the
+  `person_ref: String` field is replaced by `role_path: AttributePath` (the
+  full schema path, e.g. `"persons/passenger_0"`), which is used as the crypto
+  label (AAD) so the partition identity is meaningful on the read path. A
+  custom `Deserialize` impl preserves backward compatibility: events written
+  with the old `person_ref` field are read by synthesising
+  `"persons/{person_ref}"` as the role path.
+
+- **`SubjectLookupHook` projects `SubjectRegistered`** in addition to the
+  legacy `PersonCaptured` event when maintaining the `subject_lookup` table,
+  so subjects registered via the new commands are discoverable by email for
+  erasure requests.
+
+### Removed
+
+- **`JourneyCommand::Capture`** — the step-scoped non-PII capture command has
+  been deleted. Replace all usages with `JourneyCommand::SetAttributes` using
+  paths under `<step>/…` (e.g. `search/origin`). Deprecated since 0.3.0.
+
+- **`JourneyCommand::CapturePerson`** — the person-slot capture command has
+  been deleted. Replace with `JourneyCommand::RegisterAndBindSubject` (or
+  `RegisterSubject` + `BindSubject`) and send `name` / `phone` as path-keyed
+  attributes via `SetAttributes` under `persons/<ref>/…`. Deprecated since
+  0.4.0.
+
+- **`JourneyCommand::CapturePersonDetails`** — the free-form PII details
+  command has been deleted. Replace with `JourneyCommand::SetAttributes` using
+  paths under `persons/<ref>/…`. Deprecated since 0.3.0.
+
+- **`PersonSlot` struct and `Journey::persons` field** — the per-person slot
+  map (`BTreeMap<String, PersonSlot>`) has been removed from the aggregate.
+  Subject identity is now held exclusively in `Journey::subjects` (keyed by
+  `subject_id`) and role-path bindings in `Journey::bindings`. Consumers that
+  read `PersonSlot` fields must switch to `JourneyView::shared_data` under
+  `persons/<ref>/…`.
+
+- **`Journey::current_step` field** — removed from the aggregate state. Read
+  `WorkflowDecisionView.phase` instead. `JourneyView::current_step` is still
+  populated from replayed `StepProgressed` events but will not be set by any
+  new command.
+
+- **Legacy subject-lookup fallback in `SetAttributes`** — `SetAttributes` no
+  longer falls back to the old `persons` map when resolving a secret role path.
+  All subjects must be registered via `RegisterAndBindSubject` (or
+  `RegisterSubject` + `BindSubject`) before sending secret path-keyed
+  attributes for that role.
+
 ### Deprecated
 
-- `JourneyCommand::Capture` and `JourneyCommand::CapturePersonDetails`.
-  Use `JourneyCommand::SetAttributes` instead.
 - `JourneyEvent::Modified`, `JourneyEvent::PersonDetailsUpdated`, and
-  `JourneyEvent::StepProgressed`. New writes should emit
-  `JourneyEvent::AttributesSet`. Legacy events continue to replay.
-- `Journey::current_step()`, `JourneyView::current_step`, and
-  `PersonSlot.details` accessors / fields. Read from `shared_data`
-  under the relevant path-keyed attributes instead.
-
-All deprecated items remain fully functional and will keep working in
-this and future releases until an explicit removal RFC is accepted.
+  `JourneyEvent::StepProgressed`. These events continue to replay from the
+  historical event log but are no longer emitted by new commands. Pattern-match
+  arms for these variants may remain in projectors without urgency.
+- `JourneyView::current_step`. Populated only by replayed `StepProgressed`
+  events; read `WorkflowDecisionView.phase` for new journeys.
 
 ### Migration
 

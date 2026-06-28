@@ -179,35 +179,37 @@ fn flight_booking_return_selection() {
 
 // ── Person capture (PII) ──────────────────────────────────────────────────────
 
-/// `CapturePerson` stores name/email/phone encrypted under that subject's DEK.
-/// No workflow evaluation is triggered (the decision engine sees only shared data).
+/// `RegisterAndBindSubject` registers the subject and binds them to a role path
+/// in one command. No workflow evaluation is triggered.
 #[test]
-fn flight_booking_capture_person() {
+fn flight_booking_register_subject() {
     let id = Uuid::new_v4();
     let subject_id = Uuid::new_v4();
 
     JourneyTester::with(create_journey_services())
         .given(vec![JourneyEvent::Started { id }])
-        .when(JourneyCommand::CapturePerson {
-            person_ref: "passenger_0".to_string(),
+        .when(JourneyCommand::RegisterAndBindSubject {
+            role_path: "/persons/passenger_0".parse().unwrap(),
             subject_id,
-            name: "Alice Smith".to_string(),
             email: "alice@example.com".to_string(),
-            phone: Some("+44-7700-900000".to_string()),
         })
-        .then_expect_events(vec![JourneyEvent::PersonCaptured {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            name: "Alice Smith".to_string(),
-            email: "alice@example.com".to_string(),
-            phone: Some("+44-7700-900000".to_string()),
-        }]);
+        .then_expect_events(vec![
+            JourneyEvent::SubjectRegistered {
+                subject_id,
+                email: "alice@example.com".to_string(),
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_0".parse().unwrap(),
+                subject_id,
+            },
+        ]);
 }
 
-/// `SetAttributes` for person details encrypts secret fields and stores
-/// `passengerType` as plaintext under `persons/<ref>/passengerType`.
+/// `SetAttributes` encrypts secret person fields and stores `passengerType`
+/// as plaintext. Requires a prior `RegisterAndBindSubject` to establish the
+/// role-path → subject binding.
 #[test]
-fn flight_booking_capture_person_details() {
+fn flight_booking_set_passenger_attributes() {
     let id = Uuid::new_v4();
     let subject_id = Uuid::new_v4();
 
@@ -237,12 +239,13 @@ fn flight_booking_capture_person_details() {
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_0".parse().unwrap(),
+                subject_id,
             },
         ])
         .when(JourneyCommand::SetAttributes {
@@ -267,7 +270,7 @@ fn flight_booking_capture_person_details() {
             JourneyEvent::AttributesSet {
                 plaintext: expected_plaintext,
                 secret_partitions: vec![SecretPartitionData {
-                    person_ref: "passenger_0".to_string(),
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
                     changes: expected_secret,
                 }],
@@ -279,10 +282,10 @@ fn flight_booking_capture_person_details() {
         ]);
 }
 
-/// `SetAttributes` for a secret person field without a prior `CapturePerson`
+/// `SetAttributes` for a secret person field without a prior `RegisterAndBindSubject`
 /// returns `PersonNotFound`.
 #[test]
-fn flight_booking_capture_person_details_requires_prior_capture_person() {
+fn flight_booking_set_attributes_requires_prior_bind() {
     let id = Uuid::new_v4();
     let path = |s: &str| -> PointerBuf { s.parse().unwrap() };
 
@@ -298,9 +301,10 @@ fn flight_booking_capture_person_details_requires_prior_capture_person() {
         .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
 }
 
-/// Two passengers with independent subject IDs.
+/// Two passengers with independent subject IDs, each registered via
+/// `RegisterAndBindSubject`.
 #[test]
-fn flight_booking_capture_two_passengers() {
+fn flight_booking_capture_two_subjects() {
     let id = Uuid::new_v4();
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
@@ -308,28 +312,30 @@ fn flight_booking_capture_two_passengers() {
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_a,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_0".parse().unwrap(),
+                subject_id: subject_a,
             },
         ])
-        .when(JourneyCommand::CapturePerson {
-            person_ref: "passenger_1".to_string(),
+        .when(JourneyCommand::RegisterAndBindSubject {
+            role_path: "/persons/passenger_1".parse().unwrap(),
             subject_id: subject_b,
-            name: "Bob Jones".to_string(),
             email: "bob@example.com".to_string(),
-            phone: None,
         })
-        .then_expect_events(vec![JourneyEvent::PersonCaptured {
-            person_ref: "passenger_1".to_string(),
-            subject_id: subject_b,
-            name: "Bob Jones".to_string(),
-            email: "bob@example.com".to_string(),
-            phone: None,
-        }]);
+        .then_expect_events(vec![
+            JourneyEvent::SubjectRegistered {
+                subject_id: subject_b,
+                email: "bob@example.com".to_string(),
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_1".parse().unwrap(),
+                subject_id: subject_b,
+            },
+        ]);
 }
 
 // ── Passenger readiness ───────────────────────────────────────────────────────
@@ -388,20 +394,22 @@ fn flight_booking_passenger_details_ready_signal() {
                 suggested_actions: vec!["passenger_details".to_string()],
                 phase: Some("collecting_passengers".to_string()),
             },
-            // PII captured for each passenger (encrypted at rest).
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            // Subjects registered and bound to role paths.
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_a,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
             },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_1".to_string(),
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_0".parse().unwrap(),
+                subject_id: subject_a,
+            },
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_b,
-                name: "Bob Jones".to_string(),
                 email: "bob@example.com".to_string(),
-                phone: None,
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_1".parse().unwrap(),
+                subject_id: subject_b,
             },
         ])
         // Signal passenger readiness by setting passengerType for both via SetAttributes.
@@ -619,9 +627,8 @@ fn flight_booking_modify_search_criteria() {
 
 // ── Secret partitions — multi-subject demonstration ───────────────────────────
 
-/// Demonstrates that setting Secret person attributes (firstName, passportNumber)
-/// via `SetAttributes` produces one encrypted partition per subject.
-/// Requires prior `CapturePerson` so the subject lookup can resolve.
+/// Setting Secret person attributes via `SetAttributes` produces one encrypted
+/// partition per subject. Requires prior `RegisterAndBindSubject` events.
 #[test]
 fn flight_booking_set_person_secret_attributes() {
     let id = Uuid::new_v4();
@@ -644,19 +651,21 @@ fn flight_booking_set_person_secret_attributes() {
     JourneyTester::with(create_journey_services())
         .given(vec![
             JourneyEvent::Started { id },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_a,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
             },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_1".to_string(),
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_0".parse().unwrap(),
+                subject_id: subject_a,
+            },
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_b,
-                name: "Bob Jones".to_string(),
                 email: "bob@example.com".to_string(),
-                phone: None,
+            },
+            JourneyEvent::SubjectBound {
+                role_path: "/persons/passenger_1".parse().unwrap(),
+                subject_id: subject_b,
             },
         ])
         .when(JourneyCommand::SetAttributes {
@@ -678,12 +687,12 @@ fn flight_booking_set_person_secret_attributes() {
                 plaintext: BTreeMap::new(),
                 secret_partitions: vec![
                     SecretPartitionData {
-                        person_ref: "passenger_0".to_string(),
+                        role_path: "/persons/passenger_0".parse().unwrap(),
                         subject_id: subject_a,
                         changes: expected_secret_a,
                     },
                     SecretPartitionData {
-                        person_ref: "passenger_1".to_string(),
+                        role_path: "/persons/passenger_1".parse().unwrap(),
                         subject_id: subject_b,
                         changes: expected_secret_b,
                     },

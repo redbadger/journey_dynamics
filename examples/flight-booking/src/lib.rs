@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use journey_dynamics::domain::{
     attribute_schema::{AttributeSchemaConfig, NamespacePatternConfig},
     AttributeSchema, NamespacePattern,
@@ -40,62 +38,50 @@ impl TryFrom<&JourneyView> for FlightBookingSchema {
 /// - `persons/<ref>/firstName`, `lastName`, `dateOfBirth`, `passportNumber`,
 ///   `nationality` → `Secret` encrypted under `persons/<ref>`
 /// - `persons/<ref>/passengerType` → Plaintext
+///
+/// # Panics
+/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
 #[must_use]
 pub fn attribute_schema() -> AttributeSchema {
-    let secret_fields: BTreeSet<String> = [
-        "firstName",
-        "lastName",
-        "dateOfBirth",
-        "passportNumber",
-        "nationality",
-    ]
-    .iter()
-    .map(|s| (*s).to_string())
-    .collect();
-
-    let plaintext_fields: BTreeSet<String> = std::iter::once("passengerType")
-        .map(str::to_string)
-        .collect();
-
     AttributeSchema::new(std::collections::BTreeMap::new(), None)
         .with_plaintext_prefixes(
-            ["search", "searchResults", "booking"]
+            ["/search", "/searchResults", "/booking"]
                 .iter()
-                .map(|s| (*s).to_string())
+                .map(|s| s.parse().expect("valid JSON pointer"))
                 .collect(),
         )
         .with_namespace_patterns(vec![NamespacePattern {
-            namespace: "persons".to_string(),
-            secret_fields,
-            plaintext_fields,
+            prefix: "/persons"
+                .parse()
+                .expect("'/persons' is a valid JSON pointer"),
+            plaintext_suffixes: std::iter::once(
+                "/passengerType".parse().expect("valid JSON pointer"),
+            )
+            .collect(),
         }])
 }
 
 /// Serialised form of [`attribute_schema()`] suitable for writing to the JSON
 /// file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
+///
+/// # Panics
+/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
 #[must_use]
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
     AttributeSchemaConfig {
         permissive: false,
-        plaintext_prefixes: ["search", "searchResults", "booking"]
+        plaintext_prefixes: ["/search", "/searchResults", "/booking"]
             .iter()
-            .map(|s| (*s).to_string())
+            .map(|s| s.parse().expect("valid JSON pointer"))
             .collect(),
         namespace_patterns: vec![NamespacePatternConfig {
-            namespace: "persons".to_string(),
-            secret_fields: [
-                "firstName",
-                "lastName",
-                "dateOfBirth",
-                "passportNumber",
-                "nationality",
-            ]
-            .iter()
-            .map(|s| (*s).to_string())
+            prefix: "/persons"
+                .parse()
+                .expect("'/persons' is a valid JSON pointer"),
+            plaintext_suffixes: std::iter::once(
+                "/passengerType".parse().expect("valid JSON pointer"),
+            )
             .collect(),
-            plaintext_fields: std::iter::once("passengerType")
-                .map(str::to_string)
-                .collect(),
         }],
     }
 }

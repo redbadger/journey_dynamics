@@ -1,27 +1,32 @@
-//! Example demonstrating how to capture person data in a journey
+//! Example demonstrating how to register and bind a subject in a journey.
 //!
 //! This example shows:
 //! - Starting a journey
-//! - Capturing person information (name, email, phone) using the `CapturePerson` command
-//! - How person data is projected to the structured database table
+//! - Registering a data subject and binding them to a role path using
+//!   `RegisterAndBindSubject`
+//! - Setting person attributes with `SetAttributes`
 //!
 //! Run with: `cargo run -p journey_dynamics --example capture_person`
 
-use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
-use journey_dynamics::SimpleLoggingQuery;
-use journey_dynamics::domain::commands::JourneyCommand;
-use journey_dynamics::domain::{
-    AttributeSchema,
-    journey::{Journey, JourneyServices},
-};
-use journey_dynamics::services::decision_engine::SimpleDecisionEngine;
-use journey_dynamics::services::schema_validator::NoOpValidator;
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+use cqrs_es::{CqrsFramework, EventStore, mem_store::MemStore};
+use journey_dynamics::{
+    SimpleLoggingQuery,
+    domain::{
+        AttributeSchema,
+        commands::JourneyCommand,
+        journey::{Journey, JourneyServices},
+    },
+    services::{decision_engine::SimpleDecisionEngine, schema_validator::NoOpValidator},
+};
+use serde_json::json;
 use uuid::Uuid;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== Journey Person Capture Example ===\n");
+    println!("=== Journey Subject Registration Example ===\n");
 
     // Setup event store and decision engine
     let event_store = MemStore::<Journey>::default();
@@ -39,7 +44,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let journey_id = Uuid::new_v4();
     println!("Starting journey: {journey_id}");
 
-    // Start the journey
     cqrs.execute(
         &journey_id.to_string(),
         JourneyCommand::Start { id: journey_id },
@@ -48,69 +52,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Journey started successfully\n");
 
-    // Capture person data with all fields
-    println!("Capturing person data with phone number...");
+    // Register the lead booker and bind them to the persons/lead_booker role.
+    let lead_booker_id = Uuid::new_v4();
+    println!("Registering lead booker...");
     cqrs.execute(
         &journey_id.to_string(),
-        JourneyCommand::CapturePerson {
-            person_ref: "lead_booker".to_string(),
-            subject_id: Uuid::new_v4(),
-            name: "Alice Johnson".to_string(),
+        JourneyCommand::RegisterAndBindSubject {
+            role_path: "/persons/lead_booker".parse()?,
+            subject_id: lead_booker_id,
             email: "alice.johnson@example.com".to_string(),
-            phone: Some("+1-555-0123".to_string()),
         },
     )
     .await?;
 
-    println!("Person data captured: Alice Johnson (alice.johnson@example.com, +1-555-0123)\n");
+    println!("Lead booker registered: alice.johnson@example.com\n");
 
-    // Update person data (optional phone)
-    println!("Updating person data without phone number...");
+    // Set the lead booker's attributes via SetAttributes.
+    let mut changes = BTreeMap::new();
+    changes.insert("/persons/lead_booker/firstName".parse()?, json!("Alice"));
+    changes.insert("/persons/lead_booker/lastName".parse()?, json!("Johnson"));
+    changes.insert("/persons/lead_booker/phone".parse()?, json!("+1-555-0123"));
+
+    println!("Setting lead booker attributes...");
     cqrs.execute(
         &journey_id.to_string(),
-        JourneyCommand::CapturePerson {
-            person_ref: "lead_booker".to_string(),
-            subject_id: Uuid::new_v4(),
-            name: "Bob Smith".to_string(),
+        JourneyCommand::SetAttributes { changes },
+    )
+    .await?;
+
+    println!("Attributes set for Alice Johnson\n");
+
+    // Register a second passenger on the same journey.
+    let passenger_id = Uuid::new_v4();
+    println!("Registering passenger_0...");
+    cqrs.execute(
+        &journey_id.to_string(),
+        JourneyCommand::RegisterAndBindSubject {
+            role_path: "/persons/passenger_0".parse()?,
+            subject_id: passenger_id,
             email: "bob.smith@example.com".to_string(),
-            phone: None,
         },
     )
     .await?;
 
-    println!("Person data updated: Bob Smith (bob.smith@example.com, no phone)\n");
+    println!("passenger_0 registered: bob.smith@example.com\n");
 
-    // Create another journey with different person
-    let journey_id_2 = Uuid::new_v4();
-    println!("Starting second journey: {journey_id_2}");
-
-    cqrs.execute(
-        &journey_id_2.to_string(),
-        JourneyCommand::Start { id: journey_id_2 },
-    )
-    .await?;
-
-    cqrs.execute(
-        &journey_id_2.to_string(),
-        JourneyCommand::CapturePerson {
-            person_ref: "lead_booker".to_string(),
-            subject_id: Uuid::new_v4(),
-            name: "Carol Williams".to_string(),
-            email: "carol.williams@example.com".to_string(),
-            phone: Some("+1-555-9876".to_string()),
-        },
-    )
-    .await?;
-
-    println!("Second journey person captured: Carol Williams\n");
-
-    // Complete first journey
+    // Complete the journey.
     cqrs.execute(&journey_id.to_string(), JourneyCommand::Complete)
         .await?;
 
-    println!("First journey completed\n");
+    println!("Journey completed\n");
 
-    // Load and display events for first journey
+    // Display the event history.
     let events = event_store.load_events(&journey_id.to_string()).await?;
     println!("=== Journey {journey_id} Event History ===");
     for (i, event) in events.iter().enumerate() {
@@ -118,11 +111,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n=== Example Complete ===");
-    println!("\nNote: In a real application with a database:");
-    println!("- Person data would be stored in the 'journey_person' table");
-    println!("- You could query journeys by email using find_by_email()");
-    println!("- The person table would have indexes on journey_id and email");
-    println!("- Data is structured with proper types (not JSON blobs)");
 
     Ok(())
 }

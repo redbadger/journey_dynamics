@@ -11,7 +11,7 @@ pub mod events;
 pub mod journey;
 pub mod json_path;
 pub use attribute_schema::{
-    AttributeSchema, AttributeSchemaConfig, Classification, NamespacePattern,
+    AttributeEntry, AttributeSchema, AttributeSchemaConfig, Classification, NamespacePattern,
     NamespacePatternConfig, PiiClass, classify_changes,
 };
 pub use json_path::{assign_all, flatten};

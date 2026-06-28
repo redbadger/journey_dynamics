@@ -24,6 +24,29 @@ pub enum PiiClass {
     Secret { subject: PointerBuf },
 }
 
+// ── AttributeEntry ────────────────────────────────────────────────────────────
+
+/// Metadata associated with a single known attribute path.
+///
+/// Currently carries only the privacy/encryption classification, but is
+/// designed to hold additional per-attribute information in the future
+/// (e.g. field type, validation rules, display name).
+///
+/// Obtain one via [`AttributeSchema::entry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeEntry {
+    /// How the value at this path should be handled for privacy / encryption.
+    pub pii_class: PiiClass,
+}
+
+impl AttributeEntry {
+    /// Construct an entry with the given encryption classification.
+    #[must_use]
+    pub const fn new(pii_class: PiiClass) -> Self {
+        Self { pii_class }
+    }
+}
+
 // ── NamespacePattern ──────────────────────────────────────────────────────────
 
 /// A prefix-based classification rule for dynamic three-segment paths of the
@@ -39,17 +62,21 @@ pub enum PiiClass {
 /// to permissive mode if the schema is permissive).
 #[derive(Debug, Clone)]
 pub struct NamespacePattern {
-    /// First path segment, e.g. `"persons"`.
-    pub namespace: String,
-    /// Leaf field names classified as `Secret` under `<namespace>/<ref>`.
-    pub secret_fields: BTreeSet<String>,
-    /// Leaf field names classified as `Plaintext`.
-    pub plaintext_fields: BTreeSet<String>,
+    /// Path prefix — one or more segments. The segment immediately after
+    /// this prefix in any matching path is the role ref.
+    ///
+    /// e.g. `"/pax"` matches `/pax/{ref}/…`
+    ///      `"/flights/outbound/pax"` matches `/flights/outbound/pax/{ref}/…`
+    pub prefix: PointerBuf,
+    /// Suffixes (relative to `prefix/{ref}`) that are exempt from encryption,
+    /// stored as JSON Pointers with a leading `/` (e.g. `/passengerType`,
+    /// `/address/postalCode`). Everything else under the namespace is Secret by default.
+    pub plaintext_suffixes: BTreeSet<PointerBuf>,
 }
 
 // ── AttributeSchema ───────────────────────────────────────────────────────────
 
-/// Schema that maps known attribute paths to their [`PiiClass`].
+/// Schema that maps known attribute paths to their [`AttributeEntry`].
 ///
 /// An `AttributeSchema` can be constructed in two modes:
 ///
@@ -62,29 +89,32 @@ pub struct NamespacePattern {
 /// Namespace patterns (see [`NamespacePattern`]) can be layered on top of
 /// either mode via [`with_namespace_patterns`](Self::with_namespace_patterns).
 pub struct AttributeSchema {
-    paths: BTreeMap<PointerBuf, PiiClass>,
+    paths: BTreeMap<PointerBuf, AttributeEntry>,
     json_schema: Option<Value>,
     /// When `true`, [`classify`](Self::classify) returns `Some(Plaintext)` for
     /// any path not matched by an exact entry, namespace pattern, or prefix.
     permissive: bool,
     /// Prefix-based rules applied when the exact path lookup misses.
     namespace_patterns: Vec<NamespacePattern>,
-    /// Top-level path segments whose subtrees are unconditionally `Plaintext`.
+    /// Path prefixes whose entire subtrees are unconditionally `Plaintext`.
     /// Checked after namespace patterns and before the permissive fallback.
-    /// Example: `["search", "booking"]` classifies `search/origin`,
-    /// `booking/pricing/totalPrice`, etc. as plaintext without listing every
-    /// individual path.
-    plaintext_prefixes: Vec<String>,
+    /// Matching is at segment boundaries, so `/booking` covers `/booking/origin`
+    /// and `/booking/pricing/totalPrice` but not `/bookingExtra/…`.
+    /// Multi-segment prefixes are also supported (e.g. `/flights/outbound`).
+    plaintext_prefixes: Vec<PointerBuf>,
 }
 
 /// A static `Plaintext` sentinel returned by reference in permissive/plaintext mode.
 static PLAINTEXT: PiiClass = PiiClass::Plaintext;
 
 impl AttributeSchema {
-    /// Construct a schema from an explicit path-to-class map and an optional
+    /// Construct a schema from an explicit path-to-entry map and an optional
     /// JSON Schema used for structural validation.
     #[must_use]
-    pub const fn new(paths: BTreeMap<PointerBuf, PiiClass>, json_schema: Option<Value>) -> Self {
+    pub const fn new(
+        paths: BTreeMap<PointerBuf, AttributeEntry>,
+        json_schema: Option<Value>,
+    ) -> Self {
         Self {
             paths,
             json_schema,
@@ -120,13 +150,15 @@ impl AttributeSchema {
         self
     }
 
-    /// Attach top-level plaintext-prefix rules to this schema.
+    /// Attach plaintext-prefix rules to this schema.
     ///
-    /// Any path whose first segment appears in `prefixes` is classified as
-    /// [`PiiClass::Plaintext`], regardless of depth. Checked after namespace
-    /// patterns and before the permissive fallback.
+    /// Any path for which `prefixes` contains a prefix (matched at a segment
+    /// boundary) is classified as [`PiiClass::Plaintext`]. Checked after
+    /// namespace patterns and before the permissive fallback.
+    /// Example: `["/search", "/booking"]` classifies `/search/origin`,
+    /// `/booking/pricing/totalPrice`, etc. as plaintext.
     #[must_use]
-    pub fn with_plaintext_prefixes(mut self, prefixes: Vec<String>) -> Self {
+    pub fn with_plaintext_prefixes(mut self, prefixes: Vec<PointerBuf>) -> Self {
         self.plaintext_prefixes = prefixes;
         self
     }
@@ -135,7 +167,7 @@ impl AttributeSchema {
     ///
     /// Resolution order:
     /// 1. Exact match in `paths`.
-    /// 2. Namespace pattern match for three-segment paths (`namespace/ref/field`).
+    /// 2. Namespace pattern match (matches `prefix/{ref}/suffix`).
     /// 3. Plaintext prefix — `Some(Plaintext)` if the first segment is listed.
     /// 4. Permissive fallback — `Some(Plaintext)` if the schema is permissive.
     /// 5. `None` — path is unknown.
@@ -146,35 +178,55 @@ impl AttributeSchema {
     #[must_use]
     pub fn classify<'a>(&'a self, path: &PointerBuf) -> Option<Cow<'a, PiiClass>> {
         // 1. Exact match.
-        if let Some(cls) = self.paths.get(path) {
-            return Some(Cow::Borrowed(cls));
+        if let Some(entry) = self.paths.get(path) {
+            return Some(Cow::Borrowed(&entry.pii_class));
         }
 
-        // 2. Namespace pattern: only applies to exactly three segments.
-        let segs: Vec<String> = path.tokens().map(|t| t.decoded().to_string()).collect();
-        if segs.len() == 3 {
-            for pattern in &self.namespace_patterns {
-                if segs[0] != pattern.namespace {
+        // 2. Namespace pattern (matches `prefix/{ref}/suffix...`).
+        for pattern in &self.namespace_patterns {
+            let path_str = path.as_str();
+            let prefix_str = pattern.prefix.as_str();
+
+            // The path must begin with the prefix followed by a `/` so that
+            // we match on a full segment boundary (not e.g. `/personsX`).
+            let Some(remaining) = path_str.strip_prefix(prefix_str) else {
+                continue;
+            };
+            let Some(remaining) = remaining.strip_prefix('/') else {
+                continue;
+            };
+
+            // The next segment is the role ref.
+            if let Some(first_slash) = remaining.find('/') {
+                let ref_part = &remaining[..first_slash];
+                let suffix = &remaining[first_slash + 1..];
+
+                // If the suffix is empty, it's not a field, so it doesn't match this pattern.
+                if suffix.is_empty() {
                     continue;
                 }
-                let field = segs[2].as_str();
-                if pattern.plaintext_fields.contains(field) {
+
+                // Plaintext-exempt suffixes pass through; everything else is Secret.
+                // Form the suffix as a JSON Pointer ("/field" or "/nested/field")
+                // so it can be looked up in the BTreeSet<PointerBuf>.
+                if let Ok(suffix_ptr) = PointerBuf::parse(&remaining[first_slash..])
+                    && pattern.plaintext_suffixes.contains(&suffix_ptr)
+                {
                     return Some(Cow::Borrowed(&PLAINTEXT));
                 }
-                if pattern.secret_fields.contains(field) {
-                    // Build subject pointer dynamically: /namespace/ref
-                    let subject = PointerBuf::from_tokens([&segs[0], &segs[1]]);
+                // Build the subject pointer dynamically: `prefix/{ref}`.
+                let subject_str = format!("{prefix_str}/{ref_part}");
+                if let Ok(subject) = PointerBuf::parse(&subject_str) {
                     return Some(Cow::Owned(PiiClass::Secret { subject }));
                 }
             }
         }
 
         // 3. Plaintext prefix.
-        if let Some(first) = segs.first()
-            && self
-                .plaintext_prefixes
-                .iter()
-                .any(|p| p.as_str() == first.as_str())
+        if self
+            .plaintext_prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
         {
             return Some(Cow::Borrowed(&PLAINTEXT));
         }
@@ -191,6 +243,21 @@ impl AttributeSchema {
     #[must_use]
     pub const fn json_schema(&self) -> Option<&Value> {
         self.json_schema.as_ref()
+    }
+
+    /// Returns the full [`AttributeEntry`] for an explicitly registered path,
+    /// or `None` if the path is not in the exact-match map.
+    ///
+    /// Unlike [`classify`](Self::classify), this does not consult namespace
+    /// patterns, plaintext prefixes, or the permissive fallback.
+    #[must_use]
+    pub fn entry(&self, path: &PointerBuf) -> Option<&AttributeEntry> {
+        self.paths.get(path)
+    }
+
+    /// Iterates over all explicitly registered paths and their [`AttributeEntry`].
+    pub fn entries(&self) -> impl Iterator<Item = (&PointerBuf, &AttributeEntry)> {
+        self.paths.iter()
     }
 
     /// Iterates over all explicitly registered paths.
@@ -224,24 +291,110 @@ pub struct AttributeSchemaConfig {
     /// prefix rules are treated as `Plaintext` (permissive mode).
     #[serde(default)]
     pub permissive: bool,
-    /// Top-level path segments whose entire subtrees are `Plaintext`.
-    /// e.g. `["search", "booking"]` covers `search/origin`,
-    /// `booking/pricing/totalPrice`, etc.
-    #[serde(default)]
-    pub plaintext_prefixes: Vec<String>,
+    /// Path prefixes whose entire subtrees are `Plaintext`, as JSON Pointers.
+    /// e.g. `["/search", "/booking"]` covers `/search/origin`,
+    /// `/booking/pricing/totalPrice`, etc. Bare segment names without a
+    /// leading `/` (e.g. `"search"`) are also accepted and normalised.
+    #[serde(default, deserialize_with = "deserialize_plaintext_prefix_pointers")]
+    pub plaintext_prefixes: Vec<PointerBuf>,
     /// Dynamic namespace-based classification rules.
     #[serde(default)]
     pub namespace_patterns: Vec<NamespacePatternConfig>,
 }
 
 /// JSON-serialisable form of [`NamespacePattern`].
+///
+/// # Backward compatibility
+/// The old format used `namespace` (single segment string) and split fields
+/// into `secret_fields` / `plaintext_fields`.  Existing configs are still
+/// accepted via serde aliases:
+/// - `namespace` is an alias for `prefix`
+/// - `plaintext_fields` is an alias for `plaintext_suffixes`
+/// - `secret_fields` is silently ignored on read (those fields remain secret
+///   under the new default-secret rule)
+///
+/// The `prefix` (and its `namespace` alias) accepts both a bare namespace
+/// string (e.g. `"persons"`, the historical format) and a leading-slash JSON
+/// pointer (e.g. `"/persons"`).  A missing leading `/` is added on read so the
+/// value is always a valid [`PointerBuf`] internally.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamespacePatternConfig {
-    pub namespace: String,
-    #[serde(default)]
-    pub secret_fields: BTreeSet<String>,
-    #[serde(default)]
-    pub plaintext_fields: BTreeSet<String>,
+    /// Path prefix — one or more segments. The segment immediately after
+    /// this prefix in any matching path is the role ref.
+    /// Accepts `"namespace"` as an alias for backward compatibility.
+    #[serde(alias = "namespace", deserialize_with = "deserialize_prefix_pointer")]
+    pub prefix: PointerBuf,
+    /// Suffixes (relative to `prefix/{ref}`) that are exempt from encryption,
+    /// as JSON Pointers with a leading `/` (e.g. `"/passengerType"`,
+    /// `"/address/postalCode"`). Bare names without a leading `/` are also
+    /// accepted and normalised. Everything else under the namespace is Secret
+    /// by default. Accepts `"plaintext_fields"` as an alias for backward
+    /// compatibility.
+    #[serde(
+        default,
+        alias = "plaintext_fields",
+        deserialize_with = "deserialize_suffix_pointers"
+    )]
+    pub plaintext_suffixes: BTreeSet<PointerBuf>,
+}
+
+/// Deserialize a namespace `prefix` from either a bare namespace string
+/// (e.g. `"persons"`) or a leading-slash JSON pointer (e.g. `"/persons"`),
+/// normalising the result to a valid [`PointerBuf`].
+fn deserialize_prefix_pointer<'de, D>(deserializer: D) -> Result<PointerBuf, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = String::deserialize(deserializer)?;
+    let normalized = if raw.starts_with('/') {
+        raw
+    } else {
+        format!("/{raw}")
+    };
+    PointerBuf::parse(&normalized).map_err(serde::de::Error::custom)
+}
+
+/// Deserialize `plaintext_prefixes` from a list of strings, accepting both
+/// bare segment names (e.g. `"search"`) and leading-slash JSON pointers
+/// (e.g. `"/search"`), normalising each to a valid [`PointerBuf`].
+fn deserialize_plaintext_prefix_pointers<'de, D>(
+    deserializer: D,
+) -> Result<Vec<PointerBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Vec::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|raw| {
+            let normalized = if raw.starts_with('/') {
+                raw
+            } else {
+                format!("/{raw}")
+            };
+            PointerBuf::parse(&normalized).map_err(serde::de::Error::custom)
+        })
+        .collect()
+}
+
+/// Deserialize `plaintext_suffixes` from a list of strings, accepting both
+/// bare field names (e.g. `"passengerType"`, `"address/postalCode"`) and
+/// leading-slash JSON pointers (e.g. `"/passengerType"`), normalising each
+/// by prepending `/` when absent.
+fn deserialize_suffix_pointers<'de, D>(deserializer: D) -> Result<BTreeSet<PointerBuf>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    BTreeSet::<String>::deserialize(deserializer)?
+        .into_iter()
+        .map(|raw| {
+            let normalized = if raw.starts_with('/') {
+                raw
+            } else {
+                format!("/{raw}")
+            };
+            PointerBuf::parse(&normalized).map_err(serde::de::Error::custom)
+        })
+        .collect()
 }
 
 impl From<AttributeSchemaConfig> for AttributeSchema {
@@ -257,9 +410,8 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
                     .namespace_patterns
                     .into_iter()
                     .map(|p| NamespacePattern {
-                        namespace: p.namespace,
-                        secret_fields: p.secret_fields,
-                        plaintext_fields: p.plaintext_fields,
+                        prefix: p.prefix,
+                        plaintext_suffixes: p.plaintext_suffixes,
                     })
                     .collect(),
             )
@@ -274,9 +426,19 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
 pub struct Classification {
     /// Changes that may be stored in plaintext.
     pub plaintext: BTreeMap<PointerBuf, Value>,
-    /// Changes grouped by subject UUID — each group must be encrypted under
-    /// that subject's DEK.
-    pub secret_by_subject: BTreeMap<Uuid, BTreeMap<PointerBuf, Value>>,
+    /// Changes grouped by *role path* (e.g. `"/persons/passenger_0"`).
+    ///
+    /// The key is the `subject` `PointerBuf` produced by `PiiClass::Secret`
+    /// — one entry per distinct role path, not per subject UUID.  The tuple
+    /// value carries `(subject_uuid, changes)`: the UUID is needed by the
+    /// encryption layer to look up the DEK, while the role path is used as the
+    /// crypto label (AAD) so that the partition identity is meaningful on the
+    /// read path.
+    ///
+    /// Two entries may share the same UUID when a subject occupies multiple
+    /// roles; the crypto layer must handle encrypting them under the same key
+    /// with different labels.
+    pub secret_by_subject: BTreeMap<PointerBuf, (Uuid, BTreeMap<PointerBuf, Value>)>,
     /// Paths that are neither in the schema nor handled by permissive mode.
     /// Also includes secret paths whose subject UUID could not be resolved by
     /// the caller-supplied lookup.  The caller decides how to react (typically
@@ -295,7 +457,8 @@ pub fn classify_changes(
     subject_lookup: impl Fn(&PointerBuf) -> Option<Uuid>,
 ) -> Classification {
     let mut plaintext: BTreeMap<PointerBuf, Value> = BTreeMap::new();
-    let mut secret_by_subject: BTreeMap<Uuid, BTreeMap<PointerBuf, Value>> = BTreeMap::new();
+    let mut secret_by_subject: BTreeMap<PointerBuf, (Uuid, BTreeMap<PointerBuf, Value>)> =
+        BTreeMap::new();
     let mut unknown: Vec<PointerBuf> = Vec::new();
 
     for (path, value) in changes {
@@ -312,10 +475,12 @@ pub fn classify_changes(
                         unknown.push(path.clone());
                     }
                     Some(uuid) => {
-                        secret_by_subject
-                            .entry(uuid)
-                            .or_default()
-                            .insert(path.clone(), value.clone());
+                        // Key by role path (subject PointerBuf); carry UUID
+                        // as first tuple element for the encryption layer.
+                        let (_, bucket) = secret_by_subject
+                            .entry(subject.clone())
+                            .or_insert_with(|| (uuid, BTreeMap::new()));
+                        bucket.insert(path.clone(), value.clone());
                     }
                 },
             },
@@ -351,19 +516,25 @@ mod tests {
 
     fn simple_schema() -> AttributeSchema {
         let mut paths = BTreeMap::new();
-        paths.insert(path("/search/origin"), PiiClass::Plaintext);
-        paths.insert(path("/search/destination"), PiiClass::Plaintext);
+        paths.insert(
+            path("/search/origin"),
+            AttributeEntry::new(PiiClass::Plaintext),
+        );
+        paths.insert(
+            path("/search/destination"),
+            AttributeEntry::new(PiiClass::Plaintext),
+        );
         paths.insert(
             path("/persons/0/passport"),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: path("/persons/0"),
-            },
+            }),
         );
         paths.insert(
             path("/persons/1/passport"),
-            PiiClass::Secret {
+            AttributeEntry::new(PiiClass::Secret {
                 subject: path("/persons/1"),
-            },
+            }),
         );
         AttributeSchema::new(paths, None)
     }
@@ -407,8 +578,9 @@ mod tests {
         assert_eq!(result.plaintext.len(), 1);
         assert_eq!(result.secret_by_subject.len(), 1);
         assert!(result.unknown.is_empty());
-        let slot = result.secret_by_subject.get(&subject_a()).unwrap();
-        assert_eq!(slot[&path("/persons/0/passport")], json!("AB123456"));
+        let (uuid, changes) = result.secret_by_subject.get(&path("/persons/0")).unwrap();
+        assert_eq!(*uuid, subject_a());
+        assert_eq!(changes[&path("/persons/0/passport")], json!("AB123456"));
     }
 
     // ── two subjects in one batch ─────────────────────────────────────────
@@ -425,8 +597,12 @@ mod tests {
         assert!(result.plaintext.is_empty());
         assert_eq!(result.secret_by_subject.len(), 2);
         assert!(result.unknown.is_empty());
-        assert!(result.secret_by_subject.contains_key(&subject_a()));
-        assert!(result.secret_by_subject.contains_key(&subject_b()));
+        // Keyed by role path, not UUID.
+        assert!(result.secret_by_subject.contains_key(&path("/persons/0")));
+        assert!(result.secret_by_subject.contains_key(&path("/persons/1")));
+        // UUIDs are carried in the tuple.
+        assert_eq!(result.secret_by_subject[&path("/persons/0")].0, subject_a());
+        assert_eq!(result.secret_by_subject[&path("/persons/1")].0, subject_b());
     }
 
     // ── unknown path ──────────────────────────────────────────────────────
@@ -480,14 +656,8 @@ mod tests {
 
     fn persons_namespace_schema() -> AttributeSchema {
         let pattern = NamespacePattern {
-            namespace: "persons".to_string(),
-            secret_fields: ["firstName", "lastName", "passportNumber"]
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-            plaintext_fields: std::iter::once("passengerType")
-                .map(str::to_string)
-                .collect(),
+            prefix: "/persons".parse().unwrap(),
+            plaintext_suffixes: std::iter::once(path("/passengerType")).collect(),
         };
         AttributeSchema::permissive().with_namespace_patterns(vec![pattern])
     }
@@ -518,12 +688,14 @@ mod tests {
     }
 
     #[test]
-    fn namespace_pattern_unknown_field_falls_through_to_permissive() {
+    fn namespace_pattern_unknown_field_is_secret_by_default() {
         let schema = persons_namespace_schema();
-        // "role" is in neither secret_fields nor plaintext_fields,
-        // but the schema is permissive so it falls through to Plaintext.
+        // "role" is not in plaintext_suffixes, so the new "secret by default" rule applies.
         let result = schema.classify(&path("/persons/passenger_0/role"));
-        assert!(matches!(result.as_deref(), Some(PiiClass::Plaintext)));
+        assert!(matches!(
+            result.as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "/persons/passenger_0"
+        ));
     }
 
     #[test]
@@ -541,7 +713,11 @@ mod tests {
             json!("adult")
         );
         assert_eq!(result.secret_by_subject.len(), 1);
-        let slot = result.secret_by_subject.get(&subject_a()).unwrap();
+        let (uuid, slot) = result
+            .secret_by_subject
+            .get(&path("/persons/passenger_0"))
+            .unwrap();
+        assert_eq!(*uuid, subject_a());
         assert_eq!(
             slot[&path("/persons/passenger_0/firstName")],
             json!("Alice")
@@ -569,26 +745,195 @@ mod tests {
         assert!(result.unknown.is_empty());
     }
 
+    // ── classification precedence ──────────────────────────────────────────
+
+    #[test]
+    fn namespace_pattern_beats_plaintext_prefix() {
+        // The critical rule from the design doc: a namespace pattern (step 2)
+        // is evaluated before a plaintext prefix (step 3), so a secret field
+        // inside an otherwise-plaintext subtree is still encrypted.
+        //
+        // Schema: `booking` is a plaintext prefix, but
+        //         `booking/passengers` is a namespace pattern.
+        let schema = AttributeSchema::new(BTreeMap::new(), None)
+            .with_plaintext_prefixes(vec![path("/booking")])
+            .with_namespace_patterns(vec![NamespacePattern {
+                prefix: "/booking/passengers".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // A plain booking field → Plaintext (step 3).
+        assert!(matches!(
+            schema.classify(&path("/booking/origin")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // A passenger secret field → Secret (step 2 wins over step 3).
+        assert!(matches!(
+            schema
+                .classify(&path("/booking/passengers/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject })
+                if subject.as_str() == "/booking/passengers/alice-ref"
+        ));
+    }
+
+    #[test]
+    fn exact_entry_overrides_namespace_pattern_default() {
+        // An exact path entry (step 1) must override a namespace pattern's
+        // default-secret classification (step 2).
+        let mut paths = BTreeMap::new();
+        paths.insert(
+            path("/persons/0/role"),
+            AttributeEntry::new(PiiClass::Plaintext), // explicit one-off exemption
+        );
+        let schema =
+            AttributeSchema::new(paths, None).with_namespace_patterns(vec![NamespacePattern {
+                prefix: "/persons".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // The exact entry wins — Plaintext, not Secret.
+        assert!(matches!(
+            schema.classify(&path("/persons/0/role")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // Other fields still follow the namespace pattern → Secret.
+        assert!(matches!(
+            schema.classify(&path("/persons/0/firstName")).as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "/persons/0"
+        ));
+    }
+
+    #[test]
+    fn path_without_attribute_segment_falls_through() {
+        // `prefix/ref` with no attribute segment must not match a namespace
+        // pattern and should fall through to the next rule.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "/pax".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // `pax/alice-ref` — no attribute segment — falls through to permissive.
+        assert!(matches!(
+            schema.classify(&path("/pax/alice-ref")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // `pax` alone — too short — falls through to permissive.
+        assert!(matches!(
+            schema.classify(&path("/pax")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
+    #[test]
+    fn multi_segment_suffix_is_classified_as_secret() {
+        // A deep field like `pax/alice-ref/address/line1` has a multi-segment
+        // suffix (`address/line1`); it should still be classified as Secret
+        // unless that exact suffix is in plaintext_suffixes.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "/pax".parse().unwrap(),
+                plaintext_suffixes: [path("/address/postalCode")].into(),
+            }]);
+
+        // Multi-segment suffix not in plaintext_suffixes → Secret.
+        assert!(matches!(
+            schema
+                .classify(&path("/pax/alice-ref/address/line1"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "/pax/alice-ref"
+        ));
+
+        // Multi-segment suffix that IS in plaintext_suffixes → Plaintext.
+        assert!(matches!(
+            schema
+                .classify(&path("/pax/alice-ref/address/postalCode"))
+                .as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
+    #[test]
+    fn multi_segment_prefix_pattern_matches_correctly() {
+        // A namespace pattern with a multi-segment prefix such as
+        // `flights/outbound/pax` should match paths like
+        // `flights/outbound/pax/{ref}/{field}` but NOT shorter paths.
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: "/flights/outbound/pax".parse().unwrap(),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+
+        // Correct depth → Secret.
+        assert!(matches!(
+            schema
+                .classify(&path("/flights/outbound/pax/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Secret { subject })
+                if subject.as_str() == "/flights/outbound/pax/alice-ref"
+        ));
+
+        // A different top-level namespace → falls through to permissive.
+        assert!(matches!(
+            schema
+                .classify(&path("/flights/inbound/pax/alice-ref/passportNumber"))
+                .as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+
+        // Path stops at the prefix itself — too short → falls through.
+        assert!(matches!(
+            schema.classify(&path("/flights/outbound/pax")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
     #[test]
     fn attribute_schema_config_round_trips_via_json() {
         let config = AttributeSchemaConfig {
             permissive: true,
-            plaintext_prefixes: vec!["search".to_string()],
+            plaintext_prefixes: vec![path("/search")],
             namespace_patterns: vec![NamespacePatternConfig {
-                namespace: "persons".to_string(),
-                secret_fields: ["firstName", "lastName"]
-                    .iter()
-                    .map(|s| (*s).to_string())
-                    .collect(),
-                plaintext_fields: std::iter::once("passengerType")
-                    .map(str::to_string)
-                    .collect(),
+                prefix: "/persons".parse().unwrap(),
+                plaintext_suffixes: std::iter::once(path("/passengerType")).collect(),
             }],
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: AttributeSchemaConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.permissive, config.permissive);
         assert_eq!(decoded.namespace_patterns.len(), 1);
-        assert_eq!(decoded.namespace_patterns[0].namespace, "persons");
+        assert_eq!(
+            decoded.namespace_patterns[0].prefix,
+            config.namespace_patterns[0].prefix
+        );
+    }
+
+    #[test]
+    fn old_namespace_pattern_config_format_deserialises() {
+        // Configs written before the NamespacePattern refactor used `namespace`,
+        // `secret_fields`, and `plaintext_fields`.  They must still parse.
+        let old_json = r#"{
+            "permissive": true,
+            "namespace_patterns": [{
+                "namespace": "persons",
+                "secret_fields": ["firstName", "lastName"],
+                "plaintext_fields": ["passengerType"]
+            }]
+        }"#;
+        let config: AttributeSchemaConfig = serde_json::from_str(old_json).unwrap();
+        assert_eq!(config.namespace_patterns.len(), 1);
+        // `namespace` aliased to `prefix`, normalised to a leading-slash pointer
+        assert_eq!(config.namespace_patterns[0].prefix.as_str(), "/persons");
+        // `plaintext_fields` aliased to `plaintext_suffixes`
+        assert!(
+            config.namespace_patterns[0]
+                .plaintext_suffixes
+                .contains(&path("/passengerType"))
+        );
+        // `secret_fields` silently ignored — not stored anywhere
     }
 }
