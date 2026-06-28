@@ -11,6 +11,7 @@ cqrs-es-crypto = { path = "../cqrs-es-crypto", features = [
     "derive",
     "postgres",
 ] }
+es-capture = { path = "../es-capture" }
 axum = "0.8.9"
 chrono = "0.4.44"
 cqrs-es = "0.5.0"
