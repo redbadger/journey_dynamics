@@ -16,7 +16,8 @@ use std::collections::{BTreeMap, HashMap};
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
 use journey_dynamics::{
-    domain::events::JourneyEvent, queries::JourneyState,
+    domain::events::{JourneyEvent, SecretPartitionData},
+    queries::JourneyState,
     view_repository::StructuredJourneyViewRepository,
 };
 use jsonptr::PointerBuf;
@@ -163,7 +164,6 @@ async fn test_journey_started_event(ctx: &mut PostgresViewRepositoryContext) {
     assert_eq!(view.id, journey_id);
     assert_eq!(view.state, JourneyState::InProgress);
     assert_eq!(view.shared_data, json!({}));
-    assert!(view.current_step.is_none());
 }
 
 #[test_context(PostgresViewRepositoryContext)]
@@ -184,9 +184,12 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::Modified {
-                    step: "search".to_string(),
-                    data: json!({"origin": "LHR", "destination": "JFK"}),
+                payload: JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::from([
+                        ("/origin".parse().unwrap(), json!("LHR")),
+                        ("/destination".parse().unwrap(), json!("JFK")),
+                    ]),
+                    secret_partitions: vec![],
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -195,22 +198,13 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
                 sequence: 3,
                 payload: JourneyEvent::WorkflowEvaluated {
                     suggested_actions: vec!["passenger_details".to_string()],
-                    phase: None,
+                    phase: Some("passenger_details".to_string()),
                 },
                 metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 4,
-                payload: JourneyEvent::StepProgressed {
-                    from_step: None,
-                    to_step: "passenger_details".to_string(),
-                },
-                metadata: std::collections::HashMap::default(),
-            },
-            EventEnvelope {
-                aggregate_id: journey_id.to_string(),
-                sequence: 5,
                 payload: JourneyEvent::Completed,
                 metadata: std::collections::HashMap::default(),
             },
@@ -223,7 +217,6 @@ async fn test_journey_full_lifecycle(ctx: &mut PostgresViewRepositoryContext) {
     assert_eq!(view.state, JourneyState::Complete);
     assert_eq!(view.shared_data["origin"], json!("LHR"));
     assert_eq!(view.shared_data["destination"], json!("JFK"));
-    assert_eq!(view.current_step, Some("passenger_details".to_string()));
     assert!(view.latest_workflow_decision.is_some());
 }
 
@@ -280,6 +273,8 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
     let journey_id_1 = ctx.track_journey(Uuid::new_v4());
     let journey_id_2 = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
+    ctx.insert_subject_lookup(subject_id, "alice@example.com")
+        .await;
 
     repo.dispatch(
         &journey_id_1.to_string(),
@@ -304,12 +299,9 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
             EventEnvelope {
                 aggregate_id: journey_id_2.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: HashMap::default(),
             },
@@ -346,14 +338,16 @@ async fn test_load_all_returns_inserted_journeys_with_nested_data(
     );
 }
 
-// ── PersonCaptured ───────────────────────────────────────────────────────
+// ── SubjectBound person projection ─────────────────────────────────────────
 
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_person_captured_event(ctx: &mut PostgresViewRepositoryContext) {
+async fn test_subject_bound_creates_person(ctx: &mut PostgresViewRepositoryContext) {
     let repo = ctx.repo();
     let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
+    ctx.insert_subject_lookup(subject_id, "alice@example.com")
+        .await;
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -367,12 +361,9 @@ async fn test_person_captured_event(ctx: &mut PostgresViewRepositoryContext) {
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: Some("+44-7700-900000".to_string()),
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -387,20 +378,26 @@ async fn test_person_captured_event(ctx: &mut PostgresViewRepositoryContext) {
     assert_eq!(p.journey_id, journey_id);
     assert_eq!(p.person_ref, "passenger_0");
     assert_eq!(p.subject_id, subject_id);
-    assert_eq!(p.name.as_deref(), Some("Alice Smith"));
     assert_eq!(p.email.as_deref(), Some("alice@example.com"));
-    assert_eq!(p.phone.as_deref(), Some("+44-7700-900000"));
+    // name/phone are not populated by the path-keyed flow; per-person PII lives
+    // encrypted in shared_data, not in dedicated journey_person columns.
+    assert!(p.name.is_none());
+    assert!(p.phone.is_none());
     assert_eq!(p.details, json!({}));
     assert!(!p.forgotten);
 }
 
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_multiple_persons_captured(ctx: &mut PostgresViewRepositoryContext) {
+async fn test_multiple_persons_bound(ctx: &mut PostgresViewRepositoryContext) {
     let repo = ctx.repo();
     let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
+    ctx.insert_subject_lookup(subject_a, "alice@example.com")
+        .await;
+    ctx.insert_subject_lookup(subject_b, "bob@example.com")
+        .await;
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -414,24 +411,18 @@ async fn test_multiple_persons_captured(ctx: &mut PostgresViewRepositoryContext)
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id: subject_a,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 3,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_1".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_1".parse().unwrap(),
                     subject_id: subject_b,
-                    name: "Bob Jones".to_string(),
-                    email: "bob@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -448,13 +439,18 @@ async fn test_multiple_persons_captured(ctx: &mut PostgresViewRepositoryContext)
     assert_eq!(persons[1].subject_id, subject_b);
 }
 
+// ── AttributesSet mirrors secret changes into journey_person.details ────────
+
 #[test_context(PostgresViewRepositoryContext)]
 #[tokio::test]
-async fn test_person_captured_updates_identity_fields(ctx: &mut PostgresViewRepositoryContext) {
-    // A second PersonCaptured for the same person_ref must update, not insert.
+async fn test_attributes_set_mirrors_secret_changes_into_details(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
     let repo = ctx.repo();
     let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
+    ctx.insert_subject_lookup(subject_id, "alice@example.com")
+        .await;
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -468,92 +464,31 @@ async fn test_person_captured_updates_identity_fields(ctx: &mut PostgresViewRepo
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 3,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice J. Smith".to_string(),
-                    email: "alice.new@example.com".to_string(),
-                    phone: Some("+44-7700-900001".to_string()),
-                },
-                metadata: std::collections::HashMap::default(),
-            },
-        ],
-    )
-    .await;
-
-    let persons = repo.load_persons(&journey_id).await.unwrap();
-    assert_eq!(
-        persons.len(),
-        1,
-        "second PersonCaptured must update, not insert"
-    );
-    assert_eq!(persons[0].name.as_deref(), Some("Alice J. Smith"));
-    assert_eq!(persons[0].email.as_deref(), Some("alice.new@example.com"));
-    assert_eq!(persons[0].phone.as_deref(), Some("+44-7700-900001"));
-}
-
-// ── PersonDetailsUpdated ─────────────────────────────────────────────────
-
-#[test_context(PostgresViewRepositoryContext)]
-#[tokio::test]
-async fn test_person_details_updated(ctx: &mut PostgresViewRepositoryContext) {
-    let repo = ctx.repo();
-    let journey_id = ctx.track_journey(Uuid::new_v4());
-    let subject_id = Uuid::new_v4();
-
-    repo.dispatch(
-        &journey_id.to_string(),
-        &[
-            EventEnvelope {
-                aggregate_id: journey_id.to_string(),
-                sequence: 1,
-                payload: JourneyEvent::Started { id: journey_id },
-                metadata: std::collections::HashMap::default(),
-            },
-            EventEnvelope {
-                aggregate_id: journey_id.to_string(),
-                sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-                metadata: std::collections::HashMap::default(),
-            },
-            EventEnvelope {
-                aggregate_id: journey_id.to_string(),
-                sequence: 3,
-                payload: JourneyEvent::PersonDetailsUpdated {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    data: json!({
-                        "passportNumber": "GB123456789",
-                        "dateOfBirth":    "1990-05-15"
-                    }),
-                },
-                metadata: std::collections::HashMap::default(),
-            },
-            EventEnvelope {
-                aggregate_id: journey_id.to_string(),
-                sequence: 4,
-                payload: JourneyEvent::PersonDetailsUpdated {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    data: json!({ "nationality": "GB" }),
+                payload: JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::new(),
+                    secret_partitions: vec![SecretPartitionData {
+                        role_path: "/persons/passenger_0".parse().unwrap(),
+                        subject_id,
+                        changes: BTreeMap::from([
+                            (
+                                "/persons/passenger_0/passportNumber".parse().unwrap(),
+                                json!("GB123456789"),
+                            ),
+                            (
+                                "/persons/passenger_0/dateOfBirth".parse().unwrap(),
+                                json!("1990-05-15"),
+                            ),
+                        ]),
+                    }],
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -566,7 +501,6 @@ async fn test_person_details_updated(ctx: &mut PostgresViewRepositoryContext) {
     let p = &persons[0];
     assert_eq!(p.details["passportNumber"], json!("GB123456789"));
     assert_eq!(p.details["dateOfBirth"], json!("1990-05-15"));
-    assert_eq!(p.details["nationality"], json!("GB"));
 }
 
 // ── SubjectForgotten ─────────────────────────────────────────────────────
@@ -580,6 +514,10 @@ async fn test_subject_forgotten_only_affects_target_person(
     let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
+    ctx.insert_subject_lookup(subject_a, "alice@example.com")
+        .await;
+    ctx.insert_subject_lookup(subject_b, "bob@example.com")
+        .await;
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -593,33 +531,30 @@ async fn test_subject_forgotten_only_affects_target_person(
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::Modified {
-                    step: "search".to_string(),
-                    data: json!({"origin": "LHR", "destination": "JFK"}),
+                payload: JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::from([
+                        ("/origin".parse().unwrap(), json!("LHR")),
+                        ("/destination".parse().unwrap(), json!("JFK")),
+                    ]),
+                    secret_partitions: vec![],
                 },
                 metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 3,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id: subject_a,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 4,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_1".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_1".parse().unwrap(),
                     subject_id: subject_b,
-                    name: "Bob Jones".to_string(),
-                    email: "bob@example.com".to_string(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -648,9 +583,7 @@ async fn test_subject_forgotten_only_affects_target_person(
         .find(|p| p.person_ref == "passenger_0")
         .unwrap();
     assert!(pa.forgotten, "passenger_0 must be marked forgotten");
-    assert!(pa.name.is_none(), "name must be nulled");
     assert!(pa.email.is_none(), "email must be nulled");
-    assert!(pa.phone.is_none(), "phone must be nulled");
     assert_eq!(pa.details, json!({}), "details must be cleared");
 
     let pb = persons
@@ -658,7 +591,6 @@ async fn test_subject_forgotten_only_affects_target_person(
         .find(|p| p.person_ref == "passenger_1")
         .unwrap();
     assert!(!pb.forgotten, "passenger_1 must NOT be forgotten");
-    assert_eq!(pb.name.as_deref(), Some("Bob Jones"));
     assert_eq!(pb.email.as_deref(), Some("bob@example.com"));
 }
 
@@ -674,6 +606,8 @@ async fn test_find_by_email(ctx: &mut PostgresViewRepositoryContext) {
 
     // Two journeys, both containing the same email address.
     for journey_id in [journey_id_1, journey_id_2] {
+        let subject_id = Uuid::new_v4();
+        ctx.insert_subject_lookup(subject_id, &unique_email).await;
         repo.dispatch(
             &journey_id.to_string(),
             &[
@@ -686,12 +620,9 @@ async fn test_find_by_email(ctx: &mut PostgresViewRepositoryContext) {
                 EventEnvelope {
                     aggregate_id: journey_id.to_string(),
                     sequence: 2,
-                    payload: JourneyEvent::PersonCaptured {
-                        person_ref: "passenger_0".to_string(),
-                        subject_id: Uuid::new_v4(),
-                        name: "Alice Smith".to_string(),
-                        email: unique_email.clone(),
-                        phone: None,
+                    payload: JourneyEvent::SubjectBound {
+                        role_path: "/persons/passenger_0".parse().unwrap(),
+                        subject_id,
                     },
                     metadata: std::collections::HashMap::default(),
                 },
@@ -711,6 +642,7 @@ async fn test_find_by_email_excludes_forgotten_persons(ctx: &mut PostgresViewRep
     let journey_id = ctx.track_journey(Uuid::new_v4());
     let subject_id = Uuid::new_v4();
     let unique_email = format!("forgotten+{}@example.com", Uuid::new_v4());
+    ctx.insert_subject_lookup(subject_id, &unique_email).await;
 
     repo.dispatch(
         &journey_id.to_string(),
@@ -724,12 +656,9 @@ async fn test_find_by_email_excludes_forgotten_persons(ctx: &mut PostgresViewRep
             EventEnvelope {
                 aggregate_id: journey_id.to_string(),
                 sequence: 2,
-                payload: JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                payload: JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
                     subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: unique_email.clone(),
-                    phone: None,
                 },
                 metadata: std::collections::HashMap::default(),
             },
@@ -920,36 +849,6 @@ async fn test_delete_subject_lookup_does_not_affect_other_subjects(
 
 // ── find_journeys_by_subject ──────────────────────────────────────────────
 
-/// `PersonCaptured` path — existing index.
-#[test_context(PostgresViewRepositoryContext)]
-#[tokio::test]
-async fn test_find_journeys_by_subject_via_person_captured(
-    ctx: &mut PostgresViewRepositoryContext,
-) {
-    let repo = ctx.repo();
-    let aggregate_id = Uuid::new_v4().to_string();
-    let subject_id = Uuid::new_v4();
-
-    ctx.insert_event(
-        &aggregate_id,
-        1,
-        "PersonCaptured",
-        json!({
-            "PersonCaptured": {
-                "person_ref": "passenger_0",
-                "subject_id": subject_id.to_string(),
-                "name": "Alice Smith",
-                "email": "alice@example.com",
-                "phone": null
-            }
-        }),
-    )
-    .await;
-
-    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
-    assert_eq!(journeys, vec![aggregate_id]);
-}
-
 /// `AttributesSet` path — GIN index on `subjects` array (new in A8).
 ///
 /// The `subjects` array is written by the crypto layer alongside
@@ -986,54 +885,6 @@ async fn test_find_journeys_by_subject_via_attributes_set(ctx: &mut PostgresView
 
     let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
     assert_eq!(journeys, vec![aggregate_id]);
-}
-
-/// A journey with both `PersonCaptured` and `AttributesSet` for the same
-/// subject must appear exactly once (DISTINCT).
-#[test_context(PostgresViewRepositoryContext)]
-#[tokio::test]
-async fn test_find_journeys_by_subject_deduplicates_across_event_types(
-    ctx: &mut PostgresViewRepositoryContext,
-) {
-    let repo = ctx.repo();
-    let aggregate_id = Uuid::new_v4().to_string();
-    let subject_id = Uuid::new_v4();
-
-    ctx.insert_event(
-        &aggregate_id,
-        1,
-        "PersonCaptured",
-        json!({
-            "PersonCaptured": {
-                "person_ref": "passenger_0",
-                "subject_id": subject_id.to_string(),
-                "name": "Alice",
-                "email": "alice@example.com",
-                "phone": null
-            }
-        }),
-    )
-    .await;
-    ctx.insert_event(
-        &aggregate_id,
-        2,
-        "AttributesSet",
-        json!({
-            "AttributesSet": {
-                "plaintext": {},
-                "secret_partitions": [
-                    { "person_ref": "passenger_0", "subject_id": subject_id.to_string(), "changes": {} }
-                ],
-                "subjects": [subject_id.to_string()],
-                "encrypted_partitions": []
-            }
-        }),
-    )
-    .await;
-
-    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
-    assert_eq!(journeys.len(), 1, "same journey must appear only once");
-    assert_eq!(journeys[0], aggregate_id);
 }
 
 /// An unknown subject returns an empty list.

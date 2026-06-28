@@ -52,15 +52,6 @@ pub struct JourneyView {
     /// Never encrypted. Fully intact after any shredding operation.
     pub shared_data: Value,
 
-    /// The current step in the journey workflow.
-    ///
-    /// Deprecated: read `WorkflowEvaluated.phase` from `shared_data` instead.
-    #[deprecated(
-        since = "0.3.0",
-        note = "read WorkflowEvaluated.phase from shared_data instead"
-    )]
-    pub current_step: Option<String>,
-
     /// The latest workflow decision state including available actions
     pub latest_workflow_decision: Option<WorkflowDecisionView>,
 
@@ -77,7 +68,6 @@ impl Default for JourneyView {
             id: Uuid::default(),
             state: JourneyState::default(),
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: Vec::new(),
         }
@@ -111,24 +101,13 @@ impl View<Journey> for JourneyView {
                 self.id = *id;
                 self.state = JourneyState::InProgress;
                 self.shared_data = json!({});
-                self.current_step = None;
                 self.latest_workflow_decision = None;
             }
 
-            JourneyEvent::Modified { step: _, data } => {
-                // Merge new data into shared data
-                json_patch::merge(&mut self.shared_data, data);
-            }
-
-            // Person events are projected to structured database tables by
-            // StructuredJourneyViewRepository; no state change needed here.
-            // Person events are projected to journey_person by StructuredJourneyViewRepository.
-            // The persons field on JourneyView is populated by load(), not from events.
-            // These events are projected to database tables by
-            // StructuredJourneyViewRepository; no in-memory JourneyView update needed.
-            JourneyEvent::PersonCaptured { .. }
-            | JourneyEvent::PersonDetailsUpdated { .. }
-            | JourneyEvent::SubjectForgotten { .. }
+            // Subject events are projected to journey_person by
+            // StructuredJourneyViewRepository; the persons field on JourneyView
+            // is populated by load(), not from events — no in-memory update here.
+            JourneyEvent::SubjectForgotten { .. }
             | JourneyEvent::SubjectRegistered { .. }
             | JourneyEvent::SubjectBound { .. } => {}
 
@@ -140,13 +119,6 @@ impl View<Journey> for JourneyView {
                     suggested_actions: suggested_actions.clone(),
                     phase: phase.clone(),
                 });
-            }
-
-            JourneyEvent::StepProgressed {
-                from_step: _,
-                to_step,
-            } => {
-                self.current_step = Some(to_step.clone());
             }
 
             JourneyEvent::Completed => {
@@ -188,19 +160,17 @@ mod tests {
         assert_eq!(view.id, id);
         assert_eq!(view.state, JourneyState::InProgress);
         assert_eq!(view.shared_data, json!({}));
-        assert!(view.current_step.is_none());
         assert!(view.latest_workflow_decision.is_none());
         assert!(view.persons.is_empty());
     }
 
     #[test]
-    fn test_journey_view_modified_event() {
+    fn test_journey_view_attributes_set_merges_plaintext() {
         let id = Uuid::new_v4();
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -208,9 +178,12 @@ mod tests {
         let envelope = EventEnvelope {
             aggregate_id: id.to_string(),
             sequence: 2,
-            payload: JourneyEvent::Modified {
-                step: "user_name".to_string(),
-                data: json!({"user_name": "John Doe"}),
+            payload: JourneyEvent::AttributesSet {
+                plaintext: std::collections::BTreeMap::from([(
+                    "/user_name".parse().unwrap(),
+                    json!("John Doe"),
+                )]),
+                secret_partitions: vec![],
             },
             metadata: HashMap::default(),
         };
@@ -221,75 +194,12 @@ mod tests {
     }
 
     #[test]
-    fn test_journey_view_person_captured_is_noop() {
-        let id = Uuid::new_v4();
-        let mut view = JourneyView {
-            id,
-            state: JourneyState::InProgress,
-            shared_data: json!({"origin": "LHR"}),
-            current_step: None,
-            latest_workflow_decision: None,
-            persons: vec![],
-        };
-        let before = view.shared_data.clone();
-
-        let envelope = EventEnvelope {
-            aggregate_id: id.to_string(),
-            sequence: 2,
-            payload: JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
-                subject_id: Uuid::new_v4(),
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: None,
-            },
-            metadata: HashMap::default(),
-        };
-
-        view.update(&envelope);
-
-        // shared_data must be untouched
-        assert_eq!(view.shared_data, before);
-    }
-
-    #[test]
-    fn test_journey_view_person_details_updated_is_noop() {
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-        let mut view = JourneyView {
-            id,
-            state: JourneyState::InProgress,
-            shared_data: json!({"origin": "LHR"}),
-            current_step: None,
-            latest_workflow_decision: None,
-            persons: vec![],
-        };
-        let before = view.shared_data.clone();
-
-        let envelope = EventEnvelope {
-            aggregate_id: id.to_string(),
-            sequence: 3,
-            payload: JourneyEvent::PersonDetailsUpdated {
-                person_ref: "passenger_0".to_string(),
-                subject_id,
-                data: json!({"passportNumber": "GB123456789"}),
-            },
-            metadata: HashMap::default(),
-        };
-
-        view.update(&envelope);
-
-        assert_eq!(view.shared_data, before);
-    }
-
-    #[test]
     fn test_journey_view_workflow_evaluated_event() {
         let id = Uuid::new_v4();
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -319,40 +229,12 @@ mod tests {
     }
 
     #[test]
-    fn test_journey_view_step_progressed_event() {
-        let id = Uuid::new_v4();
-        let mut view = JourneyView {
-            id,
-            state: JourneyState::InProgress,
-            shared_data: json!({}),
-            current_step: Some("step1".to_string()),
-            latest_workflow_decision: None,
-            persons: vec![],
-        };
-
-        let envelope = EventEnvelope {
-            aggregate_id: id.to_string(),
-            sequence: 4,
-            payload: JourneyEvent::StepProgressed {
-                from_step: Some("step1".to_string()),
-                to_step: "step2".to_string(),
-            },
-            metadata: HashMap::default(),
-        };
-
-        view.update(&envelope);
-
-        assert_eq!(view.current_step, Some("step2".to_string()));
-    }
-
-    #[test]
     fn test_journey_view_completed_event() {
         let id = Uuid::new_v4();
         let mut view = JourneyView {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: Some("final_step".to_string()),
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -376,12 +258,10 @@ mod tests {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({"origin": "LHR", "destination": "JFK"}),
-            current_step: Some("confirmation".to_string()),
             latest_workflow_decision: None,
             persons: vec![],
         };
         let before_data = view.shared_data.clone();
-        let before_step = view.current_step.clone();
 
         let envelope = EventEnvelope {
             aggregate_id: id.to_string(),
@@ -394,9 +274,8 @@ mod tests {
 
         view.update(&envelope);
 
-        // shared_data and current_step must be completely untouched
+        // shared_data must be completely untouched
         assert_eq!(view.shared_data, before_data);
-        assert_eq!(view.current_step, before_step);
     }
 
     #[test]
@@ -412,27 +291,16 @@ mod tests {
             metadata: HashMap::default(),
         });
 
-        // Modified with shared data
+        // AttributesSet with shared data
         view.update(&EventEnvelope {
             aggregate_id: id.to_string(),
             sequence: 2,
-            payload: JourneyEvent::Modified {
-                step: "search".to_string(),
-                data: json!({"origin": "LHR", "destination": "JFK"}),
-            },
-            metadata: HashMap::default(),
-        });
-
-        // PersonCaptured — must not affect shared_data
-        view.update(&EventEnvelope {
-            aggregate_id: id.to_string(),
-            sequence: 3,
-            payload: JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
-                subject_id: Uuid::new_v4(),
-                name: "Alice Smith".to_string(),
-                email: "alice@example.com".to_string(),
-                phone: None,
+            payload: JourneyEvent::AttributesSet {
+                plaintext: std::collections::BTreeMap::from([
+                    ("/origin".parse().unwrap(), json!("LHR")),
+                    ("/destination".parse().unwrap(), json!("JFK")),
+                ]),
+                secret_partitions: vec![],
             },
             metadata: HashMap::default(),
         });
@@ -440,21 +308,10 @@ mod tests {
         // WorkflowEvaluated
         view.update(&EventEnvelope {
             aggregate_id: id.to_string(),
-            sequence: 4,
+            sequence: 3,
             payload: JourneyEvent::WorkflowEvaluated {
                 suggested_actions: vec!["confirmation".to_string(), "continue".to_string()],
-                phase: None,
-            },
-            metadata: HashMap::default(),
-        });
-
-        // StepProgressed
-        view.update(&EventEnvelope {
-            aggregate_id: id.to_string(),
-            sequence: 5,
-            payload: JourneyEvent::StepProgressed {
-                from_step: None,
-                to_step: "confirmation".to_string(),
+                phase: Some("confirmation".to_string()),
             },
             metadata: HashMap::default(),
         });
@@ -462,7 +319,7 @@ mod tests {
         // Completed
         view.update(&EventEnvelope {
             aggregate_id: id.to_string(),
-            sequence: 6,
+            sequence: 4,
             payload: JourneyEvent::Completed,
             metadata: HashMap::default(),
         });
@@ -471,7 +328,6 @@ mod tests {
         assert_eq!(view.state, JourneyState::Complete);
         assert_eq!(view.shared_data.get("origin"), Some(&json!("LHR")));
         assert_eq!(view.shared_data.get("destination"), Some(&json!("JFK")));
-        assert_eq!(view.current_step, Some("confirmation".to_string()));
         assert!(view.latest_workflow_decision.is_some());
     }
 }
