@@ -13,6 +13,7 @@
 //! See `docs/REUSABLE_ES_FOUNDATION.md` for the design and extraction plan.
 
 pub mod attribute_schema;
+pub mod capture;
 pub mod decision_engine;
 pub mod json_path;
 pub mod schema_validator;

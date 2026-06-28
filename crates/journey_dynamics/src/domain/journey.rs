@@ -9,13 +9,15 @@ use uuid::Uuid;
 use crate::{
     domain::{
         AttributeSchema, assign_all,
-        attribute_schema::{PiiClass, classify_changes},
         commands::JourneyCommand,
         events::{JourneyEvent, SecretPartitionData},
     },
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
-use es_capture::subject_registry::{SubjectError, SubjectRegistry};
+use es_capture::{
+    capture::{CaptureError, capture},
+    subject_registry::{SubjectError, SubjectRegistry},
+};
 use jsonptr::PointerBuf;
 
 pub use es_capture::subject_registry::SubjectRegistration;
@@ -84,96 +86,48 @@ impl Aggregate for Journey {
                     return Err(JourneyError::InvalidData("no changes".to_string()));
                 }
 
-                // Classify every path against the attribute schema.
-                // The subject_lookup resolves a role path to its bound subject
-                // UUID via `self.bindings`.  Forgotten subjects return `None` so
-                // their paths land in `unknown` and the command is rejected.
-                let schema = services.attribute_schema();
-                let classification = {
-                    let registry = &self.registry;
-                    classify_changes(schema, &changes, |subject_path| {
-                        registry.resolve_active(subject_path)
-                    })
-                };
+                // Run the domain-agnostic capture pipeline: classify → validate
+                // → (optionally) evaluate the decision engine. The journey
+                // aggregate turns the outcome into its own events below.
+                let outcome = capture(
+                    services.attribute_schema(),
+                    &self.registry,
+                    self.shared_data(),
+                    &changes,
+                    services.schema_validator().as_ref(),
+                    Some(services.decision_engine().as_ref()),
+                )
+                .await?;
 
-                // Reject paths that are not registered in the schema at all.
-                let truly_unknown: Vec<PointerBuf> = classification
-                    .unknown
-                    .iter()
-                    .filter(|p| schema.classify(p).is_none())
-                    .cloned()
-                    .collect();
-                if !truly_unknown.is_empty() {
-                    return Err(JourneyError::UnknownAttributePath(truly_unknown));
-                }
-
-                // Reject secret paths whose person slot hasn't been created yet.
-                for path in &classification.unknown {
-                    let Some(cls) = schema.classify(path) else {
-                        continue;
-                    };
-                    let PiiClass::Secret { subject } = cls.as_ref() else {
-                        continue;
-                    };
-                    let person_ref = subject
-                        .as_str()
-                        .strip_prefix("/persons/")
-                        .unwrap_or(subject.as_str())
-                        .to_string();
-                    return Err(JourneyError::PersonNotFound(person_ref));
-                }
-
-                // Build one SecretPartitionData per role path, sorted
-                // deterministically.  The role path and UUID flow directly from
-                // the classification; no reverse map needed.
-                let mut secret_partitions: Vec<SecretPartitionData> = classification
-                    .secret_by_subject
+                let secret_partitions: Vec<SecretPartitionData> = outcome
+                    .secret
                     .into_iter()
-                    .map(
-                        |(role_path, (subject_id, secret_changes))| SecretPartitionData {
-                            role_path,
-                            subject_id,
-                            changes: secret_changes,
-                        },
-                    )
+                    .map(|slice| SecretPartitionData {
+                        role_path: slice.role_path,
+                        subject_id: slice.subject_id,
+                        changes: slice.changes,
+                    })
                     .collect();
-                secret_partitions.sort_by(|a, b| a.role_path.cmp(&b.role_path));
-
-                // Validate plaintext changes merged with current shared_data.
-                if !classification.plaintext.is_empty() {
-                    let mut merged_data = self.shared_data.clone();
-
-                    assign_all(&mut merged_data, &classification.plaintext)?;
-
-                    if let Err(e) = services.schema_validator().validate(&merged_data) {
-                        return Err(JourneyError::InvalidData(e.to_string()));
-                    }
-                }
-
-                // Evaluate the workflow with the full (plaintext + secret) change set.
-                let decision = services
-                    .decision_engine()
-                    .evaluate_attributes(self.shared_data(), &changes)
-                    .await
-                    .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 
                 sink.write(
                     JourneyEvent::AttributesSet {
-                        plaintext: classification.plaintext,
+                        plaintext: outcome.plaintext,
                         secret_partitions,
                     },
                     self,
                 )
                 .await;
 
-                sink.write(
-                    JourneyEvent::WorkflowEvaluated {
-                        suggested_actions: decision.suggested_actions,
-                        phase: decision.phase,
-                    },
-                    self,
-                )
-                .await;
+                if let Some(decision) = outcome.decision {
+                    sink.write(
+                        JourneyEvent::WorkflowEvaluated {
+                            suggested_actions: decision.suggested_actions,
+                            phase: decision.phase,
+                        },
+                        self,
+                    )
+                    .await;
+                }
 
                 Ok(())
             }
@@ -360,6 +314,28 @@ impl From<SubjectError> for JourneyError {
         match err {
             SubjectError::NotRegistered => Self::SubjectNotRegistered,
             SubjectError::RolePathConflict(role_path) => Self::RolePathConflict(role_path),
+        }
+    }
+}
+
+impl From<CaptureError> for JourneyError {
+    fn from(err: CaptureError) -> Self {
+        match err {
+            CaptureError::UnknownAttributePath(paths) => Self::UnknownAttributePath(paths),
+            CaptureError::SubjectNotResolved(role_path) => {
+                // Preserve the historical PersonNotFound message: the short
+                // person ref is the role path with the "/persons/" prefix
+                // stripped.
+                let person_ref = role_path
+                    .as_str()
+                    .strip_prefix("/persons/")
+                    .unwrap_or(role_path.as_str())
+                    .to_string();
+                Self::PersonNotFound(person_ref)
+            }
+            CaptureError::InvalidJsonPointer(e) => Self::InvalidJsonPointer(e),
+            CaptureError::InvalidData(msg) => Self::InvalidData(msg),
+            CaptureError::DecisionEngine(msg) => Self::DecisionEngineError(msg),
         }
     }
 }
