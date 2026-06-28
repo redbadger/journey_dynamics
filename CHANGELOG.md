@@ -8,7 +8,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+> ⚠️ **BREAKING CHANGE — not backward compatible with persisted data.**
+>
+> This release replaces the legacy command and event API with the path-keyed
+> `SetAttributes` / subject-registration model and removes the old surface
+> entirely:
+>
+> - **Removed commands:** `Capture`, `CapturePerson`, `CapturePersonDetails`.
+> - **Removed events:** `Modified`, `PersonDetailsUpdated`, `PersonCaptured`,
+>   `StepProgressed`.
+> - **Removed aggregate state:** the `PersonSlot` / `Journey::persons` map and
+>   `Journey::current_step`.
+>
+> The aggregate **no longer knows how to replay the removed events**, so
+> **event streams recorded by previous versions are not compatible and must be
+> re-written** — replayed through a one-off migration that maps the old events
+> onto the new shapes (`Started`, `SubjectRegistered`, `SubjectBound`,
+> `AttributesSet`, …) — before upgrading. There is no in-place
+> back-compatibility path. See [Migration](#migration).
+
 ### Added
+
+- **Domain spine extracted to the new `es-capture` crate** — the generic
+  progressive-capture machinery (the aggregate, the command/event/error enums,
+  attribute classification, the subject registry, the PII codec, the optional
+  decision-engine seam, validation, and JSON-pointer helpers) now lives in the
+  reusable `es-capture` crate. `journey_dynamics` is a thin specialisation of it
+  (`Journey = CaptureAggregate<JourneyConfig>`) and adds no aggregate code of its
+  own — domain specificity is its attribute schema, JSON schema, rules, and
+  views. See [`crates/es-capture/CHANGELOG.md`](crates/es-capture/CHANGELOG.md),
+  [`crates/es-capture/README.md`](crates/es-capture/README.md), and
+  [`docs/REUSABLE_ES_FOUNDATION.md`](docs/REUSABLE_ES_FOUNDATION.md).
 
 - **`RegisterSubject` command** — registers a data subject (`email` →
   `subject_id` mapping) within a journey. Re-registering the same subject with
@@ -32,7 +62,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   { role_path, subject_id }` records the role-path → subject binding.
 
 - **`SetAttributes` command** — a single command that accepts a flat map of
-  `AttributePath → Value`, replacing the removed `Capture` /
+  JSON Pointer → value, replacing the removed `Capture` /
   `CapturePersonDetails` commands. A single submission may touch attributes
   belonging to multiple data subjects; each subject's PII is encrypted under
   its own DEK in one atomic operation.
@@ -40,14 +70,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **`AttributesSet` event** — the corresponding domain event emitted by
   `SetAttributes`. Carries a `plaintext` map (non-sensitive paths) and a
   `secret_partitions` list (one entry per subject whose secret attributes were
-  updated). Legacy `Modified` / `PersonDetailsUpdated` events continue to
-  replay from the historical event log.
-
-- **`AttributePath` newtype** — a validated, slash-separated path string (e.g.
-  `"search/origin"`, `"persons/passenger_0/passportNumber"`). Validates that
-  the string is non-empty, has no leading/trailing `/`, no empty segments, and
-  contains only printable characters. Implements `Display`, `FromStr`,
-  `Serialize`, `Deserialize`, `Ord`, `Hash`.
+  updated).
 
 - **`AttributeSchema` / `PiiClass`** — per-path PII classification. A path is
   either `Plaintext` (stored verbatim in `shared_data`) or
@@ -74,30 +97,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   { "SetAttributes": { "changes": { "search/origin": "LHR" } } }
   ```
 
-- **`json_path` helpers** — `set_at_path`, `get_at_path`, `flatten`,
-  `rehydrate` for reading and writing deeply nested `serde_json::Value` trees
-  using `AttributePath` keys.
-
-- **Subject-registration migration** (`20260606000001_subject_registration`) —
-  adds indexes on `SubjectRegistered` and `SubjectBound` events to support
-  `find_journeys_by_subject` on the new write path, and updates the
-  `journey_person` table documentation. Existing journeys remain covered by
-  the pre-existing `PersonCaptured` index.
+- **Subject-registration indexes** — the baseline schema indexes
+  `SubjectRegistered` and `SubjectBound` events to support
+  `find_journeys_by_subject` on the new write path.
 
 ### Changed
 
 - **`SecretPartitionData` is now keyed by `role_path`** — the
-  `person_ref: String` field is replaced by `role_path: AttributePath` (the
-  full schema path, e.g. `"persons/passenger_0"`), which is used as the crypto
-  label (AAD) so the partition identity is meaningful on the read path. A
-  custom `Deserialize` impl preserves backward compatibility: events written
-  with the old `person_ref` field are read by synthesising
-  `"persons/{person_ref}"` as the role path.
+  `person_ref: String` field is replaced by `role_path: PointerBuf` (the full
+  JSON-Pointer schema path, e.g. `/persons/passenger_0`), which is used as the
+  crypto label (AAD) so the partition identity is meaningful on the read path.
+  This is
+  a breaking on-disk change: partitions written with the old `person_ref` field
+  are not read back (see the breaking-change note above).
 
-- **`SubjectLookupHook` projects `SubjectRegistered`** in addition to the
-  legacy `PersonCaptured` event when maintaining the `subject_lookup` table,
-  so subjects registered via the new commands are discoverable by email for
-  erasure requests.
+- **`SubjectLookupHook` projects `SubjectRegistered`** when maintaining the
+  `subject_lookup` table, so subjects registered via the new commands are
+  discoverable by email for erasure requests.
 
 ### Removed
 
@@ -115,6 +131,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   command has been deleted. Replace with `JourneyCommand::SetAttributes` using
   paths under `persons/<ref>/…`. Deprecated since 0.3.0.
 
+- **Legacy events `Modified`, `PersonDetailsUpdated`, `PersonCaptured`, and
+  `StepProgressed`** — removed from the event enum. The aggregate can no longer
+  replay them, so **historical event streams that contain them must be re-written**
+  before upgrading (see the breaking-change note at the top of this release).
+
 - **`PersonSlot` struct and `Journey::persons` field** — the per-person slot
   map (`BTreeMap<String, PersonSlot>`) has been removed from the aggregate.
   Subject identity is now held exclusively in `Journey::subjects` (keyed by
@@ -123,9 +144,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `persons/<ref>/…`.
 
 - **`Journey::current_step` field** — removed from the aggregate state. Read
-  `WorkflowDecisionView.phase` instead. `JourneyView::current_step` is still
-  populated from replayed `StepProgressed` events but will not be set by any
-  new command.
+  `WorkflowDecisionView.phase` instead. `JourneyView::current_step` is no longer
+  populated, since its source event `StepProgressed` has also been removed.
 
 - **Legacy subject-lookup fallback in `SetAttributes`** — `SetAttributes` no
   longer falls back to the old `persons` map when resolving a secret role path.
@@ -135,12 +155,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Deprecated
 
-- `JourneyEvent::Modified`, `JourneyEvent::PersonDetailsUpdated`, and
-  `JourneyEvent::StepProgressed`. These events continue to replay from the
-  historical event log but are no longer emitted by new commands. Pattern-match
-  arms for these variants may remain in projectors without urgency.
-- `JourneyView::current_step`. Populated only by replayed `StepProgressed`
-  events; read `WorkflowDecisionView.phase` for new journeys.
+- `JourneyView::current_step`. No longer populated (its source event
+  `StepProgressed` has been removed); read `WorkflowDecisionView.phase` instead.
+  The field remains on the view for one release before removal.
 
 ### Migration
 
