@@ -12,6 +12,7 @@
 //!
 //! See `docs/REUSABLE_ES_FOUNDATION.md` for the design and extraction plan.
 
+pub mod aggregate;
 pub mod attribute_schema;
 pub mod attributes_set_codec;
 pub mod capture;

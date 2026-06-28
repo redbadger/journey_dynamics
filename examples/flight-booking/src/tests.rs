@@ -283,7 +283,7 @@ fn flight_booking_set_passenger_attributes() {
 }
 
 /// `SetAttributes` for a secret person field without a prior `RegisterAndBindSubject`
-/// returns `PersonNotFound`.
+/// returns `SubjectNotResolved`.
 #[test]
 fn flight_booking_set_attributes_requires_prior_bind() {
     let id = Uuid::new_v4();
@@ -298,7 +298,9 @@ fn flight_booking_set_attributes_requires_prior_bind() {
                 m
             },
         })
-        .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
+        .then_expect_error(JourneyError::SubjectNotResolved(
+            "/persons/passenger_0".parse().unwrap(),
+        ));
 }
 
 /// Two passengers with independent subject IDs, each registered via
