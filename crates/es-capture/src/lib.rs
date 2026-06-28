@@ -16,3 +16,4 @@ pub mod attribute_schema;
 pub mod decision_engine;
 pub mod json_path;
 pub mod schema_validator;
+pub mod subject_registry;

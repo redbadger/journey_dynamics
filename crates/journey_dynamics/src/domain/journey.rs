@@ -15,16 +15,10 @@ use crate::{
     },
     services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
 };
+use es_capture::subject_registry::{SubjectError, SubjectRegistry};
 use jsonptr::PointerBuf;
 
-/// Registration record for a data subject captured via [`JourneyCommand::RegisterSubject`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubjectRegistration {
-    /// Contact email — used for GDPR erasure lookup.
-    pub email: String,
-    /// Set to `true` once a `SubjectForgotten` event is applied.
-    pub forgotten: bool,
-}
+pub use es_capture::subject_registry::SubjectRegistration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Journey {
@@ -33,10 +27,9 @@ pub struct Journey {
     /// Accumulated journey attributes (plaintext and decrypted secret values).
     /// Never encrypted at rest. Fully intact after any shredding operation.
     shared_data: Value,
-    /// Registered subjects, keyed by subject UUID.
-    subjects: BTreeMap<Uuid, SubjectRegistration>,
-    /// Role-path → subject-UUID bindings established by `BindSubject`.
-    bindings: BTreeMap<PointerBuf, Uuid>,
+    /// Registered subjects and their role-path → subject bindings.
+    #[serde(flatten)]
+    registry: SubjectRegistry,
     latest_workflow_decision: Option<WorkflowDecisionState>,
 }
 
@@ -97,14 +90,9 @@ impl Aggregate for Journey {
                 // their paths land in `unknown` and the command is rejected.
                 let schema = services.attribute_schema();
                 let classification = {
-                    let bindings = &self.bindings;
-                    let subjects = &self.subjects;
+                    let registry = &self.registry;
                     classify_changes(schema, &changes, |subject_path| {
-                        let uuid = *bindings.get(subject_path)?;
-                        if subjects.get(&uuid).is_some_and(|r| r.forgotten) {
-                            return None;
-                        }
-                        Some(uuid)
+                        registry.resolve_active(subject_path)
                     })
                 };
 
@@ -209,11 +197,7 @@ impl Aggregate for Journey {
                     return Err(JourneyError::AlreadyCompleted);
                 }
                 // Idempotent: skip if already registered with the same email.
-                if self
-                    .subjects
-                    .get(&subject_id)
-                    .is_some_and(|reg| reg.email == email)
-                {
+                if !self.registry.needs_registration(&subject_id, &email) {
                     return Ok(());
                 }
                 sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
@@ -231,15 +215,13 @@ impl Aggregate for Journey {
                 if JourneyState::Complete == self.state {
                     return Err(JourneyError::AlreadyCompleted);
                 }
-                if !self.subjects.contains_key(&subject_id) {
+                if !self.registry.is_registered(&subject_id) {
                     return Err(JourneyError::SubjectNotRegistered);
                 }
-                match self.bindings.get(&role_path) {
-                    Some(&existing) if existing != subject_id => {
-                        return Err(JourneyError::RolePathConflict(role_path));
-                    }
-                    Some(_) => return Ok(()), // same subject — idempotent
-                    None => {}
+                match self.registry.check_binding(&role_path, &subject_id) {
+                    Err(e) => return Err(e.into()),
+                    Ok(false) => return Ok(()), // same subject — idempotent
+                    Ok(true) => {}
                 }
                 sink.write(
                     JourneyEvent::SubjectBound {
@@ -264,22 +246,14 @@ impl Aggregate for Journey {
                     return Err(JourneyError::AlreadyCompleted);
                 }
                 // Validate the binding upfront before emitting any events.
-                if let Some(&existing) = self.bindings.get(&role_path)
-                    && existing != subject_id
-                {
-                    return Err(JourneyError::RolePathConflict(role_path));
-                }
+                self.registry.check_binding(&role_path, &subject_id)?;
                 // Emit SubjectRegistered if new or email changed.
-                if self
-                    .subjects
-                    .get(&subject_id)
-                    .is_none_or(|reg| reg.email != email)
-                {
+                if self.registry.needs_registration(&subject_id, &email) {
                     sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
                         .await;
                 }
                 // Emit SubjectBound if not already bound.
-                if !self.bindings.contains_key(&role_path) {
+                if self.registry.binding(&role_path).is_none() {
                     sink.write(
                         JourneyEvent::SubjectBound {
                             role_path,
@@ -298,11 +272,7 @@ impl Aggregate for Journey {
                 }
                 // Only emit SubjectForgotten if the subject is still active.
                 // This keeps the shredding endpoint idempotent.
-                let needs_forgetting = self
-                    .subjects
-                    .get(&subject_id)
-                    .is_some_and(|reg| !reg.forgotten);
-                if needs_forgetting {
+                if self.registry.needs_forgetting(&subject_id) {
                     sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
                         .await;
                 }
@@ -333,14 +303,8 @@ impl Aggregate for Journey {
                     .unwrap_or_else(|_| {
                         PointerBuf::parse("/persons/unknown").expect("static fallback")
                     });
-                self.subjects
-                    .entry(subject_id)
-                    .and_modify(|reg| reg.email.clone_from(&email))
-                    .or_insert_with(|| SubjectRegistration {
-                        email: email.clone(),
-                        forgotten: false,
-                    });
-                self.bindings.insert(role_path, subject_id);
+                self.registry.register(subject_id, email);
+                self.registry.bind(role_path, subject_id);
             }
             JourneyEvent::PersonDetailsUpdated { .. } | JourneyEvent::StepProgressed { .. } => {
                 // Legacy events. Projected directly from event payloads by
@@ -373,24 +337,16 @@ impl Aggregate for Journey {
                 self.state = JourneyState::Complete;
             }
             JourneyEvent::SubjectForgotten { subject_id } => {
-                if let Some(reg) = self.subjects.get_mut(&subject_id) {
-                    reg.forgotten = true;
-                }
+                self.registry.forget(&subject_id);
             }
             JourneyEvent::SubjectRegistered { subject_id, email } => {
-                self.subjects
-                    .entry(subject_id)
-                    .and_modify(|reg| reg.email.clone_from(&email))
-                    .or_insert_with(|| SubjectRegistration {
-                        email,
-                        forgotten: false,
-                    });
+                self.registry.register(subject_id, email);
             }
             JourneyEvent::SubjectBound {
                 role_path,
                 subject_id,
             } => {
-                self.bindings.insert(role_path, subject_id);
+                self.registry.bind(role_path, subject_id);
             }
         }
     }
@@ -420,6 +376,15 @@ pub enum JourneyError {
     SubjectNotRegistered,
     #[error("Role path '{0}' is already bound to a different subject")]
     RolePathConflict(PointerBuf),
+}
+
+impl From<SubjectError> for JourneyError {
+    fn from(err: SubjectError) -> Self {
+        match err {
+            SubjectError::NotRegistered => Self::SubjectNotRegistered,
+            SubjectError::RolePathConflict(role_path) => Self::RolePathConflict(role_path),
+        }
+    }
 }
 
 pub struct JourneyServices {
@@ -480,12 +445,12 @@ impl Journey {
 
     #[must_use]
     pub const fn subjects(&self) -> &BTreeMap<Uuid, SubjectRegistration> {
-        &self.subjects
+        self.registry.subjects()
     }
 
     #[must_use]
     pub const fn bindings(&self) -> &BTreeMap<PointerBuf, Uuid> {
-        &self.bindings
+        self.registry.bindings()
     }
 }
 
@@ -495,8 +460,7 @@ impl Default for Journey {
             id: Uuid::default(),
             state: JourneyState::default(),
             shared_data: json!({}),
-            subjects: BTreeMap::new(),
-            bindings: BTreeMap::new(),
+            registry: SubjectRegistry::default(),
             latest_workflow_decision: None,
         }
     }
