@@ -52,7 +52,7 @@ impl StructuredJourneyViewRepository {
     ) -> Result<Option<JourneyView>, sqlx::Error> {
         let journey_row = sqlx::query(
             r"
-            SELECT id, state, shared_data, current_step, version
+            SELECT id, state, shared_data, version
             FROM journey_view
             WHERE id = $1
             ",
@@ -70,7 +70,6 @@ impl StructuredJourneyViewRepository {
             "Complete" => JourneyState::Complete,
             _ => JourneyState::InProgress,
         };
-        let current_step: Option<String> = row.get("current_step");
         let shared_data: Value = row.get("shared_data");
 
         let workflow_row = sqlx::query(
@@ -97,7 +96,6 @@ impl StructuredJourneyViewRepository {
             id,
             state,
             shared_data,
-            current_step,
             latest_workflow_decision,
             persons,
         }))
@@ -215,7 +213,6 @@ impl StructuredJourneyViewRepository {
             SELECT j.id,
                    j.state,
                    j.shared_data,
-                   j.current_step,
                    j.version,
                    w.suggested_actions,
                    w.phase
@@ -255,7 +252,6 @@ impl StructuredJourneyViewRepository {
                 id,
                 state,
                 shared_data: row.get("shared_data"),
-                current_step: row.get("current_step"),
                 latest_workflow_decision: suggested_actions.map(|suggested_actions| {
                     WorkflowDecisionView {
                         suggested_actions,
@@ -471,14 +467,13 @@ impl StructuredJourneyViewRepository {
             JourneyEvent::Started { id } => {
                 sqlx::query(
                     r"
-                    INSERT INTO journey_view (id, state, current_step, version)
-                    VALUES ($1, $2, $3, $4)
+                    INSERT INTO journey_view (id, state, version)
+                    VALUES ($1, $2, $3)
                     ON CONFLICT (id) DO NOTHING
                     ",
                 )
                 .bind(id)
                 .bind("InProgress")
-                .bind::<Option<String>>(None)
                 .bind(event.sequence as i64)
                 .execute(&mut **tx)
                 .await?;

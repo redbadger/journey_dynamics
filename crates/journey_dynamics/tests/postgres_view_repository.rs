@@ -164,7 +164,6 @@ async fn test_journey_started_event(ctx: &mut PostgresViewRepositoryContext) {
     assert_eq!(view.id, journey_id);
     assert_eq!(view.state, JourneyState::InProgress);
     assert_eq!(view.shared_data, json!({}));
-    assert!(view.current_step.is_none());
 }
 
 #[test_context(PostgresViewRepositoryContext)]

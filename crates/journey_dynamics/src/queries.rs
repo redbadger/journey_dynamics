@@ -52,15 +52,6 @@ pub struct JourneyView {
     /// Never encrypted. Fully intact after any shredding operation.
     pub shared_data: Value,
 
-    /// The current step in the journey workflow.
-    ///
-    /// Deprecated: read `WorkflowEvaluated.phase` from `shared_data` instead.
-    #[deprecated(
-        since = "0.3.0",
-        note = "read WorkflowEvaluated.phase from shared_data instead"
-    )]
-    pub current_step: Option<String>,
-
     /// The latest workflow decision state including available actions
     pub latest_workflow_decision: Option<WorkflowDecisionView>,
 
@@ -77,7 +68,6 @@ impl Default for JourneyView {
             id: Uuid::default(),
             state: JourneyState::default(),
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: Vec::new(),
         }
@@ -111,7 +101,6 @@ impl View<Journey> for JourneyView {
                 self.id = *id;
                 self.state = JourneyState::InProgress;
                 self.shared_data = json!({});
-                self.current_step = None;
                 self.latest_workflow_decision = None;
             }
 
@@ -171,7 +160,6 @@ mod tests {
         assert_eq!(view.id, id);
         assert_eq!(view.state, JourneyState::InProgress);
         assert_eq!(view.shared_data, json!({}));
-        assert!(view.current_step.is_none());
         assert!(view.latest_workflow_decision.is_none());
         assert!(view.persons.is_empty());
     }
@@ -183,7 +171,6 @@ mod tests {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -213,7 +200,6 @@ mod tests {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: None,
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -249,7 +235,6 @@ mod tests {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({}),
-            current_step: Some("final_step".to_string()),
             latest_workflow_decision: None,
             persons: vec![],
         };
@@ -273,12 +258,10 @@ mod tests {
             id,
             state: JourneyState::InProgress,
             shared_data: json!({"origin": "LHR", "destination": "JFK"}),
-            current_step: Some("confirmation".to_string()),
             latest_workflow_decision: None,
             persons: vec![],
         };
         let before_data = view.shared_data.clone();
-        let before_step = view.current_step.clone();
 
         let envelope = EventEnvelope {
             aggregate_id: id.to_string(),
@@ -291,9 +274,8 @@ mod tests {
 
         view.update(&envelope);
 
-        // shared_data and current_step must be completely untouched
+        // shared_data must be completely untouched
         assert_eq!(view.shared_data, before_data);
-        assert_eq!(view.current_step, before_step);
     }
 
     #[test]
