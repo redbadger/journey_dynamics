@@ -165,7 +165,7 @@ impl Aggregate for Journey {
                 // Evaluate the workflow with the full (plaintext + secret) change set.
                 let decision = services
                     .decision_engine()
-                    .evaluate_attributes(self, &changes)
+                    .evaluate_attributes(self.shared_data(), &changes)
                     .await
                     .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
 

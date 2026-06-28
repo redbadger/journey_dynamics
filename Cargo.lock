@@ -893,10 +893,17 @@ dependencies = [
 name = "es-capture"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "json-patch",
  "jsonptr",
+ "jsonschema 0.46.2",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
  "uuid",
+ "zen-engine",
 ]
 
 [[package]]
