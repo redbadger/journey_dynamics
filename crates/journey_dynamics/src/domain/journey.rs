@@ -20,7 +20,7 @@ impl CaptureConfig for JourneyConfig {
     const TYPE: &'static str = "Journey";
 }
 
-/// The flight-booking journey aggregate: the generic capture spine specialised
+/// The journey aggregate: the generic capture spine specialised
 /// for the journey domain.
 pub type Journey = CaptureAggregate<JourneyConfig>;
 
