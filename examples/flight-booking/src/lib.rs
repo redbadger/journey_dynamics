@@ -1,7 +1,6 @@
-use journey_dynamics::domain::{
-    attribute_schema::{AttributeSchemaConfig, NamespacePatternConfig},
-    AttributeSchema, NamespacePattern,
-};
+use std::collections::BTreeMap;
+
+use journey_dynamics::domain::{attribute_schema::AttributeSchemaConfig, AttributeSchema};
 use journey_dynamics::queries::JourneyView;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -13,6 +12,10 @@ pub struct FlightBookingSchema {
     pub search: Option<SearchCriteria>,
     pub search_results: Option<SearchResults>,
     pub booking: Option<BookingData>,
+    /// Per-passenger details, keyed by passenger ref (e.g. `passenger_0`).
+    /// Each entry is a crypto subject `/persons/{ref}`; the PII fields within
+    /// (marked `x-subject`) are encrypted under that passenger's DEK.
+    pub persons: Option<BTreeMap<String, PassengerDetail>>,
 }
 
 /// Reconstruct a [`FlightBookingSchema`] from the plaintext path-keyed bag
@@ -31,59 +34,32 @@ impl TryFrom<&JourneyView> for FlightBookingSchema {
     }
 }
 
-/// Returns the [`AttributeSchema`] for the flight-booking example.
+/// The attribute-classification config for the flight-booking example,
+/// **derived from [`FlightBookingSchema`]** via the `x-subject` markers — the
+/// single source of truth. Yields:
+/// - `/search`, `/searchResults`, `/booking` → plaintext prefixes (no PII);
+/// - `/persons/{ref}` → a namespace where the `x-subject`-marked fields
+///   (`firstName`, `lastName`, `dateOfBirth`, `passportNumber`, `nationality`)
+///   are secret under `persons/{ref}` and `passengerType` is plaintext.
 ///
-/// Classification:
-/// - `search/*`, `searchResults/*`, `booking/*` → Plaintext (permissive fallback)
-/// - `persons/<ref>/firstName`, `lastName`, `dateOfBirth`, `passportNumber`,
-///   `nationality` → `Secret` encrypted under `persons/<ref>`
-/// - `persons/<ref>/passengerType` → Plaintext
-///
-/// # Panics
-/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
-#[must_use]
-pub fn attribute_schema() -> AttributeSchema {
-    AttributeSchema::new(std::collections::BTreeMap::new(), None)
-        .with_plaintext_prefixes(
-            ["/search", "/searchResults", "/booking"]
-                .iter()
-                .map(|s| s.parse().expect("valid JSON pointer"))
-                .collect(),
-        )
-        .with_namespace_patterns(vec![NamespacePattern {
-            prefix: "/persons"
-                .parse()
-                .expect("'/persons' is a valid JSON pointer"),
-            plaintext_suffixes: std::iter::once(
-                "/passengerType".parse().expect("valid JSON pointer"),
-            )
-            .collect(),
-        }])
-}
-
-/// Serialised form of [`attribute_schema()`] suitable for writing to the JSON
-/// file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
+/// Serialise this to the JSON file loaded by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
 ///
 /// # Panics
-/// Never panics; the `"/persons"` prefix literal is a valid JSON pointer.
+/// Panics if `FlightBookingSchema` fails to serialise, or if a secret field's
+/// `x-subject` annotation is malformed — both are build-time bugs in the schema
+/// types above.
 #[must_use]
 pub fn attribute_schema_config() -> AttributeSchemaConfig {
-    AttributeSchemaConfig {
-        permissive: false,
-        plaintext_prefixes: ["/search", "/searchResults", "/booking"]
-            .iter()
-            .map(|s| s.parse().expect("valid JSON pointer"))
-            .collect(),
-        namespace_patterns: vec![NamespacePatternConfig {
-            prefix: "/persons"
-                .parse()
-                .expect("'/persons' is a valid JSON pointer"),
-            plaintext_suffixes: std::iter::once(
-                "/passengerType".parse().expect("valid JSON pointer"),
-            )
-            .collect(),
-        }],
-    }
+    let schema = serde_json::to_value(schemars::schema_for!(FlightBookingSchema))
+        .expect("schema serialises");
+    AttributeSchemaConfig::from_annotated_schema(&schema)
+}
+
+/// The runtime [`AttributeSchema`] for the flight-booking example, built from
+/// the schema-derived [`attribute_schema_config()`].
+#[must_use]
+pub fn attribute_schema() -> AttributeSchema {
+    AttributeSchema::from(attribute_schema_config())
 }
 
 // Search criteria group - when present, core fields are required
@@ -148,17 +124,25 @@ pub struct PassengerCounts {
     pub infants: u32,
 }
 
+/// Per-passenger details, captured progressively (all optional).
+///
+/// The PII fields carry `x-subject = "/persons/*"`, marking them secret under
+/// the passenger's own subject (`/persons/{ref}`); `passengerType` is plaintext
+/// (an operational signal the workflow reads directly).
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct PassengerDetail {
-    #[schemars(length(min = 1))]
-    pub first_name: String,
-    #[schemars(length(min = 1))]
-    pub last_name: String,
-    pub date_of_birth: String, // ISO 8601 date format
+    #[schemars(extend("x-subject" = "/persons/*"), length(min = 1))]
+    pub first_name: Option<String>,
+    #[schemars(extend("x-subject" = "/persons/*"), length(min = 1))]
+    pub last_name: Option<String>,
+    #[schemars(extend("x-subject" = "/persons/*", "format" = "date"))]
+    pub date_of_birth: Option<String>, // ISO 8601 date format
+    #[schemars(extend("x-subject" = "/persons/*"))]
     pub passport_number: Option<String>,
+    #[schemars(extend("x-subject" = "/persons/*"))]
     pub nationality: Option<String>, // ISO 3166-1 alpha-2
-    pub passenger_type: PassengerType,
+    pub passenger_type: Option<PassengerType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
