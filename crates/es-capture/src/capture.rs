@@ -131,10 +131,19 @@ pub async fn capture(
         .collect();
     secret.sort_by(|a, b| a.role_path.cmp(&b.role_path));
 
-    // Validate plaintext changes merged with the current state.
-    if !classification.plaintext.is_empty() {
+    // Validate the full prospective state — current state plus every change,
+    // plaintext *and* secret — against the schema, before anything is
+    // encrypted. This validates secret values too (e.g. a malformed
+    // `dateOfBirth`) and does so on every batch, not only when a plaintext
+    // change happens to co-occur. Redacted (shredded) partitions leave their
+    // fields absent and add only an unknown `redacted` marker, so a schema
+    // that does not forbid additional properties tolerates them.
+    if !classification.plaintext.is_empty() || !secret.is_empty() {
         let mut merged = current_state.clone();
         assign_all(&mut merged, &classification.plaintext)?;
+        for slice in &secret {
+            assign_all(&mut merged, &slice.changes)?;
+        }
         validator
             .validate(&merged)
             .map_err(|e| CaptureError::InvalidData(e.to_string()))?;
@@ -166,12 +175,48 @@ mod tests {
 
     use super::*;
     use crate::{
-        attribute_schema::NamespacePattern, schema_validator::NoOpValidator,
+        attribute_schema::{AttributeSchemaConfig, NamespacePattern, SecretPathConfig},
+        schema_validator::{JsonSchemaValidator, NoOpValidator},
         subject_registry::SubjectRegistry,
     };
 
     fn ptr(s: &str) -> PointerBuf {
         PointerBuf::parse(s).unwrap()
+    }
+
+    /// A fixed-subject schema with one secret integer field `/self/salary`
+    /// (encrypted under subject `/self`) plus a data schema that types it.
+    fn fixed_subject_schema() -> AttributeSchema {
+        AttributeSchema::from(AttributeSchemaConfig {
+            permissive: false,
+            plaintext_prefixes: vec![],
+            namespace_patterns: vec![],
+            secret_paths: vec![SecretPathConfig {
+                path: ptr("/self/salary"),
+                subject: ptr("/self"),
+            }],
+            plaintext_paths: vec![],
+        })
+    }
+
+    fn salary_validator() -> JsonSchemaValidator {
+        JsonSchemaValidator::new(&json!({
+            "type": "object",
+            "properties": {
+                "self": {
+                    "type": "object",
+                    "properties": { "salary": { "type": "integer" } }
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn registry_with_self(subject: Uuid) -> SubjectRegistry {
+        let mut registry = SubjectRegistry::default();
+        registry.register(subject, "a@example.com".to_string());
+        registry.bind(ptr("/self"), subject);
+        registry
     }
 
     /// Permissive schema with a `/persons/<ref>/<field>` secret namespace.
@@ -233,6 +278,45 @@ mod tests {
         assert!(
             matches!(err, CaptureError::UnknownAttributePath(paths) if paths == vec![ptr("/mystery/field")])
         );
+    }
+
+    #[tokio::test]
+    async fn secret_only_batch_is_validated_and_accepts_valid_value() {
+        let subject = Uuid::from_u128(1);
+        let outcome = capture(
+            &fixed_subject_schema(),
+            &registry_with_self(subject),
+            &json!({}),
+            &changes(&[("/self/salary", json!(100))]),
+            &salary_validator(),
+            None,
+        )
+        .await
+        .unwrap();
+        // No plaintext changes — yet the secret value was validated and the
+        // partition produced.
+        assert!(outcome.plaintext.is_empty());
+        assert_eq!(outcome.secret.len(), 1);
+        assert_eq!(outcome.secret[0].role_path, ptr("/self"));
+    }
+
+    #[tokio::test]
+    async fn secret_only_batch_with_invalid_value_is_rejected_before_encryption() {
+        let subject = Uuid::from_u128(1);
+        // `salary` must be an integer; a string violates the schema. With no
+        // plaintext change in the batch, the old plaintext-only guard would
+        // have skipped validation entirely.
+        let err = capture(
+            &fixed_subject_schema(),
+            &registry_with_self(subject),
+            &json!({}),
+            &changes(&[("/self/salary", json!("lots"))]),
+            &salary_validator(),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, CaptureError::InvalidData(_)));
     }
 
     #[tokio::test]

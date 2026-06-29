@@ -13,6 +13,16 @@
         }
       ]
     },
+    "persons": {
+      "description": "Per-passenger details, keyed by passenger ref (e.g. `passenger_0`).\nEach entry is a crypto subject `/persons/{ref}`; the PII fields within\n(marked `x-subject`) are encrypted under that passenger's DEK.",
+      "type": [
+        "object",
+        "null"
+      ],
+      "additionalProperties": {
+        "$ref": "#/$defs/PassengerDetail"
+      }
+    },
     "search": {
       "anyOf": [
         {
@@ -352,6 +362,68 @@
         "adults",
         "children",
         "infants"
+      ]
+    },
+    "PassengerDetail": {
+      "description": "Per-passenger details. All optional — captured progressively. The PII\nfields carry `x-subject = \"/persons/*\"`, marking them secret under the\npassenger's own subject (`/persons/{ref}`); `passengerType` is plaintext (an\noperational signal the workflow reads directly).",
+      "type": "object",
+      "properties": {
+        "dateOfBirth": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date",
+          "x-subject": "/persons/*"
+        },
+        "firstName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "x-subject": "/persons/*"
+        },
+        "lastName": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "minLength": 1,
+          "x-subject": "/persons/*"
+        },
+        "nationality": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-subject": "/persons/*"
+        },
+        "passengerType": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PassengerType"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "passportNumber": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "x-subject": "/persons/*"
+        }
+      }
+    },
+    "PassengerType": {
+      "type": "string",
+      "enum": [
+        "adult",
+        "child",
+        "infant"
       ]
     },
     "Payment": {
