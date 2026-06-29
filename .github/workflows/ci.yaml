@@ -50,14 +50,18 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      # Formatting needs no compilation, so check it first — it fails in
+      # seconds rather than after the clippy build.
+      - name: Format
+        shell: bash
+        run: cargo fmt --all --check
+
       - name: Run sccache-cache
         uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Lints
         shell: bash
-        run: |
-          cargo fmt --all --check
-          cargo clippy --all-targets -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
+        run: cargo clippy --all-targets -- --no-deps -Dclippy::pedantic -Dclippy::nursery -Dwarnings
 
       - name: Docs
         shell: bash

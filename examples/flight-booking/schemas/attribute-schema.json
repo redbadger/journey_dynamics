@@ -1,9 +1,9 @@
 {
   "permissive": false,
   "plaintext_prefixes": [
+    "/booking",
     "/search",
-    "/searchResults",
-    "/booking"
+    "/searchResults"
   ],
   "namespace_patterns": [
     {
@@ -12,5 +12,7 @@
         "/passengerType"
       ]
     }
-  ]
+  ],
+  "secret_paths": [],
+  "plaintext_paths": []
 }
