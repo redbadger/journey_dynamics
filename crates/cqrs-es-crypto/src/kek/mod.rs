@@ -42,6 +42,17 @@ use zeroize::Zeroizing;
 
 use crate::cipher::{CryptoError, KeyMaterial};
 
+// KEK provider implementations. Cloud providers are one feature-gated submodule
+// each (`kek::gcp`, and future `kek::aws` / `kek::azure`); `composite` layers two
+// providers for zero-downtime migration between KEKs.
+pub mod composite;
+#[cfg(feature = "gcp-kms")]
+pub mod gcp;
+
+pub use composite::CompositeKekProvider;
+#[cfg(feature = "gcp-kms")]
+pub use gcp::{GcpKmsKekProvider, TokenSource};
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WrappedDek
 // ─────────────────────────────────────────────────────────────────────────────
