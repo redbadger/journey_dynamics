@@ -16,6 +16,9 @@ testing = []
 derive = ["dep:cqrs-es-crypto-derive"]
 chrono = ["derive", "cqrs-es-crypto-derive/chrono"]
 postgres = ["dep:sqlx"]
+# Google Cloud KMS-backed KekProvider (the KEK never leaves KMS). Pulls a
+# rustls-only reqwest so the single-TLS-stack / distroless invariant holds.
+gcp-kms = ["dep:reqwest"]
 
 [dependencies]
 cqrs-es-crypto-derive = { version = "0.3.0", path = "../cqrs-es-crypto-derive", optional = true }
@@ -24,6 +27,10 @@ aes-kw = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
 cqrs-es = "0.5"
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sqlx = { version = "0.8", features = [
@@ -49,6 +56,7 @@ required-features = ["postgres", "testing"]
 async-trait = "0.1"
 base64 = "0.22"
 cqrs-es = "0.5"
+wiremock = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", features = [
