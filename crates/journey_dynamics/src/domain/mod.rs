@@ -5,13 +5,13 @@
 //   note  = "use `SetAttributes` / `AttributesSet` (path-keyed attributes)"
 // ──────────────────────────────────────────────────────────────────────────────
 
-pub mod attribute_schema;
 pub mod commands;
 pub mod events;
 pub mod journey;
-pub mod json_path;
 pub use attribute_schema::{
     AttributeEntry, AttributeSchema, AttributeSchemaConfig, Classification, NamespacePattern,
     NamespacePatternConfig, PiiClass, classify_changes,
 };
+pub use es_capture::attribute_schema;
+pub use es_capture::json_path;
 pub use json_path::{assign_all, flatten};

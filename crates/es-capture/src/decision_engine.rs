@@ -13,10 +13,7 @@ use zen_engine::{
     DecisionEngine as ZenEngine, DecisionGraphResponse, EvaluationOptions, model::DecisionContent,
 };
 
-use crate::domain::{
-    assign_all,
-    journey::{Journey, JourneyState},
-};
+use crate::json_path::assign_all;
 use jsonptr::PointerBuf;
 
 // ---------------------------------------------------------------------------
@@ -63,9 +60,15 @@ pub struct WorkflowDecision {
 
 #[async_trait]
 pub trait DecisionEngine: Send + Sync {
+    /// Evaluate the workflow against the aggregate's accumulated plaintext
+    /// `current_state` plus an explicit `new_data` slice keyed under
+    /// `current_step`.
+    ///
+    /// # Errors
+    /// Returns an error if the underlying engine fails to evaluate.
     async fn evaluate_next_steps(
         &self,
-        journey: &Journey,
+        current_state: &Value,
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>>;
@@ -73,18 +76,22 @@ pub trait DecisionEngine: Send + Sync {
     /// Evaluate the workflow after a `SetAttributes` command.
     ///
     /// The default implementation rehydrates `pending_changes` into a nested
-    /// JSON tree, merges it with the journey's current `shared_data`, and
+    /// JSON tree, merges it with the aggregate's current `current_state`, and
     /// delegates to [`Self::evaluate_next_steps`] with an empty step string.
-    /// Phase B will provide a more refined implementation for the `GoRules`
-    /// engine that reads flat attribute paths directly.
+    ///
+    /// `current_state` is the aggregate's accumulated plaintext bag (the data
+    /// that was historically read from `Journey::shared_data`).
+    ///
+    /// # Errors
+    /// Returns an error if the changes cannot be applied or the engine fails.
     async fn evaluate_attributes(
         &self,
-        journey: &Journey,
+        current_state: &Value,
         pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut merged = journey.shared_data().clone();
+        let mut merged = current_state.clone();
         assign_all(&mut merged, pending_changes)?;
-        self.evaluate_next_steps(journey, "", &merged).await
+        self.evaluate_next_steps(current_state, "", &merged).await
     }
 }
 
@@ -98,36 +105,32 @@ pub struct SimpleDecisionEngine;
 impl DecisionEngine for SimpleDecisionEngine {
     async fn evaluate_next_steps(
         &self,
-        journey: &Journey,
+        current_state: &Value,
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut accumulated_data = journey.shared_data().clone();
+        let mut accumulated_data = current_state.clone();
         let keyed_data = serde_json::json!({ current_step: new_data });
         json_patch::merge(&mut accumulated_data, &keyed_data);
-        let state = journey.state();
 
-        let suggested_actions = match state {
-            JourneyState::InProgress => {
-                // Check if any step has "first_name" key
-                let has_first_name = accumulated_data.as_object().is_some_and(|obj| {
-                    obj.values().any(|value| {
-                        value
-                            .as_object()
-                            .and_then(|obj| obj.get("first_name"))
-                            .is_some()
-                    })
-                });
+        // The engine is only consulted while the aggregate is in progress
+        // (a completed aggregate rejects further attribute changes upstream),
+        // so there is no terminal-state branch here.
+        let has_first_name = accumulated_data.as_object().is_some_and(|obj| {
+            obj.values().any(|value| {
+                value
+                    .as_object()
+                    .and_then(|obj| obj.get("first_name"))
+                    .is_some()
+            })
+        });
 
-                if has_first_name {
-                    vec!["form_3".to_string()]
-                } else if current_step.contains("section_2") {
-                    vec!["form_4".to_string()]
-                } else {
-                    vec![]
-                }
-            }
-            JourneyState::Complete => vec![],
+        let suggested_actions = if has_first_name {
+            vec!["form_3".to_string()]
+        } else if current_step.contains("section_2") {
+            vec!["form_4".to_string()]
+        } else {
+            vec![]
         };
 
         Ok(WorkflowDecision {
@@ -246,11 +249,11 @@ impl GoRulesDecisionEngine {
 impl DecisionEngine for GoRulesDecisionEngine {
     async fn evaluate_next_steps(
         &self,
-        journey: &Journey,
+        current_state: &Value,
         current_step: &str,
         new_data: &Value,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut captured_data = journey.shared_data().clone();
+        let mut captured_data = current_state.clone();
         json_patch::merge(&mut captured_data, new_data);
 
         // Wrap in the legacy { currentStep, capturedData } envelope expected by
@@ -274,10 +277,10 @@ impl DecisionEngine for GoRulesDecisionEngine {
     /// and derives the current phase purely from the data.
     async fn evaluate_attributes(
         &self,
-        journey: &Journey,
+        current_state: &Value,
         pending_changes: &BTreeMap<PointerBuf, Value>,
     ) -> Result<WorkflowDecision, Box<dyn std::error::Error + Send + Sync>> {
-        let mut data = journey.shared_data().clone();
+        let mut data = current_state.clone();
         assign_all(&mut data, pending_changes)?;
         self.run(data).await
     }

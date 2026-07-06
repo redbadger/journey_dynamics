@@ -14,7 +14,7 @@
 use cqrs_es::persist::SerializedEvent;
 use cqrs_es_crypto::PersistHook;
 use journey_dynamics::subject_lookup_hook::SubjectLookupHook;
-use serde_json::{Value, json};
+use serde_json::json;
 use uuid::Uuid;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -35,34 +35,31 @@ async fn setup_test_db() -> sqlx::Pool<sqlx::Postgres> {
     pool
 }
 
-fn person_captured(subject_id: Uuid, email: &str) -> SerializedEvent {
+fn subject_registered(subject_id: Uuid, email: &str) -> SerializedEvent {
     SerializedEvent::new(
         Uuid::new_v4().to_string(),
         1,
         "Journey".to_string(),
-        "PersonCaptured".to_string(),
+        "SubjectRegistered".to_string(),
         "1.0".to_string(),
         json!({
-            "PersonCaptured": {
-                "person_ref": "passenger_0",
+            "SubjectRegistered": {
                 "subject_id": subject_id.to_string(),
-                "name": "Test User",
-                "email": email,
-                "phone": Value::Null
+                "email": email
             }
         }),
         json!({}),
     )
 }
 
-fn non_pii_event() -> SerializedEvent {
+fn non_subject_event() -> SerializedEvent {
     SerializedEvent::new(
         Uuid::new_v4().to_string(),
         1,
         "Journey".to_string(),
-        "JourneyModified".to_string(),
+        "JourneyOpened".to_string(),
         "1.0".to_string(),
-        json!({ "Modified": { "step": "search", "data": {} } }),
+        json!({ "Started": { "id": Uuid::new_v4().to_string() } }),
         json!({}),
     )
 }
@@ -93,15 +90,18 @@ async fn cleanup(pool: &sqlx::Pool<sqlx::Postgres>, subject_id: &Uuid) {
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[tokio::test]
-async fn test_person_captured_inserts_email_lowercase() {
+async fn test_subject_registered_inserts_email_lowercase() {
     let pool = setup_test_db().await;
     let hook = SubjectLookupHook;
     let subject_id = Uuid::new_v4();
 
     let mut tx = pool.begin().await.unwrap();
-    hook.on_persist(&[person_captured(subject_id, "Alice@Example.COM")], &mut tx)
-        .await
-        .unwrap();
+    hook.on_persist(
+        &[subject_registered(subject_id, "Alice@Example.COM")],
+        &mut tx,
+    )
+    .await
+    .unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(row_count(&pool, &subject_id).await, 1);
@@ -114,21 +114,23 @@ async fn test_person_captured_inserts_email_lowercase() {
 }
 
 #[tokio::test]
-async fn test_non_person_captured_event_produces_no_row() {
+async fn test_non_subject_event_produces_no_row() {
     let pool = setup_test_db().await;
     let hook = SubjectLookupHook;
     let subject_id = Uuid::new_v4();
 
     let mut tx = pool.begin().await.unwrap();
-    hook.on_persist(&[non_pii_event()], &mut tx).await.unwrap();
+    hook.on_persist(&[non_subject_event()], &mut tx)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     assert_eq!(row_count(&pool, &subject_id).await, 0);
 }
 
 #[tokio::test]
-async fn test_second_person_captured_updates_email() {
-    // Upsert semantics: a second PersonCaptured for the same subject
+async fn test_second_registration_updates_email() {
+    // Upsert semantics: a second SubjectRegistered for the same subject
     // (e.g. an email change) overwrites email_lower rather than inserting
     // a duplicate row.
     let pool = setup_test_db().await;
@@ -138,8 +140,8 @@ async fn test_second_person_captured_updates_email() {
     let mut tx = pool.begin().await.unwrap();
     hook.on_persist(
         &[
-            person_captured(subject_id, "first@example.com"),
-            person_captured(subject_id, "second@example.com"),
+            subject_registered(subject_id, "first@example.com"),
+            subject_registered(subject_id, "second@example.com"),
         ],
         &mut tx,
     )
@@ -155,7 +157,7 @@ async fn test_second_person_captured_updates_email() {
     assert_eq!(
         email_for(&pool, &subject_id).await.as_deref(),
         Some("second@example.com"),
-        "email must reflect the second PersonCaptured"
+        "email must reflect the second SubjectRegistered"
     );
 
     cleanup(&pool, &subject_id).await;
@@ -170,9 +172,9 @@ async fn test_missing_subject_id_is_silently_skipped() {
         Uuid::new_v4().to_string(),
         1,
         "Journey".to_string(),
-        "PersonCaptured".to_string(),
+        "SubjectRegistered".to_string(),
         "1.0".to_string(),
-        json!({ "PersonCaptured": { "person_ref": "p0", "email": "x@x.com" } }),
+        json!({ "SubjectRegistered": { "email": "x@x.com" } }),
         json!({}),
     );
 
@@ -192,11 +194,10 @@ async fn test_unparseable_uuid_is_silently_skipped() {
         Uuid::new_v4().to_string(),
         1,
         "Journey".to_string(),
-        "PersonCaptured".to_string(),
+        "SubjectRegistered".to_string(),
         "1.0".to_string(),
         json!({
-            "PersonCaptured": {
-                "person_ref": "p0",
+            "SubjectRegistered": {
                 "subject_id": "not-a-uuid",
                 "email": "x@x.com"
             }
@@ -221,11 +222,10 @@ async fn test_missing_email_is_silently_skipped() {
         Uuid::new_v4().to_string(),
         1,
         "Journey".to_string(),
-        "PersonCaptured".to_string(),
+        "SubjectRegistered".to_string(),
         "1.0".to_string(),
         json!({
-            "PersonCaptured": {
-                "person_ref": "p0",
+            "SubjectRegistered": {
                 "subject_id": subject_id.to_string()
             }
         }),
@@ -241,19 +241,19 @@ async fn test_missing_email_is_silently_skipped() {
 }
 
 #[tokio::test]
-async fn test_mixed_batch_only_writes_person_captured_rows() {
-    // A batch containing PersonCaptured events mixed with other event types
-    // must produce exactly one row per PersonCaptured subject.
+async fn test_mixed_batch_only_writes_subject_registered_rows() {
+    // A batch containing SubjectRegistered events mixed with other event types
+    // must produce exactly one row per SubjectRegistered subject.
     let pool = setup_test_db().await;
     let hook = SubjectLookupHook;
     let subject_a = Uuid::new_v4();
     let subject_b = Uuid::new_v4();
 
     let events = vec![
-        person_captured(subject_a, "a@example.com"),
-        non_pii_event(),
-        person_captured(subject_b, "b@example.com"),
-        non_pii_event(),
+        subject_registered(subject_a, "a@example.com"),
+        non_subject_event(),
+        subject_registered(subject_b, "b@example.com"),
+        non_subject_event(),
     ];
 
     let mut tx = pool.begin().await.unwrap();

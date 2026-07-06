@@ -1,512 +1,36 @@
-use std::{collections::BTreeMap, sync::Arc};
+//! The Journey domain aggregate — a thin shell over es-capture's generic
+//! [`CaptureAggregate`].
+//!
+//! The journey domain adds no aggregate behaviour of its own: it selects the
+//! `"Journey"` aggregate type via [`JourneyConfig`] and re-exports the generic
+//! capture command/event/error/services types under their historical names.
 
-use cqrs_es::{Aggregate, event_sink::EventSink};
-use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use thiserror::Error;
-use uuid::Uuid;
+use es_capture::aggregate::{CaptureAggregate, CaptureConfig};
 
-use crate::{
-    domain::{
-        AttributeSchema, assign_all,
-        attribute_schema::{PiiClass, classify_changes},
-        commands::JourneyCommand,
-        events::{JourneyEvent, SecretPartitionData},
-    },
-    services::{decision_engine::DecisionEngine, schema_validator::SchemaValidator},
+pub use es_capture::aggregate::{
+    CaptureError as JourneyError, CaptureServices as JourneyServices, CaptureState as JourneyState,
+    WorkflowDecisionState,
 };
-use jsonptr::PointerBuf;
+pub use es_capture::subject_registry::SubjectRegistration;
 
-/// Registration record for a data subject captured via [`JourneyCommand::RegisterSubject`].
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubjectRegistration {
-    /// Contact email — used for GDPR erasure lookup.
-    pub email: String,
-    /// Set to `true` once a `SubjectForgotten` event is applied.
-    pub forgotten: bool,
-}
+/// Per-domain configuration selecting the `"Journey"` aggregate type.
+pub struct JourneyConfig;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Journey {
-    id: Uuid,
-    state: JourneyState,
-    /// Accumulated journey attributes (plaintext and decrypted secret values).
-    /// Never encrypted at rest. Fully intact after any shredding operation.
-    shared_data: Value,
-    /// Registered subjects, keyed by subject UUID.
-    subjects: BTreeMap<Uuid, SubjectRegistration>,
-    /// Role-path → subject-UUID bindings established by `BindSubject`.
-    bindings: BTreeMap<PointerBuf, Uuid>,
-    latest_workflow_decision: Option<WorkflowDecisionState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkflowDecisionState {
-    pub suggested_actions: Vec<String>,
-    /// Phase label from the decision engine.
-    /// `None` until the `WorkflowEvaluated` event carries `phase` (step B1).
-    pub phase: Option<String>,
-}
-
-#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum JourneyState {
-    #[default]
-    InProgress,
-    Complete,
-}
-
-impl Aggregate for Journey {
-    type Command = JourneyCommand;
-    type Event = JourneyEvent;
-    type Error = JourneyError;
-    type Services = JourneyServices;
-
+impl CaptureConfig for JourneyConfig {
     const TYPE: &'static str = "Journey";
-
-    #[allow(clippy::too_many_lines)]
-    async fn handle(
-        &mut self,
-        command: Self::Command,
-        services: &Self::Services,
-        sink: &EventSink<Self>,
-    ) -> Result<(), Self::Error> {
-        match command {
-            JourneyCommand::Start { id } => {
-                if self.id == id {
-                    Err(JourneyError::AlreadyStarted)
-                } else {
-                    sink.write(JourneyEvent::Started { id }, self).await;
-                    Ok(())
-                }
-            }
-
-            JourneyCommand::SetAttributes { changes } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                if changes.is_empty() {
-                    return Err(JourneyError::InvalidData("no changes".to_string()));
-                }
-
-                // Classify every path against the attribute schema.
-                // The subject_lookup resolves a role path to its bound subject
-                // UUID via `self.bindings`.  Forgotten subjects return `None` so
-                // their paths land in `unknown` and the command is rejected.
-                let schema = services.attribute_schema();
-                let classification = {
-                    let bindings = &self.bindings;
-                    let subjects = &self.subjects;
-                    classify_changes(schema, &changes, |subject_path| {
-                        let uuid = *bindings.get(subject_path)?;
-                        if subjects.get(&uuid).is_some_and(|r| r.forgotten) {
-                            return None;
-                        }
-                        Some(uuid)
-                    })
-                };
-
-                // Reject paths that are not registered in the schema at all.
-                let truly_unknown: Vec<PointerBuf> = classification
-                    .unknown
-                    .iter()
-                    .filter(|p| schema.classify(p).is_none())
-                    .cloned()
-                    .collect();
-                if !truly_unknown.is_empty() {
-                    return Err(JourneyError::UnknownAttributePath(truly_unknown));
-                }
-
-                // Reject secret paths whose person slot hasn't been created yet.
-                for path in &classification.unknown {
-                    let Some(cls) = schema.classify(path) else {
-                        continue;
-                    };
-                    let PiiClass::Secret { subject } = cls.as_ref() else {
-                        continue;
-                    };
-                    let person_ref = subject
-                        .as_str()
-                        .strip_prefix("/persons/")
-                        .unwrap_or(subject.as_str())
-                        .to_string();
-                    return Err(JourneyError::PersonNotFound(person_ref));
-                }
-
-                // Build one SecretPartitionData per role path, sorted
-                // deterministically.  The role path and UUID flow directly from
-                // the classification; no reverse map needed.
-                let mut secret_partitions: Vec<SecretPartitionData> = classification
-                    .secret_by_subject
-                    .into_iter()
-                    .map(
-                        |(role_path, (subject_id, secret_changes))| SecretPartitionData {
-                            role_path,
-                            subject_id,
-                            changes: secret_changes,
-                        },
-                    )
-                    .collect();
-                secret_partitions.sort_by(|a, b| a.role_path.cmp(&b.role_path));
-
-                // Validate plaintext changes merged with current shared_data.
-                if !classification.plaintext.is_empty() {
-                    let mut merged_data = self.shared_data.clone();
-
-                    assign_all(&mut merged_data, &classification.plaintext)?;
-
-                    if let Err(e) = services.schema_validator().validate(&merged_data) {
-                        return Err(JourneyError::InvalidData(e.to_string()));
-                    }
-                }
-
-                // Evaluate the workflow with the full (plaintext + secret) change set.
-                let decision = services
-                    .decision_engine()
-                    .evaluate_attributes(self, &changes)
-                    .await
-                    .map_err(|e| JourneyError::DecisionEngineError(e.to_string()))?;
-
-                sink.write(
-                    JourneyEvent::AttributesSet {
-                        plaintext: classification.plaintext,
-                        secret_partitions,
-                    },
-                    self,
-                )
-                .await;
-
-                sink.write(
-                    JourneyEvent::WorkflowEvaluated {
-                        suggested_actions: decision.suggested_actions,
-                        phase: decision.phase,
-                    },
-                    self,
-                )
-                .await;
-
-                Ok(())
-            }
-
-            JourneyCommand::Complete => {
-                if self.id == Uuid::default() {
-                    Err(JourneyError::NotFound)
-                } else if JourneyState::Complete == self.state {
-                    Err(JourneyError::AlreadyCompleted)
-                } else {
-                    sink.write(JourneyEvent::Completed, self).await;
-                    Ok(())
-                }
-            }
-
-            JourneyCommand::RegisterSubject { subject_id, email } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                // Idempotent: skip if already registered with the same email.
-                if self
-                    .subjects
-                    .get(&subject_id)
-                    .is_some_and(|reg| reg.email == email)
-                {
-                    return Ok(());
-                }
-                sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
-                    .await;
-                Ok(())
-            }
-
-            JourneyCommand::BindSubject {
-                role_path,
-                subject_id,
-            } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                if !self.subjects.contains_key(&subject_id) {
-                    return Err(JourneyError::SubjectNotRegistered);
-                }
-                match self.bindings.get(&role_path) {
-                    Some(&existing) if existing != subject_id => {
-                        return Err(JourneyError::RolePathConflict(role_path));
-                    }
-                    Some(_) => return Ok(()), // same subject — idempotent
-                    None => {}
-                }
-                sink.write(
-                    JourneyEvent::SubjectBound {
-                        role_path,
-                        subject_id,
-                    },
-                    self,
-                )
-                .await;
-                Ok(())
-            }
-
-            JourneyCommand::RegisterAndBindSubject {
-                role_path,
-                subject_id,
-                email,
-            } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                if JourneyState::Complete == self.state {
-                    return Err(JourneyError::AlreadyCompleted);
-                }
-                // Validate the binding upfront before emitting any events.
-                if let Some(&existing) = self.bindings.get(&role_path)
-                    && existing != subject_id
-                {
-                    return Err(JourneyError::RolePathConflict(role_path));
-                }
-                // Emit SubjectRegistered if new or email changed.
-                if self
-                    .subjects
-                    .get(&subject_id)
-                    .is_none_or(|reg| reg.email != email)
-                {
-                    sink.write(JourneyEvent::SubjectRegistered { subject_id, email }, self)
-                        .await;
-                }
-                // Emit SubjectBound if not already bound.
-                if !self.bindings.contains_key(&role_path) {
-                    sink.write(
-                        JourneyEvent::SubjectBound {
-                            role_path,
-                            subject_id,
-                        },
-                        self,
-                    )
-                    .await;
-                }
-                Ok(())
-            }
-
-            JourneyCommand::ForgetSubject { subject_id } => {
-                if self.id == Uuid::default() {
-                    return Err(JourneyError::NotFound);
-                }
-                // Only emit SubjectForgotten if the subject is still active.
-                // This keeps the shredding endpoint idempotent.
-                let needs_forgetting = self
-                    .subjects
-                    .get(&subject_id)
-                    .is_some_and(|reg| !reg.forgotten);
-                if needs_forgetting {
-                    sink.write(JourneyEvent::SubjectForgotten { subject_id }, self)
-                        .await;
-                }
-                Ok(())
-            }
-        }
-    }
-
-    #[allow(deprecated, clippy::too_many_lines)]
-    fn apply(&mut self, event: Self::Event) {
-        match event {
-            JourneyEvent::Started { id } => {
-                self.id = id;
-                self.state = JourneyState::InProgress;
-            }
-            JourneyEvent::Modified { data, .. } => {
-                json_patch::merge(&mut self.shared_data, &data);
-            }
-            JourneyEvent::PersonCaptured {
-                person_ref,
-                subject_id,
-                email,
-                ..
-            } => {
-                // Populate subjects/bindings so that SetAttributes and
-                // ForgetSubject resolve correctly when replaying legacy events.
-                let role_path: PointerBuf = PointerBuf::parse(format!("/persons/{person_ref}"))
-                    .unwrap_or_else(|_| {
-                        PointerBuf::parse("/persons/unknown").expect("static fallback")
-                    });
-                self.subjects
-                    .entry(subject_id)
-                    .and_modify(|reg| reg.email.clone_from(&email))
-                    .or_insert_with(|| SubjectRegistration {
-                        email: email.clone(),
-                        forgotten: false,
-                    });
-                self.bindings.insert(role_path, subject_id);
-            }
-            JourneyEvent::PersonDetailsUpdated { .. } | JourneyEvent::StepProgressed { .. } => {
-                // Legacy events. Projected directly from event payloads by
-                // StructuredJourneyViewRepository; no write-side state to update.
-            }
-            JourneyEvent::AttributesSet {
-                plaintext,
-                secret_partitions,
-            } => {
-                // Apply plaintext changes directly into shared_data.
-                assign_all(&mut self.shared_data, &plaintext).unwrap();
-                // Apply secret changes.
-                for partition in &secret_partitions {
-                    // Write every change at its full path into shared_data.
-                    assign_all(&mut self.shared_data, &partition.changes)
-                        .expect("events should have valid JSON pointers");
-                }
-            }
-
-            JourneyEvent::WorkflowEvaluated {
-                suggested_actions,
-                phase,
-            } => {
-                self.latest_workflow_decision = Some(WorkflowDecisionState {
-                    suggested_actions,
-                    phase,
-                });
-            }
-            JourneyEvent::Completed => {
-                self.state = JourneyState::Complete;
-            }
-            JourneyEvent::SubjectForgotten { subject_id } => {
-                if let Some(reg) = self.subjects.get_mut(&subject_id) {
-                    reg.forgotten = true;
-                }
-            }
-            JourneyEvent::SubjectRegistered { subject_id, email } => {
-                self.subjects
-                    .entry(subject_id)
-                    .and_modify(|reg| reg.email.clone_from(&email))
-                    .or_insert_with(|| SubjectRegistration {
-                        email,
-                        forgotten: false,
-                    });
-            }
-            JourneyEvent::SubjectBound {
-                role_path,
-                subject_id,
-            } => {
-                self.bindings.insert(role_path, subject_id);
-            }
-        }
-    }
 }
 
-#[derive(Error, Debug, PartialEq, Eq)]
-pub enum JourneyError {
-    #[error("Journey not found")]
-    NotFound,
-    #[error("Journey already opened")]
-    AlreadyStarted,
-    #[error("Journey already closed")]
-    AlreadyCompleted,
-    #[error("Decision engine error: {0}")]
-    DecisionEngineError(String),
-    #[error("Invalid data: {0}")]
-    InvalidData(String),
-    #[error("Person slot '{0}' is already bound to a different subject")]
-    PersonRefConflict(String),
-    #[error("Person slot '{0}' does not exist — call CapturePerson first")]
-    PersonNotFound(String),
-    #[error("Unknown attribute paths: {0:?}")]
-    UnknownAttributePath(Vec<PointerBuf>),
-    #[error("Invalid JSON pointer: {0}")]
-    InvalidJsonPointer(#[from] jsonptr::assign::Error),
-    #[error("Subject not registered — call RegisterSubject first")]
-    SubjectNotRegistered,
-    #[error("Role path '{0}' is already bound to a different subject")]
-    RolePathConflict(PointerBuf),
-}
-
-pub struct JourneyServices {
-    decision_engine: Arc<dyn DecisionEngine>,
-    schema_validator: Arc<dyn SchemaValidator>,
-    attribute_schema: Arc<AttributeSchema>,
-}
-
-impl JourneyServices {
-    pub fn new(
-        decision_engine: Arc<dyn DecisionEngine>,
-        schema_validator: Arc<dyn SchemaValidator>,
-        attribute_schema: Arc<AttributeSchema>,
-    ) -> Self {
-        Self {
-            decision_engine,
-            schema_validator,
-            attribute_schema,
-        }
-    }
-
-    #[must_use]
-    pub fn decision_engine(&self) -> &Arc<dyn DecisionEngine> {
-        &self.decision_engine
-    }
-
-    #[must_use]
-    pub fn schema_validator(&self) -> &Arc<dyn SchemaValidator> {
-        &self.schema_validator
-    }
-
-    #[must_use]
-    pub const fn attribute_schema(&self) -> &Arc<AttributeSchema> {
-        &self.attribute_schema
-    }
-}
-
-impl Journey {
-    #[must_use]
-    pub const fn id(&self) -> Uuid {
-        self.id
-    }
-
-    #[must_use]
-    pub const fn state(&self) -> JourneyState {
-        self.state
-    }
-
-    #[must_use]
-    pub const fn shared_data(&self) -> &Value {
-        &self.shared_data
-    }
-
-    #[must_use]
-    pub const fn latest_workflow_decision(&self) -> Option<&WorkflowDecisionState> {
-        self.latest_workflow_decision.as_ref()
-    }
-
-    #[must_use]
-    pub const fn subjects(&self) -> &BTreeMap<Uuid, SubjectRegistration> {
-        &self.subjects
-    }
-
-    #[must_use]
-    pub const fn bindings(&self) -> &BTreeMap<PointerBuf, Uuid> {
-        &self.bindings
-    }
-}
-
-impl Default for Journey {
-    fn default() -> Self {
-        Self {
-            id: Uuid::default(),
-            state: JourneyState::default(),
-            shared_data: json!({}),
-            subjects: BTreeMap::new(),
-            bindings: BTreeMap::new(),
-            latest_workflow_decision: None,
-        }
-    }
-}
+/// The journey aggregate: the generic capture spine specialised
+/// for the journey domain.
+pub type Journey = CaptureAggregate<JourneyConfig>;
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::too_many_lines)]
     #![allow(deprecated)]
+    use cqrs_es::Aggregate;
     use cqrs_es::test::TestFramework;
+    use jsonptr::PointerBuf;
     use serde_json::json;
     use std::assert_matches;
     use std::collections::BTreeMap;
@@ -517,7 +41,8 @@ mod tests {
     use crate::domain::{
         AttributeSchema,
         attribute_schema::{AttributeEntry, PiiClass},
-        events::SecretPartitionData,
+        commands::JourneyCommand,
+        events::{JourneyEvent, SecretPartitionData},
     };
     use crate::services::decision_engine::SimpleDecisionEngine;
     use crate::services::schema_validator::JsonSchemaValidator;
@@ -549,6 +74,13 @@ mod tests {
     fn services() -> JourneyServices {
         JourneyServices::new(
             Arc::new(SimpleDecisionEngine),
+            create_test_schema_validator(),
+            Arc::new(AttributeSchema::permissive()),
+        )
+    }
+
+    fn services_without_engine() -> JourneyServices {
+        JourneyServices::without_decision_engine(
             create_test_schema_validator(),
             Arc::new(AttributeSchema::permissive()),
         )
@@ -614,9 +146,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::Modified {
-                    step: "first_name".to_string(),
-                    data: json!("Joe"),
+                JourneyEvent::AttributesSet {
+                    plaintext: BTreeMap::from([("/first_name".parse().unwrap(), json!("Joe"))]),
+                    secret_partitions: vec![],
                 },
             ])
             .when(JourneyCommand::Complete)
@@ -659,12 +191,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
             ])
             .when(JourneyCommand::ForgetSubject { subject_id })
@@ -681,12 +210,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
                 // The subject was already forgotten in a prior shredding call.
                 JourneyEvent::SubjectForgotten { subject_id },
@@ -706,12 +232,9 @@ mod tests {
         JourneyTester::with(services())
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_a,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
             ])
             // subject_b has no slot in this journey.
@@ -743,19 +266,13 @@ mod tests {
         let mut journey = Journey::default();
         for event in [
             JourneyEvent::Started { id },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_0".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_a,
-                name: "Alice Smith".to_string(),
                 email: "alice@example.com".to_string(),
-                phone: None,
             },
-            JourneyEvent::PersonCaptured {
-                person_ref: "passenger_1".to_string(),
+            JourneyEvent::SubjectRegistered {
                 subject_id: subject_b,
-                name: "Bob Jones".to_string(),
                 email: "bob@example.com".to_string(),
-                phone: None,
             },
             JourneyEvent::SubjectForgotten {
                 subject_id: subject_a,
@@ -1078,13 +595,16 @@ mod tests {
         let id = Uuid::new_v4();
         let mut journey = Journey::default();
         journey.apply(JourneyEvent::Started { id });
-        journey.apply(JourneyEvent::Modified {
-            step: "search".to_string(),
-            data: json!({ "origin": "LHR", "destination": "JFK" }),
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext: BTreeMap::from([
+                ("/origin".parse().unwrap(), json!("LHR")),
+                ("/destination".parse().unwrap(), json!("JFK")),
+            ]),
+            secret_partitions: vec![],
         });
-        journey.apply(JourneyEvent::Modified {
-            step: "pricing".to_string(),
-            data: json!({ "totalPrice": 450.00 }),
+        journey.apply(JourneyEvent::AttributesSet {
+            plaintext: BTreeMap::from([("/totalPrice".parse().unwrap(), json!(450.00))]),
+            secret_partitions: vec![],
         });
 
         assert_eq!(journey.shared_data()["origin"], json!("LHR"));
@@ -1178,7 +698,9 @@ mod tests {
         JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
             .given(vec![JourneyEvent::Started { id }])
             .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
+            .then_expect_error(JourneyError::SubjectNotResolved(
+                "/persons/passenger_0".parse().unwrap(),
+            ));
     }
 
     #[test]
@@ -1193,13 +715,6 @@ mod tests {
 
         let mut journey = Journey::default();
         journey.apply(JourneyEvent::Started { id });
-        journey.apply(JourneyEvent::PersonCaptured {
-            person_ref: "passenger_0".to_string(),
-            subject_id,
-            name: "Alice Smith".to_string(),
-            email: "alice@example.com".to_string(),
-            phone: None,
-        });
         journey.apply(JourneyEvent::AttributesSet {
             plaintext: BTreeMap::new(),
             secret_partitions: vec![SecretPartitionData {
@@ -1240,6 +755,24 @@ mod tests {
     }
 
     #[test]
+    fn set_attributes_without_engine_emits_no_workflow_evaluated() {
+        // With no decision engine configured, SetAttributes still accumulates
+        // attributes but emits only AttributesSet — no WorkflowEvaluated.
+        let id = Uuid::new_v4();
+        let mut changes = BTreeMap::new();
+        changes.insert("/first_name".parse().unwrap(), json!("Alice"));
+        let expected_plaintext = changes.clone();
+
+        JourneyTester::with(services_without_engine())
+            .given(vec![JourneyEvent::Started { id }])
+            .when(JourneyCommand::SetAttributes { changes })
+            .then_expect_events(vec![JourneyEvent::AttributesSet {
+                plaintext: expected_plaintext,
+                secret_partitions: vec![],
+            }]);
+    }
+
+    #[test]
     fn set_attributes_multi_subject_produces_one_partition_per_subject() {
         // A single SetAttributes touching two subjects' secret paths must emit
         // one SecretPartitionData per subject, sorted by person_ref.
@@ -1261,19 +794,21 @@ mod tests {
         JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
             .given(vec![
                 JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_id_0,
-                    name: "Alice Smith".to_string(),
                     email: "alice@example.com".to_string(),
-                    phone: None,
                 },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_1".to_string(),
+                JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_0".parse().unwrap(),
+                    subject_id: subject_id_0,
+                },
+                JourneyEvent::SubjectRegistered {
                     subject_id: subject_id_1,
-                    name: "Bob Jones".to_string(),
                     email: "bob@example.com".to_string(),
-                    phone: None,
+                },
+                JourneyEvent::SubjectBound {
+                    role_path: "/persons/passenger_1".parse().unwrap(),
+                    subject_id: subject_id_1,
                 },
             ])
             .when(JourneyCommand::SetAttributes { changes })
@@ -1373,7 +908,9 @@ mod tests {
                 JourneyEvent::SubjectForgotten { subject_id },
             ])
             .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
+            .then_expect_error(JourneyError::SubjectNotResolved(
+                "/persons/passenger_0".parse().unwrap(),
+            ));
     }
 
     #[test]
@@ -1433,36 +970,5 @@ mod tests {
                 jsonptr::assign::Error::OutOfBounds { .. }
             ))
         );
-    }
-
-    #[test]
-    fn set_attributes_rejects_secret_path_when_subject_forgotten_via_person_captured() {
-        // A PersonCaptured event followed by SubjectForgotten must prevent
-        // SetAttributes from using that subject's secret paths. This validates
-        // that PersonCaptured.apply() correctly populates self.subjects (not
-        // just self.bindings) so that the forgotten check in SetAttributes fires.
-        let id = Uuid::new_v4();
-        let subject_id = Uuid::new_v4();
-
-        let mut changes = BTreeMap::new();
-        changes.insert(
-            "/persons/passenger_0/passport".parse().unwrap(),
-            json!("AB123456"),
-        );
-
-        JourneyTester::with(services_with_attribute_schema(explicit_attribute_schema()))
-            .given(vec![
-                JourneyEvent::Started { id },
-                JourneyEvent::PersonCaptured {
-                    person_ref: "passenger_0".to_string(),
-                    subject_id,
-                    name: "Alice Smith".to_string(),
-                    email: "alice@example.com".to_string(),
-                    phone: None,
-                },
-                JourneyEvent::SubjectForgotten { subject_id },
-            ])
-            .when(JourneyCommand::SetAttributes { changes })
-            .then_expect_error(JourneyError::PersonNotFound("passenger_0".to_string()));
     }
 }

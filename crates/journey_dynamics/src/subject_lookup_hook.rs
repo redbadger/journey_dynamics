@@ -1,6 +1,6 @@
 //! [`PersistHook`] that maintains the `subject_lookup` table.
 //!
-//! For every `PersonCaptured` event, a `(subject_id, email_lower)` row is
+//! For every `SubjectRegistered` event, a `(subject_id, email_lower)` row is
 //! written to `subject_lookup` inside the same transaction as the event
 //! INSERT.  This guarantees the email → `subject_id` mapping is always
 //! consistent with the event store — no crash window.
@@ -10,7 +10,7 @@ use cqrs_es::persist::{PersistenceError, SerializedEvent};
 use cqrs_es_crypto::PersistHook;
 use uuid::Uuid;
 
-/// Upserts a `subject_lookup` row for every `PersonCaptured` event,
+/// Upserts a `subject_lookup` row for every `SubjectRegistered` event,
 /// atomically with the event INSERT.
 pub struct SubjectLookupHook;
 
@@ -22,25 +22,8 @@ impl PersistHook for SubjectLookupHook {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), PersistenceError> {
         for event in events {
-            // Extract (subject_id, email) from either PersonCaptured (legacy)
-            // or SubjectRegistered (new).
+            // Extract (subject_id, email) from SubjectRegistered events.
             let (subject_id, email) = match event.event_type.as_str() {
-                "PersonCaptured" => {
-                    let Some(inner) = event.payload.get("PersonCaptured") else {
-                        continue;
-                    };
-                    let Some(subject_id) = inner
-                        .get("subject_id")
-                        .and_then(|v| v.as_str())
-                        .and_then(|s| s.parse::<Uuid>().ok())
-                    else {
-                        continue;
-                    };
-                    let Some(email) = inner.get("email").and_then(|v| v.as_str()) else {
-                        continue;
-                    };
-                    (subject_id, email)
-                }
                 "SubjectRegistered" => {
                     let Some(inner) = event.payload.get("SubjectRegistered") else {
                         continue;
