@@ -5,8 +5,12 @@ that depend on `journey_dynamics`.
 
 **TL;DR.** A new command/event pair (`SetAttributes` / `AttributesSet`)
 replaces the step-scoped `Capture` / `CapturePersonDetails` and their
-events. The old surface is still fully functional but emits compile-time
-deprecation warnings. This guide shows how to clear those warnings.
+events. A new subject surface (`RegisterSubject` / `BindSubject` /
+`RegisterAndBindSubject` and their `SubjectRegistered` / `SubjectBound`
+events) replaces `CapturePerson`. **The old write-side commands
+(`Capture`, `CapturePerson`, `CapturePersonDetails`) have been removed
+and will no longer compile.** This guide shows how to migrate each
+call site to the replacement surface.
 
 If you only want the cheat sheet, jump to
 [Quick reference](#quick-reference).
@@ -48,34 +52,42 @@ through an `AttributeSchema`. Secrets are encrypted under the right
 subject's DEK by the crypto layer; plaintext attributes are stored
 verbatim in `shared_data`.
 
-## Backward-compatibility guarantee
+## What was removed
 
-Until a future, separately-scheduled removal RFC:
+The following write-side commands and aggregate internals have been
+deleted. Any code that references them will not compile.
 
-- `JourneyCommand::Capture` and `CapturePersonDetails` are still accepted
-  and behave identically to today.
-- They still emit `JourneyEvent::Modified` and
-  `JourneyEvent::PersonDetailsUpdated` respectively. Pattern-matchers on
-  those variants continue to fire for new submissions made via the
-  deprecated commands.
-- `Journey::current_step()`, `JourneyView::current_step`, and
-  `PersonSlot.details` / `PersonView.details` keep being populated.
-  `details` is kept in sync by a permanent mirror-write from
-  `AttributesSet`, so even consumers that still read `details` will see
-  fresh data from clients that have already migrated.
-- The HTTP route accepts both the legacy and the new command shapes.
+| Removed | Replacement |
+| --- | --- |
+| `JourneyCommand::Capture` | `JourneyCommand::SetAttributes` |
+| `JourneyCommand::CapturePerson` | `JourneyCommand::RegisterAndBindSubject` + `SetAttributes` |
+| `JourneyCommand::CapturePersonDetails` | `JourneyCommand::SetAttributes` |
+| `PersonSlot` struct | Read from `JourneyView::shared_data` under `persons/<ref>/…` |
+| `Journey::persons` field | Subjects are now in `Journey::subjects` + `Journey::bindings` |
+| `Journey::current_step` field | Read `WorkflowDecisionView.phase` |
 
-You can migrate writers and readers independently, on your own schedule.
+The **event** variants (`Modified`, `PersonDetailsUpdated`,
+`StepProgressed`, `PersonCaptured`) are **not** removed — they continue to
+replay from the historical event log. Projectors that pattern-match on
+them will keep working; see
+[recipe 7](#7-stop-pattern-matching-modified--persondetailsupdated--stepprogressed-in-projections)
+for guidance on when and how to drop those arms.
+
+`JourneyView::current_step` is still populated by replayed `StepProgressed`
+events, but will not be set by any new command. Prefer
+`WorkflowDecisionView.phase` for new journeys.
 
 ---
 
 ## Quick reference
 
-| Deprecated | Replacement |
+| Removed | Replacement |
 | --- | --- |
 | `JourneyCommand::Capture { step, data }` | `JourneyCommand::SetAttributes { changes }` with paths under `<step>/…` |
+| `JourneyCommand::CapturePerson { person_ref, subject_id, name, email, phone }` | `JourneyCommand::RegisterAndBindSubject { role_path, subject_id, email }` **plus** `SetAttributes` for `name` / `phone` (see [recipe 2](#2-replace-captureperson-with-registerandbindsubject)) |
 | `JourneyCommand::CapturePersonDetails { person_ref, data }` | `JourneyCommand::SetAttributes { changes }` with paths under `persons/<ref>/…` |
 | `JourneyEvent::Modified { step, data }` | `JourneyEvent::AttributesSet { plaintext, secret_partitions }` |
+| `JourneyEvent::PersonCaptured { … }` | `JourneyEvent::SubjectRegistered { subject_id, email }` + `JourneyEvent::SubjectBound { role_path, subject_id }` |
 | `JourneyEvent::PersonDetailsUpdated { … }` | One entry in `AttributesSet.secret_partitions` |
 | `JourneyEvent::StepProgressed { … }` | _No replacement._ Read `WorkflowDecisionView.phase` instead. |
 | `Journey::current_step()` / `JourneyView::current_step` | `WorkflowDecisionView.phase` |
@@ -143,7 +155,80 @@ the HTTP wire (B3 in the implementation plan):
 The extractor flattens this server-side. The canonical form remains
 `{ "changes": { … } }`.
 
-### 2. Replace a `CapturePersonDetails` submission
+### 2. Replace `CapturePerson` with `RegisterAndBindSubject`
+
+`CapturePerson` used to do three things in one command: register a
+subject's identity (`name`, `email`, `phone`), assign it a journey-local
+slot name (`person_ref`), and bind the two together. In the new model those
+concerns are split:
+
+- **Identity → register by email.** `RegisterSubject` records the
+  `subject_id → email` mapping. Email is the key used to find a subject
+  during a GDPR erasure request, so it stays on the command.
+- **Slot → role path.** The old `person_ref` (e.g. `"passenger_0"`) becomes
+  a full `role_path` (e.g. `"persons/passenger_0"`), which is also used as
+  the crypto label for that subject's secret partition.
+- **`name` and `phone` are no longer identity fields.** They are now
+  ordinary path-keyed attributes set via `SetAttributes`. **If you do not
+  send them explicitly, they are lost** — the old `CapturePerson` command
+  discarded both.
+
+**Before:**
+
+```rust
+client.execute(&id, JourneyCommand::CapturePerson {
+    person_ref: "passenger_0".into(),
+    subject_id,
+    name:  "Alice Smith".into(),
+    email: "alice@example.com".into(),
+    phone: Some("+44-7700-900000".into()),
+}).await?;
+```
+
+**After:**
+
+```rust
+// 1. Register the subject (email is the erasure-lookup key) and bind it to
+//    a role path, in one command.
+client.execute(&id, JourneyCommand::RegisterAndBindSubject {
+    role_path: AttributePath::new("persons/passenger_0")?,
+    subject_id,
+    email: "alice@example.com".into(),
+}).await?;
+
+// 2. name and phone move to SetAttributes. They are classified Secret in
+//    your schema, so they are encrypted under this subject's DEK exactly
+//    as the old `CapturePerson` identity fields were.
+client.execute(&id, JourneyCommand::SetAttributes {
+    changes: BTreeMap::from([
+        (AttributePath::new("persons/passenger_0/firstName")?, json!("Alice")),
+        (AttributePath::new("persons/passenger_0/lastName")?,  json!("Smith")),
+        (AttributePath::new("persons/passenger_0/phone")?,     json!("+44-7700-900000")),
+    ]),
+}).await?;
+```
+
+Notes:
+
+- `RegisterAndBindSubject` emits two events: `SubjectRegistered { subject_id,
+  email }` and `SubjectBound { role_path, subject_id }`. Re-issuing it with
+  the same email and role path is idempotent; re-binding the role path to a
+  *different* subject is rejected with `PersonRefConflict`.
+- If you need finer control, use the two primitive commands directly:
+  `RegisterSubject { subject_id, email }` (register without binding), then
+  `BindSubject { role_path, subject_id }` (bind an already-registered
+  subject, optionally to additional role paths).
+- `name` was a single field on `CapturePerson`; map it onto whatever paths
+  your `AttributeSchema` defines (this example splits it into `firstName` /
+  `lastName`). Use a single `persons/<ref>/name` path if that matches your
+  schema instead.
+- These `persons/<ref>/…` paths must be classified `Secret` in your schema.
+  The subject UUID is resolved from the `SubjectBound` binding at
+  `persons/<ref>`, so the `RegisterAndBindSubject` command must land before
+  the `SetAttributes` call — otherwise the secret paths resolve to no
+  subject and the command is rejected with `PersonNotFound`.
+
+### 3. Replace a `CapturePersonDetails` submission
 
 **Before:**
 
@@ -179,11 +264,12 @@ Notes:
 - `passengerType` is `Plaintext`, so it lands directly in `shared_data`
   where the decision engine can read it without you having to re-shape
   it. Previously you had to copy it into a summary field on `BookingData`.
-- `CapturePerson` (which binds a `subject_id` to a `person_ref`) is
-  **not** deprecated. Call it once per passenger before sending any
-  `persons/<ref>/…` attributes.
+- The subject must already be bound to the role path before you send any
+  `persons/<ref>/…` secret attributes. Call `RegisterAndBindSubject` (see
+  [recipe 2](#2-replace-captureperson-with-registerandbindsubject)) once per
+  passenger first.
 
-### 3. Submit attributes for multiple subjects in one request
+### 4. Submit attributes for multiple subjects in one request
 
 This is a new capability. There is no "before".
 
@@ -201,7 +287,7 @@ group under its own DEK, and the resulting `AttributesSet` event carries
 two partitions. If one subject is later crypto-shredded, only that
 subject's partition is redacted; the other survives in the same event.
 
-### 4. Stop reading `current_step`
+### 5. Stop reading `current_step`
 
 `current_step` was a UI-driven label that happened to live on the
 aggregate. The decision engine now publishes a coarser, schema-driven
@@ -238,12 +324,10 @@ example flight-booking phases are `collecting_search`,
 
 `view.latest_workflow_decision.suggested_actions` is unchanged.
 
-### 5. Stop reading `PersonSlot.details` / `PersonView.details`
+### 6. Stop reading `PersonSlot.details` / `PersonView.details`
 
-Per-passenger attributes now live in `shared_data` under
-`persons/<ref>/…`. The deprecated `details` blob is still populated by a
-mirror-write so existing readers don't break, but new readers should
-read from the canonical location.
+`PersonSlot` has been removed. Per-passenger attributes live in
+`shared_data` under `persons/<ref>/…`.
 
 **Before:**
 
@@ -275,28 +359,29 @@ Note that redaction is now per-path. If the subject has been shredded,
 the value at `persons/<ref>/passportNumber` is the codec's sentinel; the
 non-PII path `persons/<ref>/passengerType` remains intact.
 
-### 6. Stop pattern-matching `Modified` / `PersonDetailsUpdated` / `StepProgressed` in projections
+### 7. Stop pattern-matching `Modified` / `PersonDetailsUpdated` / `StepProgressed` in projections
 
 If you've written a custom projector or analytics consumer that
 pattern-matches on event variants, you have two options.
 
-**Option A — keep matching the legacy variants.** They are still emitted
-for `Capture` and `CapturePersonDetails` commands. You'll just see
-deprecation warnings on the variants themselves. Wrap the arms in
-`#[allow(deprecated)]` if you want a clean build until you migrate.
+**Option A — keep matching the legacy variants.** `Modified`,
+`PersonDetailsUpdated`, and `StepProgressed` events are no longer emitted
+by new commands, but they still replay from the historical event log.
+Keeping the match arms is safe and harmless for as long as old events
+exist in the store.
 
 ```rust
-#[allow(deprecated)]
 match event.payload {
-    JourneyEvent::Modified { step, data } => { /* still works */ }
-    JourneyEvent::PersonDetailsUpdated { person_ref, data, .. } => { /* still works */ }
+    JourneyEvent::Modified { step, data } => { /* replays from history */ }
+    JourneyEvent::PersonDetailsUpdated { person_ref, data, .. } => { /* replays from history */ }
     // … plus a new arm for AttributesSet
     _ => {}
 }
 ```
 
-**Option B — handle `AttributesSet` and treat the legacy variants as
-equivalent.** Recommended once your writers have migrated.
+**Option B — handle `AttributesSet` and drop the legacy arms** once you
+are confident no old events remain that you care about, or treat the
+legacy arms as a no-op.
 
 ```rust
 match event.payload {
@@ -306,38 +391,53 @@ match event.payload {
         }
         for partition in secret_partitions {
             for (path, value) in partition.changes {
-                // partition.subject_id, partition.person_ref, path
+                // partition.subject_id, partition.role_path, path
             }
         }
     }
-    #[allow(deprecated)]
+    // Note: each partition is keyed by `role_path: AttributePath`
+    // (e.g. "persons/passenger_0"). The field was previously
+    // `person_ref: String` (the bare slot name); events written under the
+    // old name still deserialise — the missing prefix is synthesised as
+    // "persons/<person_ref>".
     JourneyEvent::Modified { step, data } => {
-        // optional: project legacy events too, or assume they no longer
-        // occur once writers have migrated
+        // optional: project legacy events replaying from the event log
     }
     // …
 }
 ```
 
 There is no replacement for `StepProgressed`. If you used it to drive
-UI state, switch to `phase` (recipe 4). If you used it for analytics,
+UI state, switch to `phase` (recipe 5). If you used it for analytics,
 emit a client-side event when the UI advances — the server no longer
 knows about UI steps.
 
-### 7. Subject lookup queries
+### 8. Subject lookup queries
 
-The Postgres GIN index that backs `find_journeys_by_subject` now unions
-across `PersonCaptured` (unchanged) and `AttributesSet` (new). No SQL
-change is required for callers using the application's
+The Postgres indexes that back `find_journeys_by_subject` now union across
+`PersonCaptured` (legacy), `SubjectRegistered` (new), and `AttributesSet`
+(new). No SQL change is required for callers using the application's
 `find_journeys_by_subject` API.
 
+Apply the `20260606000001_subject_registration` migration to add the
+indexes on `SubjectRegistered` / `SubjectBound` events. Journeys created
+before the migration are still covered by the existing `PersonCaptured`
+index, so no backfill is required.
+
+The `SubjectLookupHook` keeps the `subject_lookup` (email → `subject_id`)
+table in sync from both `PersonCaptured` and `SubjectRegistered` events, so
+subjects registered through the new commands are discoverable by email for
+erasure requests.
+
 If you query the event store directly, update lookups to include
-`AttributesSet`:
+`SubjectRegistered` and `AttributesSet`:
 
 ```sql
 SELECT DISTINCT aggregate_id FROM events
  WHERE (event_type = 'PersonCaptured'
         AND payload -> 'PersonCaptured' ->> 'subject_id' = $1)
+    OR (event_type = 'SubjectRegistered'
+        AND payload -> 'SubjectRegistered' ->> 'subject_id' = $1)
     OR (event_type = 'AttributesSet'
         AND payload -> 'AttributesSet' -> 'subjects'
             @> jsonb_build_array($1::text));
@@ -374,16 +474,24 @@ for p in [
     paths.insert(AttributePath::new(p)?, PiiClass::Plaintext);
 }
 
-// PII attributes — encrypted under the named subject's DEK.
+// PII attributes — encrypted under the DEK of the subject bound at the
+// role path. `subject` is the *role path* (e.g. "persons/passenger_0"),
+// NOT a path to a `subject_id` field. The aggregate resolves the role path
+// to a subject UUID through the `SubjectBound` binding established by
+// `RegisterAndBindSubject` / `BindSubject`.
 let secret_for = |person_ref: &str| PiiClass::Secret {
-    subject: AttributePath::new(
-        format!("persons/{person_ref}/subject_id")
-    ).unwrap(),
+    subject: AttributePath::new(format!("persons/{person_ref}")).unwrap(),
 };
 
 for (person_ref, field) in [
+    ("passenger_0", "firstName"),
+    ("passenger_0", "lastName"),
+    ("passenger_0", "phone"),
     ("passenger_0", "passportNumber"),
     ("passenger_0", "dateOfBirth"),
+    ("passenger_1", "firstName"),
+    ("passenger_1", "lastName"),
+    ("passenger_1", "phone"),
     ("passenger_1", "passportNumber"),
     ("passenger_1", "dateOfBirth"),
 ] {
@@ -397,6 +505,38 @@ let schema = Arc::new(AttributeSchema::new(paths, Some(json_schema_value)));
 // Or pass None if you are not using JSON Schema structural validation:
 // let schema = Arc::new(AttributeSchema::new(paths, None));
 ```
+
+Note the `firstName` / `lastName` / `phone` secret paths: these carry the
+identity fields that the old `CapturePerson` command used to store. Include
+them in your schema when migrating call sites that previously used
+`CapturePerson`.
+
+### Namespace patterns (default-secret)
+
+Listing every `persons/<ref>/<field>` path by hand gets verbose. A
+`NamespacePattern` classifies a whole namespace at once: everything under
+`prefix/{ref}/…` is `Secret` by default (resolved to the subject bound at
+`prefix/{ref}`), except the suffixes you explicitly exempt as plaintext.
+
+```rust
+use journey_dynamics::domain::NamespacePattern;
+
+let schema = AttributeSchema::new(paths, schema_value)
+    .with_namespace_patterns(vec![NamespacePattern {
+        prefix: "persons".parse()?,
+        // Everything under persons/<ref>/ is Secret except these suffixes.
+        plaintext_suffixes: ["passengerType".to_string()].into_iter().collect(),
+    }]);
+```
+
+> **Schema-config field rename.** The serialised `NamespacePatternConfig`
+> (used by `JOURNEY_ATTRIBUTE_SCHEMA_PATH`) now uses `prefix` and
+> `plaintext_suffixes`, replacing the old `namespace` / `secret_fields` /
+> `plaintext_fields`. Existing JSON configs keep loading via serde aliases
+> (`namespace` → `prefix`, `plaintext_fields` → `plaintext_suffixes`); the
+> old `secret_fields` list is ignored because everything not listed as a
+> plaintext suffix is now secret by default. Re-serialise your config to
+> adopt the new field names.
 
 For experimentation, use `AttributeSchema::permissive()` — every path is
 accepted and classified as plaintext. Do not ship this in production:
@@ -432,8 +572,13 @@ shifted:
 - After shredding, every `AttributesSet` partition belonging to the
   shredded subject becomes irrecoverable. Other subjects' partitions in
   the same events remain decryptable.
-- `PersonSlot.forgotten` and `PersonView.forgotten` still flip to
-  `true`. Identity fields on the slot still null out.
+- A shredded subject's role-path bindings stop resolving: subsequent
+  `SetAttributes` calls targeting that subject's secret paths land in
+  `unknown` rather than being re-encrypted under a deleted DEK.
+- Subjects registered via `RegisterSubject` are found by
+  `DELETE /subjects/by-email` through the `subject_lookup` table, which
+  the `SubjectLookupHook` populates from both `PersonCaptured` (legacy
+  replay) and `SubjectRegistered` events.
 
 ---
 
@@ -455,11 +600,12 @@ from the now-removed `currentStep` input. The flight-booking
 orchestrator (`examples/flight-booking/jdm-models/`) demonstrates the
 pattern.
 
-### "I get a deprecation warning on `JourneyEvent::Modified` in my projector"
+### "I have a match arm on `JourneyEvent::Modified` in my projector — is it still needed?"
 
-Wrap the arm in `#[allow(deprecated)]`. The variant continues to be
-emitted by `Capture` commands and continues to replay from the historical
-event log. There is no rush to delete the arm.
+Yes, for now. `Capture` commands no longer exist, so no new `Modified`
+events will be written, but the variant still replays from the historical
+event log. Keep the arm until you are certain no relevant historical
+events remain, or you are happy to ignore them.
 
 ### "Two passengers' details in one request used to work via two commands; will the new single-command form be atomic?"
 
@@ -467,33 +613,33 @@ Yes. `SetAttributes` is one command, one event, applied atomically.
 Failure (e.g. an invalid path) rejects the entire submission with no
 partial writes.
 
-### "Can I mix `Capture` and `SetAttributes` against the same journey?"
+### "I'm getting `PersonNotFound` from `SetAttributes`"
 
-Yes, in any order. The legacy `apply` arms and the new `AttributesSet`
-arm both write into the same `shared_data` document, so reading from
-`shared_data` after the dust settles gives a coherent view regardless of
-which commands were used. Just be aware that `Capture` always writes
-under the namespace of its `step` field — if your `SetAttributes`
-schema disagrees about which path that step corresponds to, you can
-end up with two parallel sub-trees in `shared_data`.
+You sent a `persons/<ref>/…` secret path before binding a subject to that
+role path. The subject UUID for a secret partition is resolved from the
+`SubjectBound` binding, so `RegisterAndBindSubject` (or `RegisterSubject` +
+`BindSubject`) must land first. See
+[recipe 2](#2-replace-captureperson-with-registerandbindsubject).
+
+### "`CapturePerson` no longer compiles — what do I use?"
+
+`CapturePerson` has been removed. Use `RegisterAndBindSubject` to register
+the subject and bind them to a role path, then send `name` / `phone` as
+path-keyed attributes via `SetAttributes` under `persons/<ref>/…` secret
+paths. See [recipe 2](#2-replace-captureperson-with-registerandbindsubject).
 
 ### "What happens to journeys created before this release?"
 
-They replay unchanged. The aggregate still recognises and applies
-`Modified` / `PersonDetailsUpdated` / `StepProgressed` events.
-Encrypted historical events use the older single-blob ciphertext shape;
-the `cqrs-es-crypto` read path detects this and decrypts them as a
-single-partition event with `label = "default"`.
-
----
-
-## When the legacy surface will be removed
-
-Not in this release, and not in the next one. A future RFC will measure
-external usage and propose a deprecation deadline. Plan for the new
-surface to be available indefinitely; plan for the legacy surface to be
-removed eventually but not on a short clock. The deprecation warnings
-themselves are the only ticking part of the migration timer right now.
+They replay unchanged. The aggregate still applies `Modified` /
+`PersonDetailsUpdated` / `StepProgressed` and `PersonCaptured` events from
+the historical log; replaying `PersonCaptured` populates the
+`subjects` / `bindings` maps, so `SetAttributes` still resolves secret
+subjects correctly for journeys that were originally built with the legacy
+`CapturePerson` command. Encrypted historical events use the older
+single-blob ciphertext shape; the `cqrs-es-crypto` read path detects this
+and decrypts them as a single-partition event with `label = "default"`.
+`SecretPartitionData` events written before the field rename (with
+`person_ref` instead of `role_path`) also deserialise transparently.
 
 ---
 
@@ -503,6 +649,8 @@ themselves are the only ticking part of the migration timer right now.
 | --- | --- |
 | Proposal and rationale | [`PATH_KEYED_ATTRIBUTES_DESIGN.md`](./PATH_KEYED_ATTRIBUTES_DESIGN.md) |
 | Implementation plan (for contributors) | [`PATH_KEYED_ATTRIBUTES_PLAN.md`](./PATH_KEYED_ATTRIBUTES_PLAN.md) |
+| Subject register/bind design | [`CAPTURE_SUBJECT_DESIGN.md`](./CAPTURE_SUBJECT_DESIGN.md) |
+| Subject register/bind implementation plan | [`CAPTURE_SUBJECT_IMPLEMENTATION_PLAN.md`](./CAPTURE_SUBJECT_IMPLEMENTATION_PLAN.md) |
 | `cqrs-es-crypto` envelope changes | [`crates/cqrs-es-crypto/README.md`](../crates/cqrs-es-crypto/README.md) (after step A5.8 lands) |
 | Flight-booking example | [`examples/flight-booking/`](../examples/flight-booking/) |
 | Quick start | [`docs/QUICK_START.md`](./QUICK_START.md) |

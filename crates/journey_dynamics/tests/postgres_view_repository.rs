@@ -11,7 +11,7 @@
 //! They are deliberately kept out of `--lib` runs so that
 //! `cargo nextest run --lib` succeeds without a database being present.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use cqrs_es::{EventEnvelope, Query};
 use hegel::{TestCase, generators as gs};
@@ -1048,6 +1048,74 @@ async fn test_find_journeys_by_subject_returns_empty_for_unknown_subject(
     assert!(journeys.is_empty(), "unknown subject must return empty vec");
 }
 
+/// `SubjectRegistered` path — new index added in Layer 7.
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_via_subject_registered(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let aggregate_id = Uuid::new_v4().to_string();
+    let subject_id = Uuid::new_v4();
+
+    ctx.insert_event(
+        &aggregate_id,
+        1,
+        "SubjectRegistered",
+        json!({
+            "SubjectRegistered": {
+                "subject_id": subject_id.to_string(),
+                "email": "alice@example.com"
+            }
+        }),
+    )
+    .await;
+
+    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
+    assert_eq!(journeys, vec![aggregate_id]);
+}
+
+/// A journey with both `SubjectRegistered` and `SubjectBound` for the same
+/// subject must appear exactly once (DISTINCT).
+#[test_context(PostgresViewRepositoryContext)]
+#[tokio::test]
+async fn test_find_journeys_by_subject_deduplicates_subject_registered_and_bound(
+    ctx: &mut PostgresViewRepositoryContext,
+) {
+    let repo = ctx.repo();
+    let aggregate_id = Uuid::new_v4().to_string();
+    let subject_id = Uuid::new_v4();
+
+    ctx.insert_event(
+        &aggregate_id,
+        1,
+        "SubjectRegistered",
+        json!({
+            "SubjectRegistered": {
+                "subject_id": subject_id.to_string(),
+                "email": "alice@example.com"
+            }
+        }),
+    )
+    .await;
+    ctx.insert_event(
+        &aggregate_id,
+        2,
+        "SubjectBound",
+        json!({
+            "SubjectBound": {
+                "role_path": "persons/passenger_0",
+                "subject_id": subject_id.to_string()
+            }
+        }),
+    )
+    .await;
+
+    let journeys = repo.find_journeys_by_subject(&subject_id).await.unwrap();
+    assert_eq!(journeys.len(), 1, "same journey must appear only once");
+    assert_eq!(journeys[0], aggregate_id);
+}
+
 // ── AttributesSet view projection ──────────────────────────────────────
 
 /// An `AttributesSet` event with only plaintext changes must merge those
@@ -1078,15 +1146,9 @@ async fn test_attributes_set_plaintext_updates_shared_data(
     .await;
 
     // Dispatch an AttributesSet event with plaintext path-keyed changes.
-    let mut plaintext = std::collections::BTreeMap::new();
-    plaintext.insert(
-        "/search/origin".parse::<PointerBuf>().unwrap(),
-        json!("LHR"),
-    );
-    plaintext.insert(
-        "/search/destination".parse::<PointerBuf>().unwrap(),
-        json!("JFK"),
-    );
+    let mut plaintext: BTreeMap<PointerBuf, _> = BTreeMap::new();
+    plaintext.insert("/search/origin".parse().unwrap(), json!("LHR"));
+    plaintext.insert("/search/destination".parse().unwrap(), json!("JFK"));
 
     repo.dispatch(
         &journey_id.to_string(),

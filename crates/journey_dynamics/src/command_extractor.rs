@@ -285,7 +285,7 @@ mod tests {
         );
     }
 
-    // ── non-SetAttributes commands ────────────────────────────────────────────
+    // ── non-SetAttributes commands ────────────────────────────────────────────────
 
     /// The normaliser is a no-op for non-SetAttributes commands.
     #[test]
@@ -294,15 +294,5 @@ mod tests {
         let mut raw = original.clone();
         normalize_set_attributes(&mut raw);
         assert_eq!(raw, original);
-    }
-
-    /// Legacy `Capture` command must still deserialise so existing clients
-    /// are not broken.
-    #[allow(deprecated)]
-    #[test]
-    fn legacy_capture_still_deserializes() {
-        let body = r#"{"Capture":{"step":"search","data":{"origin":"LHR"}}}"#;
-        let cmd: JourneyCommand = serde_json::from_str(body).unwrap();
-        assert!(matches!(cmd, JourneyCommand::Capture { .. }));
     }
 }

@@ -22,29 +22,45 @@ impl PersistHook for SubjectLookupHook {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), PersistenceError> {
         for event in events {
-            if event.event_type != "PersonCaptured" {
-                continue;
-            }
-
-            // The payload at this point is unencrypted — PII is still plaintext.
-            let Some(inner) = event.payload.get("PersonCaptured") else {
-                continue;
+            // Extract (subject_id, email) from either PersonCaptured (legacy)
+            // or SubjectRegistered (new).
+            let (subject_id, email) = match event.event_type.as_str() {
+                "PersonCaptured" => {
+                    let Some(inner) = event.payload.get("PersonCaptured") else {
+                        continue;
+                    };
+                    let Some(subject_id) = inner
+                        .get("subject_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Uuid>().ok())
+                    else {
+                        continue;
+                    };
+                    let Some(email) = inner.get("email").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    (subject_id, email)
+                }
+                "SubjectRegistered" => {
+                    let Some(inner) = event.payload.get("SubjectRegistered") else {
+                        continue;
+                    };
+                    let Some(subject_id) = inner
+                        .get("subject_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse::<Uuid>().ok())
+                    else {
+                        continue;
+                    };
+                    let Some(email) = inner.get("email").and_then(|v| v.as_str()) else {
+                        continue;
+                    };
+                    (subject_id, email)
+                }
+                _ => continue,
             };
 
-            let Some(subject_id) = inner
-                .get("subject_id")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<Uuid>().ok())
-            else {
-                continue;
-            };
-
-            let Some(email) = inner.get("email").and_then(|v| v.as_str()) else {
-                continue;
-            };
-
-            // Upsert — a second PersonCaptured for the same subject (e.g. an
-            // email address change) updates the stored address.
+            // Upsert — re-capture with a new email updates the stored address.
             sqlx::query(
                 "INSERT INTO subject_lookup (subject_id, email_lower) \
                  VALUES ($1, lower($2)) \

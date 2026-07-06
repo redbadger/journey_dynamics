@@ -305,13 +305,7 @@ graph TD
 
 2. **Separation of orchestration from domain logic.** The aggregate enforces invariants (journey must be started, must not be completed, data must be valid). The decision engine handles orchestration (what step to show next). This separation means domain experts can modify journey flows without understanding Rust, and engineers can modify validation logic without understanding the business routing.
 
-3. **Multiple JDM models for different concerns.** To illustrate this, the repository includes a **flight-booking example** (under `examples/flight-booking/`) that is entirely separate from the core engine. This example ships four models that demonstrate how a realistic product journey can be decomposed:
-   - **`flight-booking-orchestrator.jdm.json`** — Step routing and flow control.
-   - **`flight-validation-rules.jdm.json`** — Data validation rules per step.
-   - **`flight-pricing-calculator.jdm.json`** — Dynamic pricing logic.
-   - **`flight-error-handling.jdm.json`** — Error classification and recovery.
-
-   Each model is independently deployable and testable. Onboarding a new product journey (e.g., insurance, hotel booking) means authoring new JDM models and a JSON schema — not writing new Rust code in the core service.
+3. **JDM models per journey.** The repository includes a **flight-booking example** (under `examples/flight-booking/`) that is entirely separate from the core engine. Its orchestrator model (`flight-booking-orchestrator.jdm.json`) demonstrates how step routing, data-completeness checks, and phase derivation can be expressed declaratively. Onboarding a new product journey (e.g., insurance, hotel booking) means authoring new JDM models and a JSON schema — not writing new Rust code in the core service.
 
 4. **The engine is embedded, not remote.** The ZEN engine runs in-process (via `zen-engine` crate), so decision evaluation adds microseconds, not milliseconds. There is no network hop, no separate service to deploy, no availability dependency. JDM files are plain JSON and can be loaded at runtime from any source (filesystem, S3, a configuration service, etc.), so new journey definitions or rule changes can be deployed without recompiling the core service. The current flight-booking example happens to embed its JDM file at compile time via `include_str!` for simplicity, but this is not a constraint of the architecture.
 
