@@ -77,6 +77,8 @@
 //!   `#[pii(secret, redact = "...")]`. See the derive crate's docs.
 //! - `testing`: exposes [`InMemoryEventRepository`] for downstream tests.
 
+#[cfg(feature = "blind-index")]
+pub mod blind_index;
 pub mod caching_key_store;
 pub mod cipher;
 pub mod kek;
@@ -128,6 +130,20 @@ pub use repository::{EncryptedPiiSentinel, PiiFields};
 
 #[cfg(feature = "postgres")]
 pub use repository::PersistHook;
+
+// ── Blind indexing (opt-in via the `blind-index` feature) ────────────────────
+
+#[cfg(feature = "blind-index")]
+pub use blind_index::{
+    AttributesSetSource, BlindIndexEntry, BlindIndexError, BlindIndexKeyProvider, BlindIndexSource,
+    BlindIndexValue, BlindIndexer, FieldSource, StaticBlindIndexKeyProvider, canonicalize, to_hex,
+};
+
+#[cfg(all(feature = "blind-index", feature = "postgres"))]
+pub use blind_index::BlindIndexHook;
+
+#[cfg(all(feature = "blind-index", feature = "gcp-kms"))]
+pub use blind_index::GcpKmsBlindIndexKeyProvider;
 
 // ── Testing helpers (opt-in via the `testing` feature) ───────────────────────
 

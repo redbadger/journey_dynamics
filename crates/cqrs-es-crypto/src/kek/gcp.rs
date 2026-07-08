@@ -162,61 +162,132 @@ impl GcpKmsKekProvider {
         op: &str,
         body: &serde_json::Value,
     ) -> Result<serde_json::Value, KmsCallError> {
-        let url = format!("{}/v1/{}:{op}", self.endpoint, self.key_name);
-        for attempt in 0u8..2 {
-            let token = if attempt == 0 {
-                self.tokens.token().await
-            } else {
-                self.tokens.force_refresh().await
-            }
-            .map_err(|e| KmsCallError::Transport(e.to_string()))?;
+        kms_call(
+            &self.http,
+            &self.tokens,
+            &self.endpoint,
+            &self.key_name,
+            op,
+            body,
+        )
+        .await
+    }
+}
 
-            let sent = self
-                .http
-                .post(&url)
-                .bearer_auth(&token)
-                .json(body)
-                .send()
-                .await;
-            let resp = match sent {
-                Ok(r) => r,
-                Err(e) if attempt == 0 => {
-                    tokio::time::sleep(Duration::from_millis(150)).await;
-                    let _ = e;
-                    continue;
-                }
-                Err(e) => return Err(KmsCallError::Transport(e.to_string())),
-            };
-
-            let status = resp.status();
-            // 401 → token likely stale; refresh and retry once.
-            if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
-                continue;
-            }
-            let retriable =
-                status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
-            if retriable && attempt == 0 {
-                tokio::time::sleep(Duration::from_millis(150)).await;
-                continue;
-            }
-            let body_text = resp
-                .text()
-                .await
-                .map_err(|e| KmsCallError::Transport(e.to_string()))?;
-            if !status.is_success() {
-                let msg = format!("KMS {op} returned HTTP {status}: {body_text}");
-                return Err(if retriable {
-                    KmsCallError::Transport(msg)
-                } else {
-                    KmsCallError::Failed(msg)
-                });
-            }
-            return serde_json::from_str(&body_text)
-                .map_err(|e| KmsCallError::Failed(format!("KMS {op} response parse error: {e}")));
+/// One KMS REST call (`{endpoint}/v1/{resource}:{op}`) with bearer auth, a
+/// single retry on transport/401/5xx/429, and JSON parsing. Shared by the KEK
+/// wrap/unwrap path and the blind-index `macSign` path.
+async fn kms_call(
+    http: &reqwest::Client,
+    tokens: &TokenSource,
+    endpoint: &str,
+    resource: &str,
+    op: &str,
+    body: &serde_json::Value,
+) -> Result<serde_json::Value, KmsCallError> {
+    let url = format!("{endpoint}/v1/{resource}:{op}");
+    for attempt in 0u8..2 {
+        let token = if attempt == 0 {
+            tokens.token().await
+        } else {
+            tokens.force_refresh().await
         }
-        Err(KmsCallError::Transport(format!(
-            "KMS {op} failed after retry"
-        )))
+        .map_err(|e| KmsCallError::Transport(e.to_string()))?;
+
+        let sent = http.post(&url).bearer_auth(&token).json(body).send().await;
+        let resp = match sent {
+            Ok(r) => r,
+            Err(e) if attempt == 0 => {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+                let _ = e;
+                continue;
+            }
+            Err(e) => return Err(KmsCallError::Transport(e.to_string())),
+        };
+
+        let status = resp.status();
+        // 401 → token likely stale; refresh and retry once.
+        if status == reqwest::StatusCode::UNAUTHORIZED && attempt == 0 {
+            continue;
+        }
+        let retriable =
+            status.is_server_error() || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+        if retriable && attempt == 0 {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            continue;
+        }
+        let body_text = resp
+            .text()
+            .await
+            .map_err(|e| KmsCallError::Transport(e.to_string()))?;
+        if !status.is_success() {
+            let msg = format!("KMS {op} returned HTTP {status}: {body_text}");
+            return Err(if retriable {
+                KmsCallError::Transport(msg)
+            } else {
+                KmsCallError::Failed(msg)
+            });
+        }
+        return serde_json::from_str(&body_text)
+            .map_err(|e| KmsCallError::Failed(format!("KMS {op} response parse error: {e}")));
+    }
+    Err(KmsCallError::Transport(format!(
+        "KMS {op} failed after retry"
+    )))
+}
+
+/// KMS `macSign`-backed HMAC signer for [blind indexing](crate::blind_index).
+///
+/// Reuses the same token source and call/retry plumbing as the KEK provider,
+/// but targets a **versioned** MAC key resource
+/// (`projects/…/cryptoKeys/{k}/cryptoKeyVersions/{v}`) — `macSign` operates on a
+/// specific key version, unlike symmetric `encrypt`/`decrypt`.
+#[cfg(feature = "blind-index")]
+pub(crate) struct KmsMacSigner {
+    resource: String,
+    http: reqwest::Client,
+    tokens: TokenSource,
+    endpoint: String,
+}
+
+#[cfg(feature = "blind-index")]
+impl KmsMacSigner {
+    pub(crate) fn new(resource: String) -> Self {
+        let http = reqwest::Client::new();
+        let tokens = TokenSource::new(http.clone(), METADATA_TOKEN_URL.to_string());
+        Self {
+            resource,
+            http,
+            tokens,
+            endpoint: KMS_ENDPOINT.to_string(),
+        }
+    }
+
+    /// HMAC `data` with the KMS-held key, returning the 32-byte digest.
+    pub(crate) async fn mac_sign(&self, data: &[u8]) -> Result<[u8; 32], String> {
+        let body = json!({ "data": B64.encode(data) });
+        let resp = kms_call(
+            &self.http,
+            &self.tokens,
+            &self.endpoint,
+            &self.resource,
+            "macSign",
+            &body,
+        )
+        .await
+        .map_err(|e| match e {
+            KmsCallError::Transport(m) | KmsCallError::Failed(m) => m,
+        })?;
+        let mac = resp
+            .get("mac")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| "KMS macSign: missing mac".to_string())?;
+        let bytes = B64
+            .decode(mac)
+            .map_err(|e| format!("KMS macSign: bad base64: {e}"))?;
+        let len = bytes.len();
+        <[u8; 32]>::try_from(bytes.as_slice())
+            .map_err(|_| format!("KMS macSign: expected 32-byte HMAC-SHA256, got {len}"))
     }
 }
 
@@ -441,5 +512,54 @@ mod tests {
         p.unwrap(&w).await.unwrap();
         p.unwrap(&w).await.unwrap();
         // MockServer verifies on drop that the token endpoint was hit exactly once.
+    }
+
+    #[cfg(feature = "blind-index")]
+    fn mac_signer(server: &MockServer) -> KmsMacSigner {
+        let http = reqwest::Client::new();
+        KmsMacSigner {
+            resource: "projects/p/locations/l/keyRings/r/cryptoKeys/bi/cryptoKeyVersions/1"
+                .to_string(),
+            http: http.clone(),
+            tokens: TokenSource::new(http, format!("{}/token", server.uri())),
+            endpoint: server.uri(),
+        }
+    }
+
+    #[cfg(feature = "blind-index")]
+    #[tokio::test]
+    async fn mac_sign_posts_data_and_returns_32_bytes() {
+        let server = fake_kms().await;
+        mount_token(&server).await;
+        let expected = [3u8; 32];
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1/projects/p/locations/l/keyRings/r/cryptoKeys/bi/cryptoKeyVersions/1:macSign",
+            ))
+            .and(header("authorization", "Bearer fake-token"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "mac": B64.encode(expected) })),
+            )
+            .mount(&server)
+            .await;
+        let got = mac_signer(&server).mac_sign(b"some-data").await.unwrap();
+        assert_eq!(got, expected);
+    }
+
+    #[cfg(feature = "blind-index")]
+    #[tokio::test]
+    async fn mac_sign_rejects_non_32_byte_mac() {
+        let server = fake_kms().await;
+        mount_token(&server).await;
+        Mock::given(method("POST"))
+            .and(path(
+                "/v1/projects/p/locations/l/keyRings/r/cryptoKeys/bi/cryptoKeyVersions/1:macSign",
+            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({ "mac": B64.encode([0u8; 16]) })),
+            )
+            .mount(&server)
+            .await;
+        assert!(mac_signer(&server).mac_sign(b"x").await.is_err());
     }
 }
