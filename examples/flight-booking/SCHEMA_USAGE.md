@@ -233,12 +233,19 @@ for full before/after recipes.
 
 ## Regenerate the schema
 
-The JSON schema is generated from the Rust types in `src/lib.rs`:
+Both JSON artifacts are generated from the Rust types in `src/lib.rs` — the
+single source of truth:
+
+- `schemas/flight-booking-schema.json` — the data schema (field types, enums,
+  formats, and the `x-subject` PII markers).
+- `schemas/attribute-schema.json` — the PII classification, **derived** from the
+  data schema's `x-subject` markers (a field with `x-subject` is secret under
+  that subject; without it, plaintext).
 
 ```bash
 cd examples/flight-booking
 cargo run --bin generate_schema
 ```
 
-After changing `BookingData` or any of its dependencies, re-run this
-command and commit the updated `schemas/flight-booking-schema.json`.
+After changing any schema type (or its `x-subject` annotations), re-run this
+command and commit both updated files.

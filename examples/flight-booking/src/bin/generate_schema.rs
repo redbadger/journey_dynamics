@@ -20,9 +20,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         schema_path.display()
     );
 
-    // Generate the attribute schema from the Rust attribute_schema_config().
-    // This is the single source of truth — edit attribute_schema_config() in
-    // lib.rs, then re-run `just generate` to keep the JSON in sync.
+    // Generate the attribute (PII classification) schema. It is *derived* from
+    // the same `FlightBookingSchema` via its `x-subject` markers — the single
+    // source of truth. Edit the schema types in lib.rs, then re-run
+    // `just generate` to keep both JSON files in sync.
     let attr_config = attribute_schema_config();
     let attr_path = schemas_dir.join("attribute-schema.json");
     fs::write(&attr_path, serde_json::to_string_pretty(&attr_config)?)?;

@@ -140,6 +140,17 @@ impl AttributeSchema {
         }
     }
 
+    /// Replace the exact path-to-entry map.
+    ///
+    /// Exact entries are consulted first by [`classify`](Self::classify), so
+    /// they take precedence over namespace patterns, plaintext prefixes, and
+    /// the permissive fallback.
+    #[must_use]
+    pub fn with_exact_paths(mut self, paths: BTreeMap<PointerBuf, AttributeEntry>) -> Self {
+        self.paths = paths;
+        self
+    }
+
     /// Attach namespace patterns to this schema.
     ///
     /// Patterns are tried in order after the exact-path lookup misses and
@@ -300,6 +311,31 @@ pub struct AttributeSchemaConfig {
     /// Dynamic namespace-based classification rules.
     #[serde(default)]
     pub namespace_patterns: Vec<NamespacePatternConfig>,
+    /// Exact paths classified as `Secret`, each under an explicitly named
+    /// subject. Used by fixed-subject aggregates (e.g. `/self/firstName`
+    /// secret under subject `/self`) that the dynamic `namespace_patterns`
+    /// model cannot express. Applied as exact-match entries, so they take
+    /// precedence over prefixes and patterns.
+    #[serde(default)]
+    pub secret_paths: Vec<SecretPathConfig>,
+    /// Exact paths classified as `Plaintext`. Lets a strict (non-permissive)
+    /// schema enumerate every known plaintext leaf so unlisted paths are
+    /// rejected rather than silently stored.
+    #[serde(default, deserialize_with = "deserialize_plaintext_prefix_pointers")]
+    pub plaintext_paths: Vec<PointerBuf>,
+}
+
+/// JSON-serialisable form of an exact-path `Secret` classification: the
+/// attribute `path` and the `subject` (role path) whose DEK encrypts it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecretPathConfig {
+    /// The exact attribute path, as a JSON Pointer (e.g. `/self/firstName`).
+    #[serde(deserialize_with = "deserialize_prefix_pointer")]
+    pub path: PointerBuf,
+    /// The subject (role path) whose DEK encrypts this value
+    /// (e.g. `/self`). Accepts a bare segment or a leading-slash pointer.
+    #[serde(deserialize_with = "deserialize_prefix_pointer")]
+    pub subject: PointerBuf,
 }
 
 /// JSON-serialisable form of [`NamespacePattern`].
@@ -399,10 +435,29 @@ where
 
 impl From<AttributeSchemaConfig> for AttributeSchema {
     fn from(config: AttributeSchemaConfig) -> Self {
+        // Exact-match entries: explicit secret paths (each under its named
+        // subject) plus explicit plaintext paths.
+        let paths: BTreeMap<PointerBuf, AttributeEntry> = config
+            .secret_paths
+            .into_iter()
+            .map(|s| {
+                (
+                    s.path,
+                    AttributeEntry::new(PiiClass::Secret { subject: s.subject }),
+                )
+            })
+            .chain(
+                config
+                    .plaintext_paths
+                    .into_iter()
+                    .map(|p| (p, AttributeEntry::new(PiiClass::Plaintext))),
+            )
+            .collect();
+
         let base = if config.permissive {
-            Self::permissive()
+            Self::permissive().with_exact_paths(paths)
         } else {
-            Self::new(BTreeMap::new(), None)
+            Self::new(paths, None)
         };
         base.with_plaintext_prefixes(config.plaintext_prefixes)
             .with_namespace_patterns(
@@ -415,6 +470,209 @@ impl From<AttributeSchemaConfig> for AttributeSchema {
                     })
                     .collect(),
             )
+    }
+}
+
+// ── Derivation from an annotated JSON Schema ──────────────────────────────────
+
+/// Escape a single JSON-pointer reference token per RFC 6901.
+fn escape_token(token: &str) -> String {
+    token.replace('~', "~0").replace('/', "~1")
+}
+
+fn parse_pointer(s: &str) -> PointerBuf {
+    PointerBuf::parse(s).expect("constructed JSON pointer is valid")
+}
+
+/// Resolve a schema node to the schema that determines its shape: follow a
+/// `$ref` into `$defs`, and unwrap an `anyOf` Option wrapper (the non-`null`
+/// branch). Returns the node unchanged when neither applies.
+fn resolve<'a>(node: &'a Value, defs: Option<&'a serde_json::Map<String, Value>>) -> &'a Value {
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+        let name = reference.strip_prefix("#/$defs/").unwrap_or(reference);
+        if let Some(target) = defs.and_then(|d| d.get(name)) {
+            return resolve(target, defs);
+        }
+    }
+    if let Some(branches) = node.get("anyOf").and_then(Value::as_array) {
+        if let Some(non_null) = branches
+            .iter()
+            .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))
+        {
+            return resolve(non_null, defs);
+        }
+    }
+    node
+}
+
+/// Whether `node` or any of its descendants (through `$ref`s, object
+/// `properties`, map `additionalProperties`, and `anyOf` branches) carries an
+/// `x-subject` marker. `seen` guards against cyclic `$ref`s.
+fn subtree_has_x_subject(
+    node: &Value,
+    defs: Option<&serde_json::Map<String, Value>>,
+    seen: &mut BTreeSet<String>,
+) -> bool {
+    if node.get("x-subject").is_some() {
+        return true;
+    }
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
+        if !seen.insert(reference.to_string()) {
+            return false;
+        }
+    }
+    let resolved = resolve(node, defs);
+    if resolved.get("x-subject").is_some() {
+        return true;
+    }
+    if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
+        if props.values().any(|c| subtree_has_x_subject(c, defs, seen)) {
+            return true;
+        }
+    }
+    if let Some(extra) = resolved.get("additionalProperties") {
+        if extra.is_object() && subtree_has_x_subject(extra, defs, seen) {
+            return true;
+        }
+    }
+    false
+}
+
+/// If `node` resolves to a map (`additionalProperties` is itself an object
+/// schema), return that entry schema resolved; otherwise `None`.
+fn map_entry_schema<'a>(
+    node: &'a Value,
+    defs: Option<&'a serde_json::Map<String, Value>>,
+) -> Option<&'a Value> {
+    let resolved = resolve(node, defs);
+    if resolved.get("properties").is_some() {
+        return None;
+    }
+    let extra = resolved.get("additionalProperties")?;
+    if extra.get("$ref").is_some() || extra.get("properties").is_some() {
+        Some(resolve(extra, defs))
+    } else {
+        None
+    }
+}
+
+/// Walk a fixed (non-map) object subtree, recording each leaf as an exact
+/// secret path (when it carries `x-subject`, under that named subject) or an
+/// exact plaintext path.
+fn walk_fixed(
+    node: &Value,
+    pointer: &str,
+    defs: Option<&serde_json::Map<String, Value>>,
+    secret_paths: &mut Vec<SecretPathConfig>,
+    plaintext_paths: &mut Vec<PointerBuf>,
+) {
+    if let Some(subject) = node.get("x-subject").and_then(Value::as_str) {
+        secret_paths.push(SecretPathConfig {
+            path: parse_pointer(pointer),
+            subject: parse_pointer(subject),
+        });
+        return;
+    }
+    let resolved = resolve(node, defs);
+    if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
+        for (field, child) in props {
+            let child_pointer = format!("{pointer}/{}", escape_token(field));
+            walk_fixed(child, &child_pointer, defs, secret_paths, plaintext_paths);
+        }
+    } else {
+        plaintext_paths.push(parse_pointer(pointer));
+    }
+}
+
+impl AttributeSchemaConfig {
+    /// Derive a config from an annotated JSON Schema (e.g. schemars output),
+    /// treating the `x-subject` extension keyword as the single source of truth
+    /// for PII classification: a leaf carrying `x-subject` is secret, a leaf
+    /// without it is plaintext.
+    ///
+    /// The `x-subject` **value names the subject** the field is encrypted under:
+    /// - a **fixed** subject is a concrete pointer (e.g. `"/self"`), used
+    ///   verbatim;
+    /// - a **dynamic** subject (a field inside a map) is the map's pointer
+    ///   followed by a `*` ref placeholder (e.g. `"/persons/*"`), resolving at
+    ///   runtime to the concrete entry (`/persons/passenger_0`).
+    ///
+    /// Each top-level property is classified as:
+    /// - **all-plaintext** (no `x-subject` anywhere in its subtree) → a
+    ///   [`plaintext prefix`](Self::plaintext_prefixes), covering the whole
+    ///   subtree without enumerating it;
+    /// - a **map** (`additionalProperties`) whose entries contain `x-subject`
+    ///   fields → a [`NamespacePatternConfig`] keyed on the property
+    ///   (`prefix/{ref}/field`), with the non-secret entry fields recorded as
+    ///   plaintext suffixes (everything else under the entry is secret). Each
+    ///   secret field's `x-subject` must be `"<prefix>/*"`, matching the map.
+    /// - a **fixed object** mixing secret and plaintext leaves → exact
+    ///   [`secret_paths`](Self::secret_paths) (each under the subject its
+    ///   `x-subject` names) and exact [`plaintext_paths`](Self::plaintext_paths).
+    ///
+    /// # Panics
+    /// Panics if a secret field inside a map declares an `x-subject` that is not
+    /// `"<prefix>/*"` for that map — a schema-authoring error.
+    #[must_use]
+    pub fn from_annotated_schema(schema: &Value) -> Self {
+        let defs = schema.get("$defs").and_then(Value::as_object);
+        let mut config = Self {
+            permissive: false,
+            plaintext_prefixes: Vec::new(),
+            namespace_patterns: Vec::new(),
+            secret_paths: Vec::new(),
+            plaintext_paths: Vec::new(),
+        };
+
+        let Some(props) = schema.get("properties").and_then(Value::as_object) else {
+            return config;
+        };
+
+        for (key, node) in props {
+            let pointer = format!("/{}", escape_token(key));
+            if !subtree_has_x_subject(node, defs, &mut BTreeSet::new()) {
+                config.plaintext_prefixes.push(parse_pointer(&pointer));
+            } else if let Some(entry) = map_entry_schema(node, defs) {
+                // A dynamic namespace: each map entry `<pointer>/{ref}` is a
+                // subject. A secret field must declare that subject explicitly
+                // as `x-subject = "<pointer>/*"` (the `*` standing in for the
+                // entry's ref); fields without `x-subject` are plaintext.
+                let expected_subject = format!("{pointer}/*");
+                let mut plaintext_suffixes = BTreeSet::new();
+                if let Some(fields) = entry.get("properties").and_then(Value::as_object) {
+                    for (field, child) in fields {
+                        if let Some(subject) = child.get("x-subject") {
+                            assert!(
+                                subject.as_str() == Some(expected_subject.as_str()),
+                                "x-subject {subject} on `{pointer}/*/{field}` must be \
+                                 {expected_subject:?} — the dynamic subject of the enclosing \
+                                 `{pointer}` map",
+                            );
+                        } else {
+                            plaintext_suffixes
+                                .insert(parse_pointer(&format!("/{}", escape_token(field))));
+                        }
+                    }
+                }
+                config.namespace_patterns.push(NamespacePatternConfig {
+                    prefix: parse_pointer(&pointer),
+                    plaintext_suffixes,
+                });
+            } else {
+                walk_fixed(
+                    node,
+                    &pointer,
+                    defs,
+                    &mut config.secret_paths,
+                    &mut config.plaintext_paths,
+                );
+            }
+        }
+
+        config.plaintext_prefixes.sort();
+        config.secret_paths.sort_by(|a, b| a.path.cmp(&b.path));
+        config.plaintext_paths.sort();
+        config
     }
 }
 
@@ -901,6 +1159,11 @@ mod tests {
                 prefix: "/persons".parse().unwrap(),
                 plaintext_suffixes: std::iter::once(path("/passengerType")).collect(),
             }],
+            secret_paths: vec![SecretPathConfig {
+                path: path("/self/firstName"),
+                subject: path("/self"),
+            }],
+            plaintext_paths: vec![path("/self/country")],
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: AttributeSchemaConfig = serde_json::from_str(&json).unwrap();
@@ -910,6 +1173,144 @@ mod tests {
             decoded.namespace_patterns[0].prefix,
             config.namespace_patterns[0].prefix
         );
+        assert_eq!(decoded.secret_paths.len(), 1);
+        assert_eq!(decoded.plaintext_paths, vec![path("/self/country")]);
+    }
+
+    #[test]
+    fn exact_secret_paths_classify_under_named_subject() {
+        // Fixed-subject aggregate: `/self/firstName` secret under `/self`,
+        // `/self/country` plaintext, everything else unknown (strict).
+        let config = AttributeSchemaConfig {
+            permissive: false,
+            plaintext_prefixes: vec![],
+            namespace_patterns: vec![],
+            secret_paths: vec![SecretPathConfig {
+                path: path("/self/firstName"),
+                subject: path("/self"),
+            }],
+            plaintext_paths: vec![path("/self/country")],
+        };
+        let schema = AttributeSchema::from(config);
+
+        assert!(matches!(
+            schema.classify(&path("/self/firstName")).as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "/self"
+        ));
+        assert!(matches!(
+            schema.classify(&path("/self/country")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+        // Unlisted path is rejected (strict, non-permissive).
+        assert!(schema.classify(&path("/self/unknown")).is_none());
+    }
+
+    #[test]
+    fn from_annotated_schema_derives_namespace_and_plaintext_prefix() {
+        // A dynamic `/persons/{ref}` namespace (map of passengers) plus a
+        // non-PII `/search` subtree — mirrors the flight-booking example.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "search": { "$ref": "#/$defs/Search" },
+                "persons": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/Passenger" }
+                }
+            },
+            "$defs": {
+                "Search": {
+                    "type": "object",
+                    "properties": { "origin": { "type": "string" } }
+                },
+                "Passenger": {
+                    "type": "object",
+                    "properties": {
+                        "firstName": { "type": ["string", "null"], "x-subject": "/persons/*" },
+                        "passengerType": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let config = AttributeSchemaConfig::from_annotated_schema(&schema);
+
+        assert_eq!(config.plaintext_prefixes, vec![path("/search")]);
+        assert_eq!(config.namespace_patterns.len(), 1);
+        assert_eq!(config.namespace_patterns[0].prefix, path("/persons"));
+        assert!(
+            config.namespace_patterns[0]
+                .plaintext_suffixes
+                .contains(&path("/passengerType"))
+        );
+
+        // The resulting schema classifies a passenger's fields correctly.
+        let schema = AttributeSchema::from(config);
+        assert!(matches!(
+            schema.classify(&path("/persons/p0/firstName")).as_deref(),
+            Some(PiiClass::Secret { subject }) if subject.as_str() == "/persons/p0"
+        ));
+        assert!(matches!(
+            schema
+                .classify(&path("/persons/p0/passengerType"))
+                .as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+        assert!(matches!(
+            schema.classify(&path("/search/origin")).as_deref(),
+            Some(PiiClass::Plaintext)
+        ));
+    }
+
+    #[test]
+    fn from_annotated_schema_derives_fixed_subject_exact_paths() {
+        // A fixed-subject `/self` group mixing secret and plaintext leaves —
+        // mirrors the HR Person aggregate.
+        let schema = json!({
+            "type": "object",
+            "properties": { "self": { "$ref": "#/$defs/SelfAttrs" } },
+            "$defs": {
+                "SelfAttrs": {
+                    "type": "object",
+                    "properties": {
+                        "firstName": { "type": ["string", "null"], "x-subject": "/self" },
+                        "country": { "type": "string" }
+                    }
+                }
+            }
+        });
+        let config = AttributeSchemaConfig::from_annotated_schema(&schema);
+
+        assert_eq!(config.secret_paths.len(), 1);
+        assert_eq!(config.secret_paths[0].path, path("/self/firstName"));
+        assert_eq!(config.secret_paths[0].subject, path("/self"));
+        assert_eq!(config.plaintext_paths, vec![path("/self/country")]);
+        assert!(config.namespace_patterns.is_empty());
+        assert!(config.plaintext_prefixes.is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "must be")]
+    fn from_annotated_schema_rejects_mismatched_namespace_subject() {
+        // A secret field inside the `/persons` map names a different subject —
+        // a schema-authoring error the deriver must reject.
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "persons": {
+                    "type": "object",
+                    "additionalProperties": { "$ref": "#/$defs/Passenger" }
+                }
+            },
+            "$defs": {
+                "Passenger": {
+                    "type": "object",
+                    "properties": {
+                        "firstName": { "type": ["string", "null"], "x-subject": "/elephants/*" }
+                    }
+                }
+            }
+        });
+        let _ = AttributeSchemaConfig::from_annotated_schema(&schema);
     }
 
     #[test]
