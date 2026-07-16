@@ -302,8 +302,26 @@ cargo clippy -- --no-deps -Dclippy::pedantic -Dwarnings
 
 ---
 
+## Examples
+
+The [`examples/`](examples) directory contains standalone projects that exercise
+the event-sourcing foundation:
+
+| Example | Description |
+|---|---|
+| [`examples/flight-booking`](examples/flight-booking) | The flight-booking domain (schema, attribute classification, and decision rules) layered on the `journey_dynamics` crate. |
+| [`examples/hr`](examples/hr) | A two-aggregate (`Person` + `Employment`) HR domain built **directly** on the [`es-capture`](crates/es-capture) spine. Demonstrates a shared data subject and **cross-aggregate crypto-shredding** — a single key deletion erases PII in both aggregates. Runs entirely in memory (no Postgres). See its [README](examples/hr/README.md). |
+
+```bash
+# Run the in-memory HR demo (hire → read → erase → read)
+cargo run -p hr
+```
+
+---
+
 ## Regenerate the flight-booking schema
 
 ```bash
 # Must be run from the examples/flight-booking directory
 cargo run -p flight-booking --bin generate_schema
+```

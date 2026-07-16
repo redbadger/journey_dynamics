@@ -1,0 +1,15 @@
+[package]
+name = "hr"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+es-capture = { path = "../../crates/es-capture" }
+cqrs-es = "0.5.0"
+# `testing` exposes the in-memory event repository and key store so the demo
+# (and its tests) can run the full crypto-shredding stack without Postgres.
+cqrs-es-crypto = { path = "../../crates/cqrs-es-crypto", features = ["testing"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["serde", "v4"] }
+jsonptr = { version = "0.7.1", features = ["serde"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

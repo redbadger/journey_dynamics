@@ -83,6 +83,12 @@ jobs:
           set -euxo pipefail
           cargo build
 
+      - name: Run HR example
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cargo run -p hr
+
       - name: Install Hurl
         shell: bash
         run: |
