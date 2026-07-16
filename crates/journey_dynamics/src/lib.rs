@@ -23,7 +23,7 @@ where
         for event in events {
             let json = serde_json::to_string_pretty(&event.payload)
                 .unwrap_or_else(|_| "failed to serialize event payload".to_string());
-            println!("{}-{}\n{}", aggregate_id, event.sequence, &json);
+            println!("{}-{}\n{}", aggregate_id, event.sequence, json);
         }
     }
 }
