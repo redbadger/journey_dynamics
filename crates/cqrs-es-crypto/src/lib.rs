@@ -77,6 +77,7 @@
 //!   `#[pii(secret, redact = "...")]`. See the derive crate's docs.
 //! - `testing`: exposes [`InMemoryEventRepository`] for downstream tests.
 
+pub mod caching_key_store;
 pub mod cipher;
 pub mod kek;
 pub mod key_store;
@@ -92,9 +93,19 @@ pub use cipher::{CryptoError, EncryptedPayload, FieldCipher, KeyMaterial, PiiCip
 
 pub use kek::{KekError, KekHandle, KekProvider, StaticKekProvider, WrappedDek};
 
+// Compose two providers (legacy + new) for zero-downtime KEK migration.
+pub use kek::CompositeKekProvider;
+
+// Google Cloud KMS-backed provider (feature `gcp-kms`).
+#[cfg(feature = "gcp-kms")]
+pub use kek::{GcpKmsKekProvider, TokenSource};
+
 // ── Key store ─────────────────────────────────────────────────────────────────
 
 pub use key_store::{InMemoryKeyStore, KeyStore, KeyStoreError};
+
+// In-memory DEK cache in front of any key store (for network-backed KEKs).
+pub use caching_key_store::{CachingKeyStore, DekCache};
 
 #[cfg(feature = "postgres")]
 pub use key_store::{PostgresKeyStore, PostgresKeyStoreOptions};
