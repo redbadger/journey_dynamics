@@ -10,9 +10,12 @@ use crate::{
     domain::journey::{Journey, JourneyServices},
     pii_codec::JourneyPiiCodec,
     state::{load_attribute_schema, load_decision_engine, load_schema_validator},
-    subject_lookup_hook::SubjectLookupHook,
     view_repository::StructuredJourneyViewRepository,
 };
+// Deprecated in favour of `cqrs_es_crypto::BlindIndexHook`; this app has not
+// migrated yet, so allow the deprecation warning at the use site.
+#[allow(deprecated)]
+use crate::subject_lookup_hook::SubjectLookupHook;
 
 /// The CQRS framework type used throughout the application.
 ///
@@ -55,6 +58,7 @@ pub fn cqrs_framework(
 
     let inner = PostgresEventRepository::new(pool.clone());
     let codec = Arc::new(JourneyPiiCodec);
+    #[allow(deprecated)] // SubjectLookupHook: migrate to BlindIndexHook when ready.
     let crypto_repo = CryptoShreddingEventRepository::new(inner, key_store, cipher, codec)
         .with_transactional_writes(pool, kek_provider)
         .with_persist_hook(Arc::new(SubjectLookupHook));

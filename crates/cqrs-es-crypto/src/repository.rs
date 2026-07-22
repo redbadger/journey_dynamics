@@ -854,6 +854,20 @@ impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEv
                 .await;
         }
 
+        // Persist hooks only run on the transactional path. Refuse to persist
+        // (rather than silently skip them) if any are registered without
+        // `with_transactional_writes(...)` — a silent no-op here would leave
+        // e.g. a blind index permanently un-maintained.
+        #[cfg(feature = "postgres")]
+        if !self.persist_hooks.is_empty() {
+            return Err(PersistenceError::UnknownError(
+                "persist hook(s) registered without the transactional write path; \
+                 call with_transactional_writes(pool, kek_provider) — refusing to \
+                 persist and silently skip hook writes"
+                    .into(),
+            ));
+        }
+
         // Legacy path: encrypt then delegate to the inner repository.
         let encrypted = self.encrypt_events(events).await?;
         self.inner.persist::<A>(&encrypted, snapshot_update).await

@@ -12,8 +12,19 @@ use uuid::Uuid;
 
 /// Upserts a `subject_lookup` row for every `SubjectRegistered` event,
 /// atomically with the event INSERT.
+///
+/// **Deprecated.** Superseded by [`cqrs_es_crypto::BlindIndexHook`], which
+/// generalises this to `(subject_id, lookup_type, lookup_value)` and stores a
+/// keyed-HMAC blind index instead of the plaintext `email_lower` — keeping the
+/// value out of the lookup table. See `docs/SUBJECT_LOOKUP_SPLIT_PLAN.md`.
+/// Migrating requires re-sourcing any plaintext-email reads from decrypted
+/// events; apps can cut over on their own schedule.
+#[deprecated(
+    note = "use cqrs_es_crypto::BlindIndexHook (keyed-HMAC blind index); see SUBJECT_LOOKUP_SPLIT_PLAN.md"
+)]
 pub struct SubjectLookupHook;
 
+#[allow(deprecated)]
 #[async_trait]
 impl PersistHook for SubjectLookupHook {
     async fn on_persist(

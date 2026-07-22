@@ -11,6 +11,10 @@
 //! The `DATABASE_URL` environment variable must point at a reachable Postgres
 //! instance (defaults to `postgres://postgres:postgres@localhost:5432/journey_dynamics`).
 
+// SubjectLookupHook is deprecated in favour of BlindIndexHook; these regression
+// tests still exercise it until the app migrates.
+#![allow(deprecated)]
+
 use cqrs_es::persist::SerializedEvent;
 use cqrs_es_crypto::PersistHook;
 use journey_dynamics::subject_lookup_hook::SubjectLookupHook;

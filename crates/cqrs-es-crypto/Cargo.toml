@@ -19,6 +19,11 @@ postgres = ["dep:sqlx"]
 # Google Cloud KMS-backed KekProvider (the KEK never leaves KMS). Pulls a
 # rustls-only reqwest so the single-TLS-stack / distroless invariant holds.
 gcp-kms = ["dep:reqwest"]
+# Keyed-HMAC blind indexing: keep a crypto-shreddable (encrypted) field
+# queryable via a deterministic HMAC lookup key. Pure-Rust deps; zero cost when
+# unused. Combine with `postgres` for the write-path `BlindIndexHook`, and with
+# `gcp-kms` for the KMS-macSign-backed key provider.
+blind-index = ["dep:hmac", "dep:sha2", "dep:unicode-normalization"]
 
 [dependencies]
 cqrs-es-crypto-derive = { version = "0.3.0", path = "../cqrs-es-crypto-derive", optional = true }
@@ -27,12 +32,14 @@ aes-kw = "0.3"
 async-trait = "0.1"
 base64 = "0.22"
 cqrs-es = "0.5"
+hmac = { version = "0.12", optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
     "rustls-tls",
     "json",
 ], optional = true }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sha2 = { version = "0.10", optional = true }
 sqlx = { version = "0.8", features = [
     "postgres",
     "runtime-tokio-rustls",
@@ -41,6 +48,7 @@ sqlx = { version = "0.8", features = [
 thiserror = "2.0"
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
+unicode-normalization = { version = "0.1", optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
 zeroize = "1"
 
@@ -51,6 +59,10 @@ required-features = ["postgres"]
 [[test]]
 name = "postgres_repository"
 required-features = ["postgres", "testing"]
+
+[[test]]
+name = "postgres_blind_index"
+required-features = ["blind-index", "postgres", "testing"]
 
 [dev-dependencies]
 async-trait = "0.1"
