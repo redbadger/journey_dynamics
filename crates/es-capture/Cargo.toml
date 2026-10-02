@@ -10,7 +10,7 @@ description = "Reusable progressive-capture spine for event-sourced, crypto-shre
 publish = false
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 cqrs-es = "0.5"
 cqrs-es-crypto = { path = "../cqrs-es-crypto" }
 serde = { version = "1.0", features = ["derive"] }
@@ -19,10 +19,18 @@ jsonptr = { version = "0.7.1", features = ["serde"] }
 json-patch = "4.2.0"
 jsonschema = "0.46"
 thiserror = "2.0.18"
-tokio = { version = "1", features = ["rt"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio = { version = "1", features = ["rt"], optional = true }
+tokio-util = { version = "0.7", features = ["rt"], optional = true }
 uuid = { version = "1", features = ["serde", "v4"] }
-zen-engine = "0.55.0"
+zen-engine = { version = "0.55.0", optional = true }
+
+[features]
+default = ["gorules"]
+# `GoRulesDecisionEngine`, the JDM backend for `DecisionEngine`. Optional
+# because `zen-engine` is large and slow to build, and a consumer that wires
+# no engine (`CaptureServices::without_decision_engine`), or its own, never
+# runs it. The trait and `SimpleDecisionEngine` stay unconditional.
+gorules = ["dep:tokio", "dep:tokio-util", "dep:zen-engine"]
 
 [dev-dependencies]
 serde_json = "1.0"
