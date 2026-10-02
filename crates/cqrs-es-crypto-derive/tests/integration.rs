@@ -39,6 +39,7 @@ impl DomainEvent for TestDomainEvent {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct TestAggregate;
 
+#[allow(clippy::unused_async_trait_impl)] // A stub: the trait is async, its answer is not.
 impl cqrs_es::Aggregate for TestAggregate {
     type Command = ();
     type Event = TestDomainEvent;
@@ -1102,7 +1103,7 @@ async fn vec_secret_redacts_to_empty_array_when_key_deleted() {
 
     let decoded: Vec<PhoneNumber> = serde_json::from_value(inner["phone_numbers"].clone())
         .expect("empty array must deserialize as an empty Vec<PhoneNumber>");
-    assert!(decoded.is_empty());
+    assert_eq!(decoded, []);
 
     assert_eq!(inner["tag"].as_str().unwrap(), "some-tag");
     assert_eq!(

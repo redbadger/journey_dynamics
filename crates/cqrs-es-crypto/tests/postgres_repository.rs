@@ -46,6 +46,7 @@ impl DomainEvent for TestEvent {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct TestAggregate;
 
+#[allow(clippy::unused_async_trait_impl)] // A stub: the trait is async, its answer is not.
 impl cqrs_es::Aggregate for TestAggregate {
     type Command = ();
     type Event = TestEvent;

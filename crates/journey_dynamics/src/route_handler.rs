@@ -115,6 +115,8 @@ where
 ///    A failure here is logged but does not abort — the PII is already gone.
 ///
 /// Returns `Err(Response)` on any hard failure so the caller can short-circuit.
+// The `Err` is the finished response the handler returns, built once here.
+#[allow(clippy::result_large_err)]
 async fn shred_one_subject(state: &ApplicationState, subject_id: Uuid) -> Result<(), Response> {
     // Step 1 — find affected journeys.
     let journeys = state

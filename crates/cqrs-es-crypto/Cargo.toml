@@ -29,7 +29,7 @@ blind-index = ["dep:hmac", "dep:sha2", "dep:unicode-normalization"]
 cqrs-es-crypto-derive = { version = "0.3.0", path = "../cqrs-es-crypto-derive", optional = true }
 aes-gcm = "0.10"
 aes-kw = "0.3"
-async-trait = "0.1"
+async-trait = "0.1.92"
 base64 = "0.22"
 cqrs-es = "0.5"
 hmac = { version = "0.12", optional = true }
@@ -65,7 +65,7 @@ name = "postgres_blind_index"
 required-features = ["blind-index", "postgres", "testing"]
 
 [dev-dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 base64 = "0.22"
 cqrs-es = "0.5"
 wiremock = "0.6"

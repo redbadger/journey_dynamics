@@ -805,6 +805,10 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
     }
 }
 
+// The trait is async because a real store awaits I/O; an impl whose answer is
+// already in hand need not, and rewriting it as `fn -> impl Future` would only
+// obscure that.
+#[allow(clippy::unused_async_trait_impl)]
 impl<R: PersistedEventRepository> PersistedEventRepository for CryptoShreddingEventRepository<R> {
     async fn get_events<A: Aggregate>(
         &self,
@@ -938,6 +942,10 @@ impl InMemoryEventRepository {
 }
 
 #[cfg(any(test, feature = "testing"))]
+// The trait is async because a real store awaits I/O; an impl whose answer is
+// already in hand need not, and rewriting it as `fn -> impl Future` would only
+// obscure that.
+#[allow(clippy::unused_async_trait_impl)]
 impl PersistedEventRepository for InMemoryEventRepository {
     async fn get_events<A: Aggregate>(
         &self,
@@ -1078,6 +1086,7 @@ mod tests {
     #[derive(Default, serde::Serialize, serde::Deserialize)]
     struct TestAggregate;
 
+    #[allow(clippy::unused_async_trait_impl)] // A stub: the trait is async, its answer is not.
     impl cqrs_es::Aggregate for TestAggregate {
         type Command = ();
         type Event = TestEvent;
