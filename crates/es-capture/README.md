@@ -189,6 +189,11 @@ capture still runs and emits only `AttributesSet`. Two implementations ship:
   (`zen-engine`) model, pre-compiling expressions and running them on a
   thread-pinned worker pool.
 
+`GoRulesDecisionEngine` is behind the default-on `gorules` feature, the crate's
+only user of `zen-engine`. A consumer that wires no engine, or its own, can
+depend on `es-capture` with `default-features = false` and skip compiling
+`zen-*` altogether; the trait and `SimpleDecisionEngine` stay available.
+
 ```rust
 let services = CaptureServices::new(decision_engine, validator, attribute_schema);
 ```
@@ -204,7 +209,7 @@ let services = CaptureServices::new(decision_engine, validator, attribute_schema
 | `subject_registry` | `SubjectRegistry`, `SubjectRegistration` |
 | `attributes_set_codec` | `AttributesSetCodec` — the `cqrs_es_crypto::PiiEventCodec` for `AttributesSet` |
 | `capture` | The pure `capture()` pipeline: classify → validate → evaluate, producing a `CaptureOutcome` |
-| `decision_engine` | `DecisionEngine` trait, `WorkflowDecision`, `SimpleDecisionEngine`, `GoRulesDecisionEngine` |
+| `decision_engine` | `DecisionEngine` trait, `WorkflowDecision`, `SimpleDecisionEngine`, `GoRulesDecisionEngine` (`gorules` feature) |
 | `schema_validator` | `SchemaValidator` trait, `NoOpValidator`, `JsonSchemaValidator` |
 | `json_path` | `flatten` (tree → path map) and `assign_all` (path map → tree) |
 

@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gorules` feature** (default on) gating `GoRulesDecisionEngine` and with
+  it `zen-engine`, `tokio` and `tokio-util`. The `DecisionEngine` trait,
+  `SimpleDecisionEngine` and `CaptureError::DecisionEngine` are unconditional,
+  so a consumer turning the feature off changes nothing but its build.
+
 - **Initial release** — the reusable, domain-agnostic **progressive-capture
   spine** for event-sourced systems that need per-subject crypto-shredding
   (GDPR right-to-erasure) under dynamic, externalised rules. A new domain is

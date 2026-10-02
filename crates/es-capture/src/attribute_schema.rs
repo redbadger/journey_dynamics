@@ -818,7 +818,7 @@ mod tests {
 
         assert_eq!(result.plaintext.len(), 2);
         assert!(result.secret_by_subject.is_empty());
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
         assert_eq!(result.plaintext[&path("/search/origin")], json!("LHR"));
     }
 
@@ -835,7 +835,7 @@ mod tests {
 
         assert_eq!(result.plaintext.len(), 1);
         assert_eq!(result.secret_by_subject.len(), 1);
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
         let (uuid, changes) = result.secret_by_subject.get(&path("/persons/0")).unwrap();
         assert_eq!(*uuid, subject_a());
         assert_eq!(changes[&path("/persons/0/passport")], json!("AB123456"));
@@ -854,7 +854,7 @@ mod tests {
 
         assert!(result.plaintext.is_empty());
         assert_eq!(result.secret_by_subject.len(), 2);
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
         // Keyed by role path, not UUID.
         assert!(result.secret_by_subject.contains_key(&path("/persons/0")));
         assert!(result.secret_by_subject.contains_key(&path("/persons/1")));
@@ -907,7 +907,7 @@ mod tests {
 
         assert_eq!(result.plaintext.len(), 2);
         assert!(result.secret_by_subject.is_empty());
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
     }
 
     // ── namespace pattern ─────────────────────────────────────────────────
@@ -980,7 +980,7 @@ mod tests {
             slot[&path("/persons/passenger_0/firstName")],
             json!("Alice")
         );
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
     }
 
     #[test]
@@ -1000,7 +1000,7 @@ mod tests {
 
         assert!(result.plaintext.is_empty());
         assert_eq!(result.secret_by_subject.len(), 2);
-        assert!(result.unknown.is_empty());
+        assert_eq!(result.unknown, Vec::<PointerBuf>::new());
     }
 
     // ── classification precedence ──────────────────────────────────────────
@@ -1285,7 +1285,7 @@ mod tests {
         assert_eq!(config.secret_paths[0].subject, path("/self"));
         assert_eq!(config.plaintext_paths, vec![path("/self/country")]);
         assert!(config.namespace_patterns.is_empty());
-        assert!(config.plaintext_prefixes.is_empty());
+        assert_eq!(config.plaintext_prefixes, Vec::<PointerBuf>::new());
     }
 
     #[test]

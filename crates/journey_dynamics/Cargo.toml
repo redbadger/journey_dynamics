@@ -5,7 +5,7 @@ edition.workspace = true
 default-run = "journey_dynamics"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 base64 = "0.22"
 cqrs-es-crypto = { path = "../cqrs-es-crypto", features = [
     "derive",
