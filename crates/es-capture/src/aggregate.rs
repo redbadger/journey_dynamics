@@ -2,10 +2,10 @@
 //!
 //! [`CaptureAggregate`] is a ready-made `cqrs_es::Aggregate` implementing the
 //! progressive-capture spine: start, path-keyed `SetAttributes`, the subject
-//! lifecycle (register / bind / register-and-bind / forget), and complete. A
-//! new domain instantiates it with a [`CaptureConfig`] (which supplies the
-//! aggregate `TYPE`) plus [`CaptureServices`] (attribute schema, validator, and
-//! an optional decision engine) — no aggregate code of its own.
+//! lifecycle (register / bind / register-and-bind / rebind / forget), and
+//! complete. A new domain instantiates it with a [`CaptureConfig`] (which
+//! supplies the aggregate `TYPE`) plus [`CaptureServices`] (attribute schema,
+//! validator, and an optional decision engine) — no aggregate code of its own.
 //!
 //! The command, event and error enums are shared across domains: a domain's
 //! specificity lives in its attribute schema, JSON schema, optional rules, and
@@ -108,6 +108,28 @@ pub enum CaptureCommand {
         /// Subject identity.
         subject_id: Uuid,
         /// Contact email.
+        email: String,
+    },
+    /// Move a role path to a different subject, registering it if needed.
+    ///
+    /// For repairing a role bound to the wrong subject. Idempotent when the role
+    /// is already bound to `subject_id`, and on an unbound role it behaves as
+    /// [`RegisterAndBindSubject`](Self::RegisterAndBindSubject) — nothing can
+    /// have been encrypted under a binding that never existed.
+    ///
+    /// Refused with [`CaptureError::RebindRefused`] once this aggregate has
+    /// written a secret partition under the role's current subject. That guard
+    /// is **per-aggregate only**: ciphertext written under the same subject by
+    /// any *other* aggregate is invisible to it, and state restored from a
+    /// snapshot that predates the guard reads as having written no secrets. The
+    /// caller must confirm in its key store that the current subject holds no
+    /// DEK at all before issuing this.
+    RebindSubject {
+        /// The role path to move.
+        role_path: PointerBuf,
+        /// The subject to bind it to.
+        subject_id: Uuid,
+        /// Contact email, recorded if the subject is new or its email changed.
         email: String,
     },
     /// Mark the aggregate complete.
@@ -222,6 +244,13 @@ pub enum CaptureError {
     /// A role path is already bound to a different subject.
     #[error("role path '{0}' is already bound to a different subject")]
     RolePathConflict(PointerBuf),
+    /// A rebind was refused: this aggregate wrote secrets under the role's
+    /// current subject.
+    ///
+    /// Per-aggregate only — see [`CaptureCommand::RebindSubject`] for what the
+    /// guard cannot see.
+    #[error("role path '{0}' cannot be rebound: secrets were written under its current subject")]
+    RebindRefused(PointerBuf),
 }
 
 impl From<SubjectError> for CaptureError {
@@ -229,6 +258,7 @@ impl From<SubjectError> for CaptureError {
         match err {
             SubjectError::NotRegistered => Self::SubjectNotRegistered,
             SubjectError::RolePathConflict(role_path) => Self::RolePathConflict(role_path),
+            SubjectError::RebindRefused(role_path) => Self::RebindRefused(role_path),
         }
     }
 }
@@ -562,6 +592,37 @@ impl<C: CaptureConfig> Aggregate for CaptureAggregate<C> {
                 Ok(())
             }
 
+            CaptureCommand::RebindSubject {
+                role_path,
+                subject_id,
+                email,
+            } => {
+                if self.id == Uuid::default() {
+                    return Err(CaptureError::NotFound);
+                }
+                if CaptureState::Complete == self.state {
+                    return Err(CaptureError::AlreadyCompleted);
+                }
+                if !self.registry.check_rebind(&role_path, &subject_id)? {
+                    return Ok(()); // same subject — idempotent
+                }
+                if self.registry.needs_registration(&subject_id, &email) {
+                    sink.write(CaptureEvent::SubjectRegistered { subject_id, email }, self)
+                        .await;
+                }
+                // The existing event, not a new one: `apply` replaces a binding
+                // outright, so a second `SubjectBound` for the role *is* a move.
+                sink.write(
+                    CaptureEvent::SubjectBound {
+                        role_path,
+                        subject_id,
+                    },
+                    self,
+                )
+                .await;
+                Ok(())
+            }
+
             CaptureCommand::ForgetSubject { subject_id } => {
                 if self.id == Uuid::default() {
                     return Err(CaptureError::NotFound);
@@ -590,6 +651,7 @@ impl<C: CaptureConfig> Aggregate for CaptureAggregate<C> {
                 for partition in &secret_partitions {
                     assign_all(&mut self.shared_data, &partition.changes)
                         .expect("events should have valid JSON pointers");
+                    self.registry.record_secret(partition.subject_id);
                 }
             }
             CaptureEvent::WorkflowEvaluated {
@@ -617,5 +679,201 @@ impl<C: CaptureConfig> Aggregate for CaptureAggregate<C> {
                 self.registry.bind(role_path, subject_id);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use cqrs_es::test::TestFramework;
+    use serde_json::json;
+
+    use super::*;
+    use crate::{attribute_schema::NamespacePattern, schema_validator::NoOpValidator};
+
+    struct TestConfig;
+
+    impl CaptureConfig for TestConfig {
+        const TYPE: &'static str = "Test";
+    }
+
+    type Tester = TestFramework<CaptureAggregate<TestConfig>>;
+
+    fn ptr(s: &str) -> PointerBuf {
+        PointerBuf::parse(s).unwrap()
+    }
+
+    /// Permissive schema with a `/persons/<ref>/<field>` secret namespace, so a
+    /// write under `/persons/0` is encrypted under the subject bound there.
+    fn services() -> CaptureServices {
+        let schema =
+            AttributeSchema::permissive().with_namespace_patterns(vec![NamespacePattern {
+                prefix: ptr("/persons"),
+                plaintext_suffixes: BTreeSet::new(),
+            }]);
+        CaptureServices::without_decision_engine(Arc::new(NoOpValidator), Arc::new(schema))
+    }
+
+    fn started_and_bound(id: Uuid, subject_id: Uuid) -> Vec<CaptureEvent> {
+        vec![
+            CaptureEvent::Started { id },
+            CaptureEvent::SubjectRegistered {
+                subject_id,
+                email: String::new(),
+            },
+            CaptureEvent::SubjectBound {
+                role_path: ptr("/persons/0"),
+                subject_id,
+            },
+        ]
+    }
+
+    fn rebind(subject_id: Uuid) -> CaptureCommand {
+        CaptureCommand::RebindSubject {
+            role_path: ptr("/persons/0"),
+            subject_id,
+            email: String::new(),
+        }
+    }
+
+    #[test]
+    fn rebind_registers_and_binds_the_new_subject() {
+        let (id, old, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        Tester::with(services())
+            .given(started_and_bound(id, old))
+            .when(rebind(new))
+            .then_expect_events(vec![
+                CaptureEvent::SubjectRegistered {
+                    subject_id: new,
+                    email: String::new(),
+                },
+                CaptureEvent::SubjectBound {
+                    role_path: ptr("/persons/0"),
+                    subject_id: new,
+                },
+            ]);
+    }
+
+    #[test]
+    fn replaying_a_rebind_yields_the_new_binding() {
+        let (id, old, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut aggregate = CaptureAggregate::<TestConfig>::default();
+        for event in started_and_bound(id, old) {
+            aggregate.apply(event);
+        }
+        aggregate.apply(CaptureEvent::SubjectRegistered {
+            subject_id: new,
+            email: String::new(),
+        });
+        aggregate.apply(CaptureEvent::SubjectBound {
+            role_path: ptr("/persons/0"),
+            subject_id: new,
+        });
+        assert_eq!(aggregate.bindings().get(&ptr("/persons/0")), Some(&new));
+    }
+
+    #[test]
+    fn rebind_to_an_already_registered_subject_emits_only_the_binding() {
+        let (id, old, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut given = started_and_bound(id, old);
+        given.push(CaptureEvent::SubjectRegistered {
+            subject_id: new,
+            email: String::new(),
+        });
+        Tester::with(services())
+            .given(given)
+            .when(rebind(new))
+            .then_expect_events(vec![CaptureEvent::SubjectBound {
+                role_path: ptr("/persons/0"),
+                subject_id: new,
+            }]);
+    }
+
+    #[test]
+    fn rebind_to_the_same_subject_is_a_no_op() {
+        let (id, subject) = (Uuid::new_v4(), Uuid::new_v4());
+        Tester::with(services())
+            .given(started_and_bound(id, subject))
+            .when(rebind(subject))
+            .then_expect_events(vec![]);
+    }
+
+    #[test]
+    fn rebind_of_an_unbound_role_binds_it() {
+        let (id, subject) = (Uuid::new_v4(), Uuid::new_v4());
+        Tester::with(services())
+            .given(vec![CaptureEvent::Started { id }])
+            .when(rebind(subject))
+            .then_expect_events(vec![
+                CaptureEvent::SubjectRegistered {
+                    subject_id: subject,
+                    email: String::new(),
+                },
+                CaptureEvent::SubjectBound {
+                    role_path: ptr("/persons/0"),
+                    subject_id: subject,
+                },
+            ]);
+    }
+
+    #[test]
+    fn rebind_is_refused_after_a_secret_write_under_the_current_subject() {
+        let (id, old, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut given = started_and_bound(id, old);
+        given.push(CaptureEvent::AttributesSet {
+            plaintext: BTreeMap::new(),
+            secret_partitions: vec![SecretPartitionData {
+                role_path: ptr("/persons/0"),
+                subject_id: old,
+                changes: BTreeMap::from([(ptr("/persons/0/passport"), json!("AB123456"))]),
+            }],
+        });
+        Tester::with(services())
+            .given(given)
+            .when(rebind(new))
+            .then_expect_error(CaptureError::RebindRefused(ptr("/persons/0")));
+    }
+
+    #[test]
+    fn rebind_is_allowed_when_only_plaintext_was_written() {
+        let (id, old, new) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let mut given = started_and_bound(id, old);
+        given.push(CaptureEvent::AttributesSet {
+            plaintext: BTreeMap::from([(ptr("/search/origin"), json!("LHR"))]),
+            secret_partitions: vec![],
+        });
+        Tester::with(services())
+            .given(given)
+            .when(rebind(new))
+            .then_expect_events(vec![
+                CaptureEvent::SubjectRegistered {
+                    subject_id: new,
+                    email: String::new(),
+                },
+                CaptureEvent::SubjectBound {
+                    role_path: ptr("/persons/0"),
+                    subject_id: new,
+                },
+            ]);
+    }
+
+    #[test]
+    fn rebind_before_start_is_not_found() {
+        Tester::with(services())
+            .given_no_previous_events()
+            .when(rebind(Uuid::new_v4()))
+            .then_expect_error(CaptureError::NotFound);
+    }
+
+    #[test]
+    fn rebind_after_completion_is_refused() {
+        let (id, subject) = (Uuid::new_v4(), Uuid::new_v4());
+        let mut given = started_and_bound(id, subject);
+        given.push(CaptureEvent::Completed);
+        Tester::with(services())
+            .given(given)
+            .when(rebind(Uuid::new_v4()))
+            .then_expect_error(CaptureError::AlreadyCompleted);
     }
 }

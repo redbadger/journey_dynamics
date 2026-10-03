@@ -70,6 +70,7 @@ The command, event, and error enums are shared across all domains:
 | `RegisterSubject { subject_id, email }` | `SubjectRegistered` | Register a data subject (idempotent; a new email updates the record). |
 | `BindSubject { role_path, subject_id }` | `SubjectBound` | Bind a registered subject to a role path (e.g. `/persons/passenger_0`). |
 | `RegisterAndBindSubject { role_path, subject_id, email }` | `SubjectRegistered` + `SubjectBound` | The two above in one command. |
+| `RebindSubject { role_path, subject_id, email }` | `SubjectBound` (+ `SubjectRegistered` if the subject is new) | Move a role to another subject. Refused (`RebindRefused`) once this aggregate wrote secrets under the current subject — a per-aggregate guard only, so check the key store for a DEK first. |
 | `ForgetSubject { subject_id }` | `SubjectForgotten` | Audit event recorded **after** the DEK is deleted. |
 | `Complete` | `Completed` | Close the aggregate to further attribute changes. |
 
