@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CaptureCommand::RebindSubject`** — moves a role path to a different
+  subject (registering it if needed) by emitting the existing `SubjectBound`
+  event, for repairing a role bound to the wrong subject. Refused with the new
+  `CaptureError::RebindRefused` / `SubjectError::RebindRefused` once the
+  aggregate has written a secret partition under the role's current subject,
+  which `SubjectRegistry` now tracks (`#[serde(default)]`, so older serialised
+  state loads with an empty set). The guard is per-aggregate only: a consumer
+  must check its key store for a DEK under the current subject before
+  rebinding.
+
 - **`gorules` feature** (default on) gating `GoRulesDecisionEngine` and with
   it `zen-engine`, `tokio` and `tokio-util`. The `DecisionEngine` trait,
   `SimpleDecisionEngine` and `CaptureError::DecisionEngine` are unconditional,

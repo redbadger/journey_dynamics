@@ -93,13 +93,25 @@ jobs:
           set -euxo pipefail
           cargo run -p hr
 
+      # Pinned and checksummed, not "latest": resolving the latest tag was an
+      # unauthenticated GitHub API call, and a rate-limited answer left the tag
+      # empty and failed the run before anything was built. Dynamically linked
+      # against libcurl, which the runner has — `--version` is what proves it
+      # still does.
       - name: Install Hurl
         shell: bash
+        env:
+          HURL_VERSION: 8.0.1
+          HURL_SHA256: cac7c4670d69444db120edb21fe06c97ba8c80dcc52279957c8dd18f05fb0c06
         run: |
           set -euxo pipefail
-          HURL_LATEST=$(curl -s https://api.github.com/repos/Orange-OpenSource/hurl/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
-          curl -LO "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_LATEST}/hurl_${HURL_LATEST}_amd64.deb"
-          sudo dpkg -i "hurl_${HURL_LATEST}_amd64.deb"
+          name="hurl-${HURL_VERSION}-x86_64-unknown-linux-gnu"
+          curl -fsSLO "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/${name}.tar.gz"
+          echo "${HURL_SHA256}  ${name}.tar.gz" | sha256sum -c -
+          tar xzf "${name}.tar.gz"
+          sudo install -m 0755 "${name}/bin/hurl" /usr/local/bin/hurl
+          rm -rf "${name}" "${name}.tar.gz"
+          hurl --version
 
       - name: Integration Tests (Hurl)
         shell: bash

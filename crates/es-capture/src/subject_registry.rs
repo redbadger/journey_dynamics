@@ -7,8 +7,8 @@
 //!
 //! The registry owns the reusable spine of the subject lifecycle:
 //!
-//! - the **decision logic** for register / bind / register-and-bind / forget
-//!   (what is idempotent, what conflicts), and
+//! - the **decision logic** for register / bind / register-and-bind / rebind /
+//!   forget (what is idempotent, what conflicts), and
 //! - the **invariant lookup** [`SubjectRegistry::resolve_active`]: a secret path
 //!   may only be written if its role is bound to a subject that has not been
 //!   forgotten.
@@ -17,7 +17,7 @@
 //! registry only decides and mutates state, it does not know about any
 //! particular event enum.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -43,6 +43,11 @@ pub enum SubjectError {
     /// A role path is already bound to a different subject.
     #[error("Role path '{0}' is already bound to a different subject")]
     RolePathConflict(PointerBuf),
+    /// A rebind was refused because this aggregate already wrote secret data
+    /// under the role's current subject — moving the binding would strand that
+    /// ciphertext under a key the role no longer names.
+    #[error("Role path '{0}' cannot be rebound: secrets were written under its current subject")]
+    RebindRefused(PointerBuf),
 }
 
 /// Registered subjects plus the role-path → subject-UUID bindings.
@@ -52,6 +57,12 @@ pub struct SubjectRegistry {
     subjects: BTreeMap<Uuid, SubjectRegistration>,
     /// Role-path → subject-UUID bindings.
     bindings: BTreeMap<PointerBuf, Uuid>,
+    /// Subjects this aggregate has written a secret partition under — the
+    /// rebind guard. Defaulted so state serialised before the field existed
+    /// still loads, though as an empty set: see
+    /// [`check_rebind`](Self::check_rebind).
+    #[serde(default)]
+    secret_subjects: BTreeSet<Uuid>,
 }
 
 impl SubjectRegistry {
@@ -137,6 +148,40 @@ impl SubjectRegistry {
         }
     }
 
+    /// Decide whether rebinding `role_path` to `subject_id` should be recorded.
+    ///
+    /// Unlike [`check_binding`](Self::check_binding), a role already bound to a
+    /// *different* subject may move — provided this aggregate never wrote a
+    /// secret partition under that subject. An unbound role binds as it would
+    /// for `check_binding`.
+    ///
+    /// The guard is **per-aggregate only**. It sees the secret partitions this
+    /// aggregate's own events wrote, nothing else: data encrypted under the same
+    /// subject by *other* aggregates is invisible to it, and a registry restored
+    /// from a snapshot taken before the set existed starts empty. A consumer
+    /// must therefore also confirm against its key store that the current
+    /// subject holds no DEK at all before rebinding.
+    ///
+    /// # Errors
+    /// Returns [`SubjectError::RebindRefused`] if `role_path`'s current subject
+    /// has secrets written under it by this aggregate.
+    ///
+    /// Returns `Ok(true)` if a new binding should be recorded, or `Ok(false)`
+    /// if `role_path` is already bound to this same subject (idempotent).
+    pub fn check_rebind(
+        &self,
+        role_path: &PointerBuf,
+        subject_id: &Uuid,
+    ) -> Result<bool, SubjectError> {
+        match self.bindings.get(role_path) {
+            Some(existing) if existing == subject_id => Ok(false),
+            Some(existing) if self.secret_subjects.contains(existing) => {
+                Err(SubjectError::RebindRefused(role_path.clone()))
+            }
+            _ => Ok(true),
+        }
+    }
+
     // ── apply mutations ──────────────────────────────────────────────────────
 
     /// Record a subject registration (upsert: updates the email if it changed).
@@ -150,9 +195,14 @@ impl SubjectRegistry {
             });
     }
 
-    /// Record a role-path → subject binding.
+    /// Record a role-path → subject binding, replacing any existing one.
     pub fn bind(&mut self, role_path: PointerBuf, subject_id: Uuid) {
         self.bindings.insert(role_path, subject_id);
+    }
+
+    /// Record that a secret partition was written under `subject_id`.
+    pub fn record_secret(&mut self, subject_id: Uuid) {
+        self.secret_subjects.insert(subject_id);
     }
 
     /// Mark a subject as forgotten. No-op if the subject is unknown.
@@ -198,6 +248,44 @@ mod tests {
             reg.check_binding(&role, &id(2)),
             Err(SubjectError::RolePathConflict(role.clone()))
         );
+    }
+
+    #[test]
+    fn check_rebind_moves_a_binding_without_secrets() {
+        let mut reg = SubjectRegistry::default();
+        let role = path("/persons/0");
+        // Unbound → binds.
+        assert_eq!(reg.check_rebind(&role, &id(1)), Ok(true));
+        reg.bind(role.clone(), id(1));
+        // Same subject → idempotent.
+        assert_eq!(reg.check_rebind(&role, &id(1)), Ok(false));
+        // Different subject, nothing secret written under the current one → moves.
+        assert_eq!(reg.check_rebind(&role, &id(2)), Ok(true));
+        reg.bind(role.clone(), id(2));
+        assert_eq!(reg.binding(&role), Some(id(2)));
+    }
+
+    #[test]
+    fn check_rebind_refuses_once_the_current_subject_holds_secrets() {
+        let mut reg = SubjectRegistry::default();
+        let role = path("/persons/0");
+        reg.bind(role.clone(), id(1));
+        reg.record_secret(id(1));
+        assert_eq!(
+            reg.check_rebind(&role, &id(2)),
+            Err(SubjectError::RebindRefused(role.clone()))
+        );
+        // A secret under some *other* subject does not pin this role.
+        let other = path("/persons/1");
+        reg.bind(other.clone(), id(3));
+        assert_eq!(reg.check_rebind(&other, &id(4)), Ok(true));
+    }
+
+    #[test]
+    fn secret_subjects_default_when_absent_from_serialised_state() {
+        let reg: SubjectRegistry =
+            serde_json::from_value(serde_json::json!({ "subjects": {}, "bindings": {} })).unwrap();
+        assert!(reg.secret_subjects.is_empty());
     }
 
     #[test]
