@@ -11,7 +11,14 @@ event-sourced domain is mostly **configuration + types + (optional) rules**
 rather than new aggregate code.
 
 It builds on [`cqrs-es`](https://crates.io/crates/cqrs-es) for event sourcing and
-[`cqrs-es-crypto`](../cqrs-es-crypto) for the encryption / crypto-shredding layer.
+[`cqrs-es-crypto`](https://crates.io/crates/cqrs-es-crypto) for the encryption / crypto-shredding layer.
+
+```toml
+[dependencies]
+es-capture = "0.1"
+# Without the GoRules decision engine (and its large `zen-engine` build):
+es-capture = { version = "0.1", default-features = false }
+```
 
 ---
 
@@ -38,14 +45,14 @@ your domain  =  CaptureConfig (a TYPE string)
              +  your own read models / projections
 ```
 
-See [`crates/journey_dynamics`](../journey_dynamics) (the Journey domain) for a
+See [`crates/journey_dynamics`](https://github.com/redbadger/journey_dynamics/tree/main/crates/journey_dynamics) (the Journey domain) for a
 full real-world consumer: `Journey = CaptureAggregate<JourneyConfig>`.
 
 ---
 
 ## The aggregate
 
-[`CaptureAggregate<C: CaptureConfig>`](src/aggregate.rs) is a ready-made
+[`CaptureAggregate<C: CaptureConfig>`](https://github.com/redbadger/journey_dynamics/blob/main/crates/es-capture/src/aggregate.rs) is a ready-made
 `cqrs_es::Aggregate`. The only per-domain input is a zero-sized marker that
 supplies the aggregate `TYPE`:
 
@@ -85,7 +92,7 @@ remains intact for non-shredded subjects after any erasure). Accessors:
 
 Every attribute is addressed by an RFC6901 **JSON Pointer** (e.g.
 `/search/origin`, `/persons/passenger_0/passport`). An
-[`AttributeSchema`](src/attribute_schema.rs) classifies each path as one of:
+[`AttributeSchema`](https://github.com/redbadger/journey_dynamics/blob/main/crates/es-capture/src/attribute_schema.rs) classifies each path as one of:
 
 ```rust
 pub enum PiiClass {
@@ -137,12 +144,12 @@ runtime — see how `journey_dynamics` reads `JOURNEY_ATTRIBUTE_SCHEMA_PATH`.
 PII is encrypted per **data subject**. A subject is registered (`subject_id` +
 `email`) and bound to a **role path**; secret attributes under that role are
 encrypted with the subject's Data Encryption Key (DEK). The
-[`SubjectRegistry`](src/subject_registry.rs) tracks registrations and bindings
+[`SubjectRegistry`](https://github.com/redbadger/journey_dynamics/blob/main/crates/es-capture/src/subject_registry.rs) tracks registrations and bindings
 and answers the resolution and idempotency questions the aggregate needs
 (`resolve_active`, `needs_registration`, `check_binding`, …).
 
 The encrypt/decrypt/redact itself happens in the `cqrs-es-crypto` layer via the
-[`AttributesSetCodec`](src/attributes_set_codec.rs) — a domain-agnostic
+[`AttributesSetCodec`](https://github.com/redbadger/journey_dynamics/blob/main/crates/es-capture/src/attributes_set_codec.rs) — a domain-agnostic
 `PiiEventCodec` for the `AttributesSet` event. It encrypts each subject's
 `changes` into its own partition (labelled by role path), decrypts them on read
 when the DEK is present, and writes a `{"/redacted": true}` sentinel once the DEK
@@ -175,13 +182,13 @@ let cqrs    = CqrsFramework::new(store, queries, services);
 
 For a complete production assembly — including the KEK provider, transactional
 DEK writes, and persist hooks — see
-[`crates/journey_dynamics/src/config.rs`](../journey_dynamics/src/config.rs).
+[`crates/journey_dynamics/src/config.rs`](https://github.com/redbadger/journey_dynamics/blob/main/crates/journey_dynamics/src/config.rs).
 
 ---
 
 ## Optional decision engine
 
-If you supply a [`DecisionEngine`](src/decision_engine.rs), every `SetAttributes`
+If you supply a [`DecisionEngine`](https://github.com/redbadger/journey_dynamics/blob/main/crates/es-capture/src/decision_engine.rs), every `SetAttributes`
 also emits a `WorkflowEvaluated { suggested_actions, phase }`. Without one,
 capture still runs and emits only `AttributesSet`. Two implementations ship:
 
@@ -239,7 +246,7 @@ fn start_emits_started() {
 }
 ```
 
-See [`crates/journey_dynamics/src/domain/journey.rs`](../journey_dynamics/src/domain/journey.rs)
+See [`crates/journey_dynamics/src/domain/journey.rs`](https://github.com/redbadger/journey_dynamics/blob/main/crates/journey_dynamics/src/domain/journey.rs)
 for an extensive behaviour-test suite over this aggregate.
 
 ---
@@ -247,4 +254,11 @@ for an extensive behaviour-test suite over this aggregate.
 ## Design notes
 
 For the full design and the extraction plan that produced this crate, see
-[`docs/REUSABLE_ES_FOUNDATION.md`](../../docs/REUSABLE_ES_FOUNDATION.md).
+[`docs/REUSABLE_ES_FOUNDATION.md`](https://github.com/redbadger/journey_dynamics/blob/main/docs/REUSABLE_ES_FOUNDATION.md).
+
+---
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-APACHE) or
+[MIT License](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-MIT) at your option.
