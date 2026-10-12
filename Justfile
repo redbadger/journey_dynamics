@@ -1,7 +1,5 @@
 set dotenv-load
 
-version := `grep '^version' Cargo.toml | sed 's/version = "\(.*\)"/\1/'`
-
 build: generate
     cargo build
 
@@ -64,11 +62,11 @@ docs:
 # Lint, build, test, run the HR example, and run hurl tests (needs a running server)
 ci: lint docs build test run-hr test-hurl
 
-# Publish cqrs-es-crypto-derive, cqrs-es-crypto and es-capture to crates.io
+# Publish cqrs-es-crypto-derive, cqrs-es-crypto and es-capture to crates.io.
+# Each crate is versioned on its own, so tags come from the GitHub releases:
+# `cqrs-es-crypto-vX.Y.Z` (marked latest), `es-capture-vX.Y.Z`, plus a
+# `cqrs-es-crypto-derive-vX.Y.Z` tag at the same commit.
 publish:
     cargo publish -p cqrs-es-crypto-derive
     cargo publish -p cqrs-es-crypto
     cargo publish -p es-capture
-    git tag "cqrs-es-crypto-derive-v{{ version }}"
-    git tag "cqrs-es-crypto-v{{ version }}"
-    git push origin "cqrs-es-crypto-derive-v{{ version }}" "cqrs-es-crypto-v{{ version }}"
