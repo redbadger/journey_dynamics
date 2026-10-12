@@ -15,6 +15,9 @@ categories = ["cryptography"]
 proc-macro = true
 doctest = false
 
+[package.metadata.docs.rs]
+all-features = true
+
 [features]
 chrono = []
 

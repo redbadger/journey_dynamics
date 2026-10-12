@@ -494,13 +494,12 @@ fn resolve<'a>(node: &'a Value, defs: Option<&'a serde_json::Map<String, Value>>
             return resolve(target, defs);
         }
     }
-    if let Some(branches) = node.get("anyOf").and_then(Value::as_array) {
-        if let Some(non_null) = branches
+    if let Some(branches) = node.get("anyOf").and_then(Value::as_array)
+        && let Some(non_null) = branches
             .iter()
             .find(|b| b.get("type").and_then(Value::as_str) != Some("null"))
-        {
-            return resolve(non_null, defs);
-        }
+    {
+        return resolve(non_null, defs);
     }
     node
 }
@@ -516,24 +515,25 @@ fn subtree_has_x_subject(
     if node.get("x-subject").is_some() {
         return true;
     }
-    if let Some(reference) = node.get("$ref").and_then(Value::as_str) {
-        if !seen.insert(reference.to_string()) {
-            return false;
-        }
+    if let Some(reference) = node.get("$ref").and_then(Value::as_str)
+        && !seen.insert(reference.to_string())
+    {
+        return false;
     }
     let resolved = resolve(node, defs);
     if resolved.get("x-subject").is_some() {
         return true;
     }
-    if let Some(props) = resolved.get("properties").and_then(Value::as_object) {
-        if props.values().any(|c| subtree_has_x_subject(c, defs, seen)) {
-            return true;
-        }
+    if let Some(props) = resolved.get("properties").and_then(Value::as_object)
+        && props.values().any(|c| subtree_has_x_subject(c, defs, seen))
+    {
+        return true;
     }
-    if let Some(extra) = resolved.get("additionalProperties") {
-        if extra.is_object() && subtree_has_x_subject(extra, defs, seen) {
-            return true;
-        }
+    if let Some(extra) = resolved.get("additionalProperties")
+        && extra.is_object()
+        && subtree_has_x_subject(extra, defs, seen)
+    {
+        return true;
     }
     false
 }

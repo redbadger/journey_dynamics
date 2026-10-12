@@ -96,5 +96,5 @@ wiring examples.
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](../../LICENSE-APACHE) or
-[MIT License](../../LICENSE-MIT) at your option.
+Licensed under either of [Apache License, Version 2.0](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-APACHE) or
+[MIT License](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-MIT) at your option.

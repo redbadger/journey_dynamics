@@ -40,10 +40,10 @@ can be written by hand when you need more.
 ```toml
 [dependencies]
 # With the derive macro (recommended):
-cqrs-es-crypto = { version = "...", features = ["derive"] }
+cqrs-es-crypto = { version = "0.3", features = ["derive"] }
 
 # Without:
-cqrs-es-crypto = { version = "..." }
+cqrs-es-crypto = { version = "0.3" }
 ```
 
 ### 2. Annotate your event enum
@@ -488,10 +488,10 @@ Enable the `testing` feature to use `InMemoryKeyStore` and
 
 ```toml
 [dev-dependencies]
-cqrs-es-crypto = { version = "...", features = ["testing"] }
+cqrs-es-crypto = { version = "0.3", features = ["testing"] }
 
 # Also enable "derive" if you want to use #[derive(PiiCodec)] in tests:
-cqrs-es-crypto = { version = "...", features = ["testing", "derive"] }
+cqrs-es-crypto = { version = "0.3", features = ["testing", "derive"] }
 ```
 
 ```rust
@@ -521,6 +521,9 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
 |---------|---------|-------------|
 | `derive` | | Enables `#[derive(PiiCodec)]` via the `cqrs-es-crypto-derive` proc-macro crate |
 | `chrono` | | Implies `derive`; teaches the derive macro to redact `chrono::NaiveDate` secret fields. Default sentinel is `"0000-01-01"`; override per-field with `#[pii(secret, redact = "...")]` |
+| `postgres` | | `PostgresKeyStore`, the transactional write path and `PersistHook` (sqlx with rustls) |
+| `gcp-kms` | | `GcpKmsKekProvider` — a Google Cloud KMS-backed `KekProvider`; the KEK never leaves KMS (rustls-only `reqwest`) |
+| `blind-index` | | Keyed-HMAC blind indexing to keep an encrypted field queryable (`BlindIndexer`, `BlindIndexSource`, `StaticBlindIndexKeyProvider`). With `postgres`: `BlindIndexHook`. With `gcp-kms`: `GcpKmsBlindIndexKeyProvider`. See [`docs/BLIND_INDEX.md`](https://github.com/redbadger/journey_dynamics/blob/main/docs/BLIND_INDEX.md) |
 | `testing` | | Exposes `InMemoryEventRepository` for use in tests |
 
 ---
@@ -530,8 +533,10 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
 | Module | Contents |
 |--------|----------|
 | `cipher` | `FieldCipher` — stateless AES-256-GCM field encryption; `PiiCipher` (deprecated) |
-| `kek` | `KekProvider` trait, `StaticKekProvider`, `KekHandle`, `WrappedDek` |
+| `kek` | `KekProvider` trait, `StaticKekProvider`, `CompositeKekProvider`, `GcpKmsKekProvider` (`gcp-kms`), `KekHandle`, `WrappedDek` |
 | `key_store` | `KeyStore` trait, `PostgresKeyStore`, `PostgresKeyStoreOptions`, `InMemoryKeyStore` |
+| `caching_key_store` | `CachingKeyStore` / `DekCache` — in-memory plaintext-DEK cache for network-backed KEK providers |
+| `blind_index` | Blind indexing (`blind-index`): `BlindIndexer`, key providers, sources, `BlindIndexHook` |
 | `rewrap` | `RewrapWorker` — background and one-shot DEK re-wrap sweeper |
 | `repository` | `PiiEventCodec` trait, `CryptoShreddingEventRepository`, `InMemoryEventRepository` |
 
@@ -561,3 +566,10 @@ fn make_test_repo() -> CryptoShreddingEventRepository<InMemoryEventRepository> {
   `subject_encryption_keys` still reference that `kek_id`** — those DEKs would
   become permanently unreadable. The application panics at boot if this condition
   is detected. See `docs/KEK_ROTATION_RUNBOOK.md` for the safe rotation procedure.
+
+---
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-APACHE) or
+[MIT License](https://github.com/redbadger/journey_dynamics/blob/main/LICENSE-MIT) at your option.

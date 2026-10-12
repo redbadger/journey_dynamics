@@ -8,4 +8,4 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/redbadger/journey_dynamics"
 authors = ["Red Badger <hello@red-badger.com>"]
-rust-version = "1.85"
+rust-version = "1.89"

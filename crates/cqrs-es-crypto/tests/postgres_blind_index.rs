@@ -45,6 +45,7 @@ impl DomainEvent for TestEvent {
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 struct TestAggregate;
 
+#[allow(clippy::unused_async_trait_impl)] // A stub: the trait is async, its answer is not.
 impl cqrs_es::Aggregate for TestAggregate {
     type Command = ();
     type Event = TestEvent;
@@ -116,10 +117,11 @@ impl PiiEventCodec for TestPiiCodec {
         event: &mut SerializedEvent,
         labels: &[String],
     ) -> Result<(), PiiCodecError> {
-        if event.event_type == "TestPii" && labels.iter().any(|l| l == "default") {
-            if let Some(obj) = event.payload["TestPii"].as_object_mut() {
-                obj.insert("secret".to_string(), serde_json::json!("[redacted]"));
-            }
+        if event.event_type == "TestPii"
+            && labels.iter().any(|l| l == "default")
+            && let Some(obj) = event.payload["TestPii"].as_object_mut()
+        {
+            obj.insert("secret".to_string(), serde_json::json!("[redacted]"));
         }
         Ok(())
     }
