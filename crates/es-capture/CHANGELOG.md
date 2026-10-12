@@ -5,11 +5,12 @@ All notable changes to `es-capture` will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-> `es-capture` is an internal workspace crate (`publish = false`). It was
-> extracted from the Journey domain in `journey_dynamics`; see that crate's
-> history for the pre-extraction lineage of these types.
+> `es-capture` was extracted from the Journey domain in `journey_dynamics`;
+> see that crate's history for the pre-extraction lineage of these types.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-12
 
 ### Added
 
@@ -72,7 +73,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DecisionEngine` trait plus `WorkflowDecision`, an in-process
   `SimpleDecisionEngine`, and a `GoRulesDecisionEngine` that evaluates a
   compiled GoRules JDM (`zen-engine`) model on a thread-pinned worker pool.
-  When configured, `SetAttributes` also emits `WorkflowEvaluated`.
+  `GoRulesDecisionEngine::new` returns an error for a malformed JDM, and
+  evaluation returns an error for a graph whose result isn't an object; neither
+  panics. When configured, `SetAttributes` also emits `WorkflowEvaluated`.
 
 - **`SchemaValidator`** (`schema_validator` module) — the `SchemaValidator`
   trait with `NoOpValidator` and a `jsonschema`-backed `JsonSchemaValidator`.
@@ -83,3 +86,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`json_path` helpers** — `flatten` (a `serde_json::Value` tree → a flat
   `PointerBuf → Value` map) and `assign_all` (a flat map → a tree).
+
+- **Re-exports** of `cqrs_es`, `cqrs_es_crypto` and `jsonptr`, whose types
+  appear in the public API.
+
+[Unreleased]: https://github.com/redbadger/journey_dynamics/compare/es-capture-v0.1.0...HEAD
+[0.1.0]: https://github.com/redbadger/journey_dynamics/releases/tag/es-capture-v0.1.0

@@ -425,33 +425,29 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
             // New shape: encrypted_partitions array present.
             if let Some(arr) = event.payload[event_type]["encrypted_partitions"].as_array() {
                 for p in arr {
-                    if let Some(s) = p["subject_id"].as_str() {
-                        if let Ok(id) = Uuid::parse_str(s) {
-                            if let std::collections::hash_map::Entry::Vacant(e) =
-                                dek_cache.entry(id)
-                            {
-                                let dek = self
-                                    .key_store
-                                    .get_key(&id)
-                                    .await
-                                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-                                e.insert(dek);
-                            }
-                        }
+                    if let Some(s) = p["subject_id"].as_str()
+                        && let Ok(id) = Uuid::parse_str(s)
+                        && let std::collections::hash_map::Entry::Vacant(e) = dek_cache.entry(id)
+                    {
+                        let dek = self
+                            .key_store
+                            .get_key(&id)
+                            .await
+                            .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                        e.insert(dek);
                     }
                 }
             // Legacy shape: single inline ciphertext.
-            } else if let Some(extract) = self.codec.extract_encrypted_legacy(event) {
-                if let std::collections::hash_map::Entry::Vacant(e) =
+            } else if let Some(extract) = self.codec.extract_encrypted_legacy(event)
+                && let std::collections::hash_map::Entry::Vacant(e) =
                     dek_cache.entry(extract.subject_id)
-                {
-                    let dek = self
-                        .key_store
-                        .get_key(&extract.subject_id)
-                        .await
-                        .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
-                    e.insert(dek);
-                }
+            {
+                let dek = self
+                    .key_store
+                    .get_key(&extract.subject_id)
+                    .await
+                    .map_err(|e| PersistenceError::UnknownError(Box::new(e)))?;
+                e.insert(dek);
             }
         }
 
@@ -573,10 +569,10 @@ impl<R: PersistedEventRepository> CryptoShreddingEventRepository<R> {
 /// aggregate. All other database errors fall through to `UnknownError`.
 #[cfg(feature = "postgres")]
 fn map_sqlx_error(err: sqlx::Error) -> PersistenceError {
-    if let sqlx::Error::Database(db_err) = &err {
-        if db_err.code().as_deref() == Some("23505") {
-            return PersistenceError::OptimisticLockError;
-        }
+    if let sqlx::Error::Database(db_err) = &err
+        && db_err.code().as_deref() == Some("23505")
+    {
+        return PersistenceError::OptimisticLockError;
     }
     PersistenceError::UnknownError(Box::new(err))
 }
@@ -1185,16 +1181,16 @@ mod tests {
             if event.event_type != "TestPii" {
                 return Ok(());
             }
-            if labels.iter().any(|l| l == "default") {
-                if let Some(obj) = event.payload["TestPii"].as_object_mut() {
-                    // Strip legacy sentinel fields (no-op for new-format events).
-                    obj.remove("encrypted_pii");
-                    obj.remove("nonce");
-                    obj.insert(
-                        "secret".to_string(),
-                        Value::String("[redacted]".to_string()),
-                    );
-                }
+            if labels.iter().any(|l| l == "default")
+                && let Some(obj) = event.payload["TestPii"].as_object_mut()
+            {
+                // Strip legacy sentinel fields (no-op for new-format events).
+                obj.remove("encrypted_pii");
+                obj.remove("nonce");
+                obj.insert(
+                    "secret".to_string(),
+                    Value::String("[redacted]".to_string()),
+                );
             }
             Ok(())
         }

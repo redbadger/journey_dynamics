@@ -78,21 +78,22 @@ pub struct GoRulesDecisionEngine {
 }
 
 impl GoRulesDecisionEngine {
-    /// # Panics
+    /// Load and compile a JDM decision graph.
     ///
-    /// Panics if `json` cannot be deserialized as a [`DecisionContent`].
-    #[must_use]
-    pub fn new(json: &str) -> Self {
-        let mut decision_content: DecisionContent = serde_json::from_str(json).unwrap();
+    /// # Errors
+    ///
+    /// Returns an error if `json` cannot be deserialized as a [`DecisionContent`].
+    pub fn new(json: &str) -> Result<Self, serde_json::Error> {
+        let mut decision_content: DecisionContent = serde_json::from_str(json)?;
         // Compile once at startup: pre-computes all expression bytecodes into
         // an OpcodeCache stored inside DecisionContent.  Every Decision created
         // from this Arc will carry the compiled cache, so no per-request
         // compilation is needed.
         decision_content.compile();
-        Self {
+        Ok(Self {
             engine: Arc::new(ZenEngine::default()),
             decision_content: Arc::new(decision_content),
-        }
+        })
     }
 }
 
@@ -132,7 +133,9 @@ impl GoRulesDecisionEngine {
         })?;
 
         let DecisionGraphResponse { result, .. } = serde_json::from_value(result)?;
-        let unwrapped_map = result.as_object().unwrap();
+        let unwrapped_map = result
+            .as_object()
+            .ok_or("decision graph result is not an object")?;
         let take = unwrapped_map.take();
 
         let suggested_actions: Vec<String> = take

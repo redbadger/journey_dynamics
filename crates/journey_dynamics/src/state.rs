@@ -36,7 +36,9 @@ pub fn load_decision_engine() -> std::sync::Arc<GoRulesDecisionEngine> {
         .expect("JOURNEY_DECISION_ENGINE_PATH environment variable must be set");
     let content = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("JOURNEY_DECISION_ENGINE_PATH={path:?}: cannot read file: {e}"));
-    std::sync::Arc::new(GoRulesDecisionEngine::new(&content))
+    let engine = GoRulesDecisionEngine::new(&content)
+        .unwrap_or_else(|e| panic!("JOURNEY_DECISION_ENGINE_PATH={path:?}: cannot parse JDM: {e}"));
+    std::sync::Arc::new(engine)
 }
 
 /// Load a [`JsonSchemaValidator`] from the path named by

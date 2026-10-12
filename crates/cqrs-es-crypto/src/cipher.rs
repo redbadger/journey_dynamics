@@ -8,8 +8,8 @@
 //! "crypto-shredding": the PII becomes irrecoverable without touching individual events.
 
 use aes_gcm::{
-    Aes256Gcm, KeyInit, Nonce,
-    aead::{Aead, AeadCore, OsRng, Payload},
+    Aes256Gcm, Key, KeyInit,
+    aead::{Aead, Generate, Nonce, Payload},
 };
 use aes_kw::{KeyInit as KwpKeyInit, KwpAes256};
 use uuid::Uuid;
@@ -97,7 +97,7 @@ impl PiiCipher {
     /// Generate a fresh random 256-bit DEK (Data Encryption Key) using the OS CSPRNG.
     #[must_use]
     pub fn generate_dek() -> KeyMaterial {
-        let key = Aes256Gcm::generate_key(OsRng);
+        let key = Key::<Aes256Gcm>::generate();
         KeyMaterial {
             key_id: Uuid::new_v4(),
             key: Zeroizing::new(key.to_vec()),
@@ -115,10 +115,11 @@ impl PiiCipher {
     /// Panics if `dek.key` is not exactly 32 bytes — this is an invariant of [`KeyMaterial`]
     /// and is always satisfied when keys are produced by [`PiiCipher::generate_dek`] or
     /// [`PiiCipher::unwrap_dek`].
+    #[must_use]
     pub fn encrypt(&self, dek: &KeyMaterial, plaintext: &[u8], aad: &[u8]) -> EncryptedPayload {
         let cipher = Aes256Gcm::new_from_slice(&dek.key)
             .expect("DEK is always 32 bytes — invariant of KeyMaterial");
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = cipher
             .encrypt(
                 &nonce,
@@ -138,8 +139,9 @@ impl PiiCipher {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::DecryptionFailed`] if the authentication tag is invalid or the
-    /// supplied `aad` does not match the `aad` that was used during encryption.
+    /// Returns [`CryptoError::DecryptionFailed`] if the authentication tag is invalid, the
+    /// supplied `aad` does not match the `aad` that was used during encryption, or the
+    /// stored nonce is not 12 bytes.
     ///
     /// # Panics
     ///
@@ -152,10 +154,13 @@ impl PiiCipher {
     ) -> Result<Vec<u8>, CryptoError> {
         let cipher = Aes256Gcm::new_from_slice(&dek.key)
             .expect("DEK is always 32 bytes — invariant of KeyMaterial");
-        let nonce = Nonce::from_slice(&encrypted.nonce);
+        // The nonce is read back from storage, so a wrong length is corrupt
+        // input rather than a broken invariant.
+        let nonce = Nonce::<Aes256Gcm>::try_from(encrypted.nonce.as_slice())
+            .map_err(|_| CryptoError::DecryptionFailed)?;
         cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: &encrypted.ciphertext,
                     aad,
@@ -242,7 +247,7 @@ impl FieldCipher {
     /// Generate a fresh random 256-bit DEK using the OS CSPRNG.
     #[must_use]
     pub fn generate_dek() -> KeyMaterial {
-        let key = Aes256Gcm::generate_key(OsRng);
+        let key = Key::<Aes256Gcm>::generate();
         KeyMaterial {
             key_id: Uuid::new_v4(),
             key: Zeroizing::new(key.to_vec()),
@@ -258,10 +263,11 @@ impl FieldCipher {
     /// # Panics
     ///
     /// Panics if `dek.key` is not exactly 32 bytes.
+    #[must_use]
     pub fn encrypt(&self, dek: &KeyMaterial, plaintext: &[u8], aad: &[u8]) -> EncryptedPayload {
         let cipher = Aes256Gcm::new_from_slice(&dek.key)
             .expect("DEK is always 32 bytes — invariant of KeyMaterial");
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
+        let nonce = Nonce::<Aes256Gcm>::generate();
         let ciphertext = cipher
             .encrypt(
                 &nonce,
@@ -281,8 +287,9 @@ impl FieldCipher {
     ///
     /// # Errors
     ///
-    /// Returns [`CryptoError::DecryptionFailed`] if the authentication tag is invalid or
-    /// the supplied `aad` does not match the `aad` used during encryption.
+    /// Returns [`CryptoError::DecryptionFailed`] if the authentication tag is invalid,
+    /// the supplied `aad` does not match the `aad` used during encryption, or the stored
+    /// nonce is not 12 bytes.
     ///
     /// # Panics
     ///
@@ -295,10 +302,13 @@ impl FieldCipher {
     ) -> Result<Vec<u8>, CryptoError> {
         let cipher = Aes256Gcm::new_from_slice(&dek.key)
             .expect("DEK is always 32 bytes — invariant of KeyMaterial");
-        let nonce = Nonce::from_slice(&encrypted.nonce);
+        // The nonce is read back from storage, so a wrong length is corrupt
+        // input rather than a broken invariant.
+        let nonce = Nonce::<Aes256Gcm>::try_from(encrypted.nonce.as_slice())
+            .map_err(|_| CryptoError::DecryptionFailed)?;
         cipher
             .decrypt(
-                nonce,
+                &nonce,
                 Payload {
                     msg: &encrypted.ciphertext,
                     aad,

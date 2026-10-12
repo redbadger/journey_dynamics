@@ -20,9 +20,12 @@ use jsonptr::PointerBuf;
 type JourneyTester = TestFramework<Journey>;
 
 fn create_journey_services() -> JourneyServices {
-    let decision_engine = Arc::new(GoRulesDecisionEngine::new(include_str!(
-        "../jdm-models/flight-booking-orchestrator.jdm.json"
-    )));
+    let decision_engine = Arc::new(
+        GoRulesDecisionEngine::new(include_str!(
+            "../jdm-models/flight-booking-orchestrator.jdm.json"
+        ))
+        .unwrap(),
+    );
     let schema: serde_json::Value =
         serde_json::from_str(include_str!("../schemas/flight-booking-schema.json")).unwrap();
     let schema_validator = Arc::new(JsonSchemaValidator::new(&schema).unwrap());

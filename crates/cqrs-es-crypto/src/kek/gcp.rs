@@ -65,10 +65,10 @@ impl TokenSource {
     async fn token(&self) -> Result<String, KekError> {
         {
             let guard = self.cached.read().await;
-            if let Some(t) = guard.as_ref() {
-                if t.expires_at > Instant::now() {
-                    return Ok(t.token.clone());
-                }
+            if let Some(t) = guard.as_ref()
+                && t.expires_at > Instant::now()
+            {
+                return Ok(t.token.clone());
             }
         }
         self.fetch().await

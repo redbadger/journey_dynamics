@@ -64,10 +64,11 @@ docs:
 # Lint, build, test, run the HR example, and run hurl tests (needs a running server)
 ci: lint docs build test run-hr test-hurl
 
-# Publish cqrs-es-crypto-derive and cqrs-es-crypto to crates.io
+# Publish cqrs-es-crypto-derive, cqrs-es-crypto and es-capture to crates.io
 publish:
     cargo publish -p cqrs-es-crypto-derive
     cargo publish -p cqrs-es-crypto
+    cargo publish -p es-capture
     git tag "cqrs-es-crypto-derive-v{{ version }}"
     git tag "cqrs-es-crypto-v{{ version }}"
     git push origin "cqrs-es-crypto-derive-v{{ version }}" "cqrs-es-crypto-v{{ version }}"

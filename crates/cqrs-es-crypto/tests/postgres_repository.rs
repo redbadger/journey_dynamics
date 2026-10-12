@@ -130,15 +130,15 @@ impl PiiEventCodec for TestPiiCodec {
         if event.event_type != "TestPii" {
             return Ok(());
         }
-        if labels.iter().any(|l| l == "default") {
-            if let Some(obj) = event.payload["TestPii"].as_object_mut() {
-                obj.remove("encrypted_pii");
-                obj.remove("nonce");
-                obj.insert(
-                    "secret".to_string(),
-                    serde_json::Value::String("[redacted]".to_string()),
-                );
-            }
+        if labels.iter().any(|l| l == "default")
+            && let Some(obj) = event.payload["TestPii"].as_object_mut()
+        {
+            obj.remove("encrypted_pii");
+            obj.remove("nonce");
+            obj.insert(
+                "secret".to_string(),
+                serde_json::Value::String("[redacted]".to_string()),
+            );
         }
         Ok(())
     }

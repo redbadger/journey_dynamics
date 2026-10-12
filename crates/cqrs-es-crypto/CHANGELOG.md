@@ -7,10 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.3.0] - 2026-05-27
+## [0.3.0] - 2026-10-12
+
+### Changed (breaking — dependencies)
+
+- The `postgres` feature now builds `sqlx` with `runtime-tokio-rustls`
+  instead of `runtime-tokio-native-tls`, so the crate no longer links system
+  OpenSSL. Consumers that relied on the native-TLS backend arriving through
+  this crate must enable it on their own `sqlx` dependency.
+- Minimum supported Rust version is now 1.89 (was 1.85).
+- `aes-gcm` 0.10 → 0.11 (the RustCrypto `aead` 0.6 generation). It now shares
+  `aes` 0.9 with `aes-kw` instead of linking a second copy. The ciphertext
+  format is unchanged.
 
 ### Changed (breaking — write path)
 
+- `CryptoShreddingEventRepository::persist` now returns an error when a
+  `PersistHook` is registered but `with_transactional_writes` has not been
+  called. Previously the hook was silently skipped.
 - The on-disk encrypted-event envelope is now a list of subject-scoped
   partitions (`encrypted_partitions: [{subject_id, label, nonce, ciphertext}]`)
   with a plaintext peer array (`subjects: [uuid, …]`), replacing the previous
@@ -31,6 +45,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `PiiCodecError` — error type returned by `PiiEventCodec` methods.
 - Per-partition independent decryption: a single event may have some partitions
   decrypted and some redacted simultaneously.
+- `gcp-kms` feature: `GcpKmsKekProvider`, a `KekProvider` backed by a Google
+  Cloud KMS `ENCRYPT_DECRYPT` key. The KEK never leaves KMS, and access tokens
+  come from the GCE / Cloud Run metadata server via `TokenSource`. Uses a
+  rustls-only `reqwest`.
+- `CompositeKekProvider`, which wraps new DEKs under a primary provider and
+  unwraps under whichever provider owns the stored `kek_id`. It is the
+  primitive for a zero-downtime move between providers, for example from
+  `StaticKekProvider` to `GcpKmsKekProvider`.
+- `CachingKeyStore` / `DekCache`, an in-memory plaintext-DEK cache in front of
+  any `KeyStore`, for network-backed KEK providers. It evicts on `delete_key`.
+  Eviction on `delete_key_in_tx` is best-effort, so the transaction's owner
+  must also call `DekCache::remove` after commit.
+- `blind-index` feature: keyed-HMAC blind indexing, which keeps an encrypted
+  field queryable through a deterministic lookup key. Adds `BlindIndexer`,
+  `BlindIndexKeyProvider` with `StaticBlindIndexKeyProvider`,
+  `BlindIndexSource` with `FieldSource` and `AttributesSetSource`, and
+  `canonicalize` / `to_hex`. With `postgres` it adds `BlindIndexHook`, a
+  `PersistHook` that maintains the lookup table. With `gcp-kms` it adds
+  `GcpKmsBlindIndexKeyProvider`, which uses KMS `macSign`. See
+  [`docs/BLIND_INDEX.md`](https://github.com/redbadger/journey_dynamics/blob/main/docs/BLIND_INDEX.md).
+
+### Fixed
+
+- `FieldCipher::decrypt` / `PiiCipher::decrypt` return
+  `CryptoError::DecryptionFailed` for a stored nonce that is not 12 bytes,
+  instead of panicking.
 
 ### Backward compatibility
 
